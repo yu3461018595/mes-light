@@ -615,7 +615,7 @@ route('GET', '/api/qr/order/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) =
   const o = get('SELECT o.id,o.code,p.name product_name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   const token = qrToken('order', o.id);
-  const url = baseUrl(req) + '/m/report?o=' + o.id + '&t=' + token;
+  const url = baseUrl(req) + '/m/index.html?o=' + o.id + '&t=' + token;
   ok(res, { order: { id: o.id, code: o.code, product_name: o.product_name }, token, url, svg: makeQr(url) });
 });
 
@@ -624,7 +624,7 @@ route('GET', '/api/qr/worker/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) 
   const w = get('SELECT id,name,team FROM users WHERE id=?', [m[1]]);
   if (!w) return fail(res, '员工不存在', 404);
   const token = qrToken('worker', w.id);
-  const url = baseUrl(req) + '/m/report?w=' + w.id + '&t=' + token;
+  const url = baseUrl(req) + '/m/index.html?w=' + w.id + '&t=' + token;
   ok(res, { worker: w, token, url, svg: makeQr(url) });
 });
 
