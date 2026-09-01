@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: mes-light
+    runtime: node
+    plan: starter
+    buildCommand: "echo 'no build step (zero-dependency node app)'"
+    startCommand: "node server.js"
+    healthCheckPath: "/"
+    envVars:
+      - key: PORT
+        value: "3000"
+    # 持久化说明：
+    #  Render 的 Web 服务磁盘默认只读/随部署重置，SQLite 数据会丢失。
+    #  真实使用请在 Render 控制台为该服务挂载一块「持久磁盘」并挂载到 /app/data，
+    #  或在变量里把 DB 指向挂载路径（本项目数据目录固定为 <项目根>/data，挂载到此即可）。

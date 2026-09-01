@@ -1,0 +1,136 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "username": "admin",
+      "name": "张建国",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "admin",
+      "team": "厂部",
+      "work_center_id": null,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 2,
+      "username": "leader1",
+      "name": "李伟",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "leader",
+      "team": "甲班",
+      "work_center_id": null,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 3,
+      "username": "leader2",
+      "name": "陈静",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "leader",
+      "team": "乙班",
+      "work_center_id": null,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 4,
+      "username": "worker1",
+      "name": "王强",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "甲班",
+      "work_center_id": 1,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 5,
+      "username": "worker2",
+      "name": "刘洋",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "乙班",
+      "work_center_id": 2,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 6,
+      "username": "worker3",
+      "name": "赵敏",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "甲班",
+      "work_center_id": 3,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 7,
+      "username": "worker4",
+      "name": "孙磊",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "乙班",
+      "work_center_id": 4,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 8,
+      "username": "worker5",
+      "name": "周涛",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "甲班",
+      "work_center_id": 5,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 9,
+      "username": "worker6",
+      "name": "吴娜",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "乙班",
+      "work_center_id": 6,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 10,
+      "username": "worker7",
+      "name": "郑凯",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "甲班",
+      "work_center_id": 1,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    },
+    {
+      "id": 11,
+      "username": "worker8",
+      "name": "冯莉",
+      "password": "e64bb9c51c47f6405f30a44cfd71c70444cc9f57353805e18e07bf876acc209c",
+      "role": "worker",
+      "team": "乙班",
+      "work_center_id": 2,
+      "active": 1,
+      "created_at": "2026-08-31 02:09:39"
+    }
+  ],
+  "customers": [],
+  "processes": [],
+  "work_centers": [],
+  "products": [],
+  "routes": [],
+  "route_steps": [],
+  "bad_reasons": [],
+  "orders": [],
+  "order_steps": [],
+  "reports": [],
+  "logs": []
+}

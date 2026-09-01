@@ -1,0 +1,15 @@
+{
+  "name": "mes-light",
+  "version": "1.0.0",
+  "description": "类黑湖小工单的轻量生产管理系统（Node + SQLite，零第三方依赖）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "smoke": "node smoke.js",
+    "smoke:qr": "node smoke_qr.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}
