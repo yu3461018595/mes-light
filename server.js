@@ -100,6 +100,10 @@ function checkQrToken(token, type, id) {
   return exp.length === got.length && crypto.timingSafeEqual(exp, got);
 }
 function baseUrl(req) {
+  // 优先使用显式配置的公网域名（如已 ICP 备案的自定义域名），
+  // 避免经过反向代理/负载均衡时取到内部 host，导致二维码链接域名错误、微信无法直接打开。
+  const forced = process.env.PUBLIC_BASE_URL;
+  if (forced) return forced.replace(/\/+$/, '');
   const h = req.headers.host || 'localhost';
   const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() || 'http';
   return proto + '://' + h;
