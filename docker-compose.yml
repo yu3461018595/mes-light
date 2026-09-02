@@ -1,0 +1,20 @@
+# MES-Light 生产部署（腾讯云轻量应用服务器 / 任意 Linux + Docker）
+# 用法：先把下方的 PUBLIC_BASE_URL 改成你的「已备案域名」（必须 https），再 `docker compose up -d`
+services:
+  mes:
+    build: .
+    image: mes-light:latest
+    container_name: mes-light
+    restart: unless-stopped
+    # 仅监听本机回环，由 Nginx 反代（HTTPS）对外暴露
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATA_DIR=/app/data
+      # ↓↓↓ 改成你的已备案域名（必须 https，微信才信任、扫码才能直接打开）↓↓↓
+      - PUBLIC_BASE_URL=https://CHANGE-ME.example.com
+    volumes:
+      # 绑定挂载到宿主机 ./data，便于迁移/备份（直接拷 mes.db 即可）
+      - ./data:/app/data
