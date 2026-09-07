@@ -3,26 +3,35 @@ window.Views = window.Views || {};
 Views.dashboard = {
   title: '生产看板',
   icon: 'dash',
+  _gen: 0,
   async render(el) {
     el.innerHTML = `<div class="empty">${UI.icon('clock')}<div>加载中…</div></div>`;
-    const [ov, trend, bad, rank, running, wcs] = await Promise.all([
-      API.get('/stats/overview'),
-      API.get('/stats/trend?days=14'),
-      API.get('/stats/bad?days=14'),
-      API.get('/stats/ranking?days=7'),
-      API.get('/orders?status=running,paused'),
-      API.get('/work_centers'),
-    ]);
+    const gen = ++this._gen;     // 每次进入自增；切走后旧定时器渲染会被守卫拦截
+    const REFRESH_MS = 30000;    // 每 30 秒自动刷新，解决“数据不及时更新”
 
-    const yieldCls = ov.yield >= 98 ? 'ok' : ov.yield >= 95 ? '' : 'danger';
-    const d = new Date();
-    const dateStr = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 星期${'日一二三四五六'[d.getDay()]}`;
+    const draw = async () => {
+      if (gen !== this._gen) return;   // 已切到别的页面，放弃本次渲染
+      const [ov, trend, bad, rank, running, wcs] = await Promise.all([
+        API.get('/stats/overview'),
+        API.get('/stats/trend?days=14'),
+        API.get('/stats/bad?days=14'),
+        API.get('/stats/ranking?days=7'),
+        API.get('/orders?status=running,paused'),
+        API.get('/work_centers'),
+      ]);
+      if (gen !== this._gen) return;
 
-    el.innerHTML = `
+      const yieldCls = ov.yield >= 98 ? 'ok' : ov.yield >= 95 ? '' : 'danger';
+      const d = new Date();
+      const dateStr = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 星期${'日一二三四五六'[d.getDay()]}`;
+      const now = new Date();
+      const updStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+      el.innerHTML = `
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <div>
           <div style="font-size:19px;font-weight:700">生产看板</div>
-          <div class="small muted">${dateStr} · 数据实时来自报工记录</div>
+          <div class="small muted">${dateStr} · 数据实时来自报工记录 · 每30秒刷新（${updStr}）</div>
         </div>
         <button class="btn btn-primary" id="quickReport">${UI.icon('report')}快速报工</button>
       </div>
@@ -113,8 +122,15 @@ Views.dashboard = {
         </div>
       </div>`;
 
-    el.querySelector('#quickReport').onclick = () => location.hash = '#/report';
-    el.querySelector('#allOrders').onclick = () => location.hash = '#/orders';
-    el.querySelectorAll('[data-order]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.order);
+      el.querySelector('#quickReport').onclick = () => location.hash = '#/report';
+      el.querySelector('#allOrders').onclick = () => location.hash = '#/orders';
+      el.querySelectorAll('[data-order]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.order);
+    };
+
+    await draw();
+    // 启动自动刷新；gen 守卫确保切走后不再渲染
+    if (gen === this._gen) {
+      App._dashTimer = setInterval(() => { if (gen === this._gen) draw().catch(() => {}); }, REFRESH_MS);
+    }
   },
 };

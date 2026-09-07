@@ -215,7 +215,8 @@ textarea.input{min-height:64px;resize:vertical}
 .scan-row input{font-size:16px;height:44px}
 
 /* ---------- 图表 ---------- */
-.chart{width:100%;overflow:visible;display:block}
+/* 必须显式给 height:auto，否则被全局 svg{height:20px} 压成 20px 高，图表不可见 */
+.chart{width:100%;height:auto;display:block;overflow:visible}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text2);margin-top:10px;justify-content:center}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
 

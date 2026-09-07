@@ -16,6 +16,7 @@ window.App = {
 
   /* ---------- 渲染 ---------- */
   render() {
+    if (App._dashTimer) { clearInterval(App._dashTimer); App._dashTimer = null; } // 清掉上一个看板的自动刷新
     const hash = location.hash.replace(/^#\/?/, '') || 'dashboard';
     const parts = hash.split('/').filter(Boolean);
     const key = parts[0];
