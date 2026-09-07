@@ -1,59 +1,78 @@
-// MES-Light 数据迁移（兜底方案）：从 Railway 备份 JSON 导入到本地 SQLite
-// 优先做法其实是直接把旧服务器的 mes.db 拷到 ./data/mes.db（见 runbook），本脚本仅作兜底。
+#!/usr/bin/env node
+// MES-Light 数据迁移：把备份 JSON 导入到 SQLite 库
 //
 // 用法（在仓库根目录执行）：
-//   node deploy/migrate_db.cjs /path/to/mes_live_backup_YYYYMMDD.json
+//   node deploy/migrate_db.cjs /path/to/backup.json            // 增量导入（INSERT OR IGNORE）
+//   node deploy/migrate_db.cjs /path/to/backup.json --clean    // 先清空业务表再导入（推荐，结果与旧库一致）
 //
-// 说明：
-//  - 复用 lib/db.js（同源 schema），按 PRAGMA 取真实列名，只插存在的列，避免 JOIN 派生字段报错。
-//  - 备份 JSON 不含密码，导入后统一把全部用户密码重置为 123456，请上线后立即修改。
-//  - 备份可能不含 route_steps 等表，属正常，导入后请在页面核对路由/工序是否完整。
+// 关键顺序：**必须在应用首次启动前执行**。
+//   server.js 启动时会调用 seed()，若 users 表为空会灌入 12 张演示工单等演示数据。
+//   先导入真实数据（users 非空）→ seed() 自动跳过演示数据。
+//   若已经先启动过容器、混入了演示数据，加 --clean 重跑一次即可清干净。
+//
+// 备份 JSON 由 export_live.py 生成，键对应下方 map 的表名。
 
 const path = require('path');
-const { db, all, run, hashPassword } = require('./lib/db.js');
+const { db, all, run, hashPassword } = require('../lib/db.js');
 
 const file = process.argv[2];
+const clean = process.argv.includes('--clean');
 if (!file) {
-  console.error('用法: node deploy/migrate_db.cjs backup.json');
+  console.error('用法: node deploy/migrate_db.cjs backup.json [--clean]');
   process.exit(1);
 }
 const data = require(path.resolve(file));
 
-// 备份键名 -> 表名（与 lib/db.js 中 CREATE TABLE 一致）
+// 备份键名 -> 表名（与 lib/db.js 的 CREATE TABLE 一致）
 const map = {
   users: 'users',
   customers: 'customers',
   processes: 'processes',
   work_centers: 'work_centers',
   products: 'products',
+  bad_reasons: 'bad_reasons',
   routes: 'routes',
   route_steps: 'route_steps',
   orders: 'orders',
   order_steps: 'order_steps',
   reports: 'reports',
-  logs: 'logs'
+  logs: 'logs',
 };
 
 function colsOf(table) {
   return all(`PRAGMA table_info(${table})`).map((r) => r.name);
 }
 
+if (clean) {
+  console.log('清空既有数据（--clean）…');
+  // 按外键依赖顺序删除
+  const order = ['reports', 'order_steps', 'orders', 'route_steps', 'routes',
+    'logs', 'sessions', 'bad_reasons', 'products', 'processes', 'work_centers', 'customers', 'users'];
+  run('BEGIN');
+  for (const t of order) {
+    try { run(`DELETE FROM ${t}`); } catch (e) { /* 表不存在则跳过 */ }
+  }
+  run('COMMIT');
+}
+
 let total = 0;
+run('BEGIN');
 for (const [key, table] of Object.entries(map)) {
   const rows = data[key] || [];
   if (!rows.length) continue;
   const cols = colsOf(table);
-  const placeholders = cols.map(() => '?').join(',');
-  const stmt = db.prepare(`INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`);
-  run('BEGIN');
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
+  let n = 0;
   for (const row of rows) {
-    const vals = cols.map((c) => (c in row ? row[c] : null));
-    stmt.run(...vals);
-    total++;
+    stmt.run(...cols.map((c) => (c in row ? row[c] : null)));
+    n++;
   }
-  run('COMMIT');
-  console.log(`  ${table}: ${rows.length} 行`);
+  console.log(`  ${table}: ${n} 行`);
+  total += n;
 }
+run('COMMIT');
 
 run('UPDATE users SET password=?', [hashPassword('123456')]);
-console.log(`导入完成，共 ${total} 行。所有用户密码已重置为 123456，请尽快修改默认密码。`);
+console.log(`导入完成，共 ${total} 行。`);
+console.log('注意：所有用户密码已统一重置为 123456，请登录后立即修改。');

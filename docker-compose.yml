@@ -1,5 +1,9 @@
 # MES-Light 生产部署（腾讯云轻量应用服务器 / 任意 Linux + Docker）
-# 用法：先把下方的 PUBLIC_BASE_URL 改成你的「已备案域名」（必须 https），再 `docker compose up -d`
+#
+# PUBLIC_BASE_URL 由 .env 提供（未设置时回退到本机回环），决定扫码链接的域名：
+#   阶段一（无域名）：.env 写 PUBLIC_BASE_URL=http://公网IP:8080
+#   阶段二（已备案）：.env 写 PUBLIC_BASE_URL=https://你的域名   ← 微信扫码才能直接打开
+# deploy/deploy_centos.sh 会自动生成 .env。
 services:
   mes:
     build: .
@@ -13,8 +17,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - DATA_DIR=/app/data
-      # ↓↓↓ 改成你的已备案域名（必须 https，微信才信任、扫码才能直接打开）↓↓↓
-      - PUBLIC_BASE_URL=https://CHANGE-ME.example.com
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://127.0.0.1:3000}
     volumes:
       # 绑定挂载到宿主机 ./data，便于迁移/备份（直接拷 mes.db 即可）
       - ./data:/app/data
