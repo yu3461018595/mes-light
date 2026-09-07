@@ -639,7 +639,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
     && get('SELECT 1 c FROM order_steps WHERE order_id=? AND assignee_id=?', [m[1], num(q.wid)]);
   if (!orderOk && !workerOk) return fail(res, '二维码已失效或无权限', 403);
   const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
-      (SELECT COALESCE(SUM(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
+      (SELECT COALESCE(MIN(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
@@ -655,7 +655,7 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
   const w = get('SELECT id,name,team FROM users WHERE id=?', [m[1]]);
   if (!w) return fail(res, '员工不存在', 404);
   const orders = all(`SELECT o.id,o.code,o.status,o.qty_plan,
-      (SELECT COALESCE(SUM(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
+      (SELECT COALESCE(MIN(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name
      FROM orders o JOIN products p ON p.id=o.product_id
