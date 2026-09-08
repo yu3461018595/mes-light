@@ -14,7 +14,8 @@
 //      若用 INSERT OR IGNORE，失败行会被**静默丢弃**，导致 users 表为空，
 //      随后 orders.created_by 找不到父记录，报成 FOREIGN KEY constraint failed —— 表象与真因相隔好几张表。
 //      现改为：NOT NULL 且无默认值的列自动补兜底值（password 补 123456 的哈希）。
-//   2) 不再使用 INSERT OR IGNORE，改为 INSERT OR REPLACE（幂等，可重复执行）+ 逐行捕获，
+//   2) 不再使用 INSERT OR IGNORE，改为 ON CONFLICT(id) DO UPDATE 的 upsert
+//      （幂等可重复执行、且不删行不触发级联删除）+ 逐行捕获，
 //      任何失败都会打印明细并在结束时汇总告警。
 //   3) 导入结束执行 PRAGMA foreign_key_check 做完整性校验。
 
