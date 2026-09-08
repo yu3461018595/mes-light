@@ -207,7 +207,7 @@ Views.orders = {
             { t: '序', f: (r) => `<span class="mono muted">${r.seq}</span>` },
             { t: '工序', f: (r) => `<b>${UI.esc(r.process_name)}</b><div class="small muted">${UI.esc(r.process_code)}</div>` },
             { t: '工作中心', f: (r) => UI.esc(r.wc_name || '—') },
-            { t: '责任人', f: (r) => UI.esc(r.assignee_name || '<span class="muted">暂无</span>') },
+            { t: '责任人', f: (r) => r.assignee_name ? UI.esc(r.assignee_name) : '<span class="muted">暂无</span>' },
             { t: '合格', f: (r) => `<span class="mono">${UI.n2(r.qty_good)}</span>` },
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${r.qty_bad ? UI.n2(r.qty_bad) : '0'}</span>` },
             { t: '进度', w: '130px', f: (r) => `<div class="row" style="gap:8px;flex-wrap:nowrap">

@@ -126,9 +126,11 @@ users 18 / routes 4 / route_steps 20 / orders 2 / order_steps 8 / reports 4
 若工单里出现 12 张演示工单，说明先启动了容器、后导入数据，重跑一次即可（注意**必须重新 build**，原因见 4.5）：
 
 ```bash
+# 项目实际位于 /opt/mes-light（不是 ~/mes-light），务必用绝对路径
 cd /opt/mes-light
-git pull                 # 1. 拉取修复后的迁移脚本
-docker compose stop      # 2. 停容器，避免它继续 seed 演示数据
+git pull                 # 1. 拉取修复后的迁移脚本（拉不到用文档 3.1 的 codeload 兜底）
+# 2. 先停并删除旧容器，避免容器名 mes-light 冲突（stop 只停不删，up 时仍可能报重名）
+docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml down || docker rm -f mes-light
 docker compose build     # 3. 重建镜像，否则容器内仍是旧脚本
 docker compose run --rm -v /opt/mes-light/mes_live_export.json:/tmp/backup.json:ro mes \
   node deploy/migrate_db.cjs /tmp/backup.json --clean

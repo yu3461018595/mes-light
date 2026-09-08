@@ -100,7 +100,6 @@ Views.report = {
                 <div style="text-align:right">
                   ${UI.badge(s.status)}
                   <div class="small muted" style="margin-top:4px" class="mono">${UI.n2(s.qty_good)}/${UI.n2(s.qty_plan)}</div>
-                  ${s.flow_remain != null ? `<div class="small muted" style="margin-top:2px">${s.flow_remain < 0 ? '⚠ 流转异常' : (s.flow_first ? `计划上限 ${UI.n2(s.flow_limit)}` : `流转可报 ${UI.n2(Math.max(0, s.flow_remain))}`)}</div>` : ''}
                 </div>
               </div>
             </div>`).join('')}
@@ -110,7 +109,6 @@ Views.report = {
       <div class="card">
         <div class="card-h"><h3>报工录入</h3><span class="small muted">${UI.esc(pick.process_name)}</span></div>
         <div class="card-b">
-          <div class="flow-tip" id="flowTip"></div>
           <div class="grid g2">
             <div class="field">
               <span class="label-req">合格数量</span>
@@ -159,17 +157,6 @@ Views.report = {
     const bindQty = () => {
       const left = Math.max(0, pick.qty_plan - pick.qty_good);
       el.querySelector('#leftTip').innerHTML = `本工序剩余待报 <b>${UI.n2(left)}</b> 件`;
-      // 工序流转约束提示（下工序投入 ≤ 上工序累计合格；首工序以计划数为上限）
-      const tip = el.querySelector('#flowTip');
-      if (!tip) return;
-      const rem = Math.max(0, pick.flow_remain ?? left);
-      if (pick.flow_remain != null && pick.flow_remain < 0) {
-        tip.innerHTML = `<span style="color:var(--danger)">⚠ 流转数据异常：本工序已投入量已超过上工序合格数（上工序「${UI.esc(pick.flow_prev || '')}」合格 ${UI.n2(pick.flow_in)}，本工序已投 ${UI.n2(pick.flow_used)}），请先修正历史报工。</span>`;
-      } else if (pick.flow_first) {
-        tip.innerHTML = `工序流转：首道工序，投入总量以工单计划 <b>${UI.n2(pick.flow_limit)}</b> 件为上限 · 本工序已投 <b>${UI.n2(pick.flow_used)}</b> 件`;
-      } else {
-        tip.innerHTML = `工序流转：上工序「${UI.esc(pick.flow_prev || '—')}」累计合格 <b>${UI.n2(pick.flow_in)}</b> 件 · 本工序已投 <b>${UI.n2(pick.flow_used)}</b> 件 · 还可报 <b>${UI.n2(rem)}</b> 件`;
-      }
     };
     bindQty();
 
@@ -179,21 +166,6 @@ Views.report = {
     el.querySelector('#gInc').onclick = () => add(g, 10);
     el.querySelector('#bDec').onclick = () => add(b, -1);
     el.querySelector('#bInc').onclick = () => add(b, 1);
-
-    // 流转上限：本次「合格 + 不良」不得超过可报余额（后端同样强制校验）
-    const flowRemain = () => (pick.flow_remain != null ? pick.flow_remain : Number.MAX_SAFE_INTEGER);
-    const curInput = () => (Number(g.value) || 0) + (Number(b.value) || 0);
-    const liveCheck = () => {
-      const rem = flowRemain();
-      if (rem < 0) return;  // 异常态由提示条说明
-      const over = curInput() - rem;
-      const tip = el.querySelector('#flowTip');
-      if (!tip) return;
-      if (over > 0) tip.classList.add('over');
-      else tip.classList.remove('over');
-    };
-    g.addEventListener('input', liveCheck);
-    b.addEventListener('input', liveCheck);
 
     el.querySelectorAll('[data-s]').forEach((c) => c.onclick = () => {
       this.showOrder(el, orderId, c.dataset.s);
@@ -213,10 +185,6 @@ Views.report = {
         remark: el.querySelector('#fRemark').value,
       };
       if (payload.qty_good + payload.qty_bad <= 0) return UI.toast('请填写合格数或不良数', 'err');
-      const rem = flowRemain();
-      if (rem >= 0 && payload.qty_good + payload.qty_bad > rem) {
-        return UI.toast(`超出工序流转上限：本次合格+不良共 ${payload.qty_good + payload.qty_bad} 件，最多可报 ${Math.max(0, rem)} 件`, 'err');
-      }
       try {
         await API.post('/reports', payload);
         UI.toast('报工成功', 'ok');

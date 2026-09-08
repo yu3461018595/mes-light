@@ -372,7 +372,7 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
     JOIN processes pr ON pr.id=s.process_id
     LEFT JOIN work_centers w ON w.id=s.work_center_id
     LEFT JOIN users u ON u.id=s.assignee_id
-    WHERE s.order_id=? ORDER BY s.seq`, [m[1]]).map((s) => withFlow(s, o.id));
+    WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
@@ -467,66 +467,8 @@ route('GET', '/api/scan/(.+)', [], (req, res, m) => {
   fail(res, '未找到对应的工单或产品：' + key, 404);
 });
 
-/* ------------------------------ 工序流转约束 ------------------------------ */
-/**
- * 规则：任一工序的累计投入（合格 + 不良）不得大于其上一道工序的累计合格数。
- *       首道工序没有上游工序，上限取工单计划数。
- * 例：上工序合格 1000 件 → 本工序所有报工的「合格 + 不良」累计最多 1000 件。
- * 开关：环境变量 MES_FLOW_CHECK=off 时仅写日志不拦截（用于历史脏数据过渡）。
- */
-const FLOW_CHECK = String(process.env.MES_FLOW_CHECK || 'on').toLowerCase() !== 'off';
-
-/** 计算某工序的流转可用量 */
-function flowInfo(orderId, stepId) {
-  const step = get('SELECT * FROM order_steps WHERE id=?', [stepId]);
-  if (!step) return null;
-  const prev = get(`SELECT s.*, pr.name process_name FROM order_steps s
-      JOIN processes pr ON pr.id=s.process_id
-      WHERE s.order_id=? AND s.seq<? ORDER BY s.seq DESC LIMIT 1`, [step.order_id, step.seq]);
-  const used = num(step.qty_good) + num(step.qty_bad);
-  if (!prev) {
-    const o = get('SELECT qty_plan FROM orders WHERE id=?', [step.order_id]);
-    const limit = num(o && o.qty_plan);
-    return { first: true, limit, used, remain: limit - used, prev_step_id: null, prev_process_name: '', prev_good: null };
-  }
-  const limit = num(prev.qty_good);
-  return {
-    first: false, limit, used, remain: limit - used,
-    prev_step_id: prev.id, prev_process_name: prev.process_name, prev_good: limit,
-  };
-}
-
-/** 把流转字段合并到工序对象上（供前端展示） */
-function withFlow(s, orderId) {
-  const f = flowInfo(orderId, s.id);
-  if (!f) return s;
-  s.flow_first = f.first;
-  s.flow_limit = f.limit;          // 上游可供给总量
-  s.flow_in = f.first ? null : f.limit; // 上工序累计合格（首工序为 null）
-  s.flow_used = f.used;            // 本工序已投入（合格+不良）
-  s.flow_remain = f.remain;        // 本次还能报多少
-  s.flow_prev = f.prev_process_name; // 上工序名称
-  return s;
-}
-
-/** 报工前校验流转上限，超限直接抛错 */
-function checkFlow(orderId, stepId, good, bad) {
-  const f = flowInfo(orderId, stepId);
-  if (!f) return null;
-  const want = good + bad;
-  if (want <= f.remain) return null;
-  const src = f.first
-    ? '工单计划 ' + f.limit + ' 件'
-    : '上工序「' + f.prev_process_name + '」累计合格 ' + f.prev_good + ' 件';
-  const msg = f.remain < 0
-    ? '工序流转数据异常：' + src + '，但本工序已投入 ' + f.used + ' 件（超出 ' + (-f.remain) + ' 件）。请先修正历史报工后再登记。'
-    : '超出工序流转上限：' + src + '，本工序已投入 ' + f.used + ' 件，本次最多可报 ' + f.remain + ' 件（当前填写 合格 ' + good + ' + 不良 ' + bad + ' = ' + want + ' 件）。';
-  if (!FLOW_CHECK) {
-    writeLog(null, '流转超限（未拦截）', '工序#' + stepId + ' ' + msg);
-    return null;
-  }
-  throw new Error(msg);
-}
+/* 工序流转上限校验已于 2026-09-08 按业务需求移除（存在库存缓冲，下工序可超上工序合格数报工）。
+   如需恢复，可从 git 历史找回 flowInfo / withFlow / checkFlow 三函数及 doReport 中对应调用。 */
 
 /* ------------------------------ 报工 ------------------------------ */
 route('GET', '/api/reports', [], (req, res, _m, _b, _u, query) => {
@@ -555,7 +497,6 @@ function doReport(b, actor) {
   const order = get('SELECT * FROM orders WHERE id=?', [b.order_id]);
   if (!order) throw new Error('工单不存在');
   if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
-  checkFlow(b.order_id, step.id, good, bad);   // 流转上限：累计(合格+不良) ≤ 上工序累计合格
   const workerId = b.worker_id || actor.id;
   let finished = false;
 
@@ -777,7 +718,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_id,pr.name process_name,pr.code process_code,u.name assignee_name FROM order_steps s JOIN processes pr ON pr.id=s.process_id LEFT JOIN users u ON u.id=s.assignee_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]).map((s) => withFlow(s, o.id));
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_id,pr.name process_name,pr.code process_code,u.name assignee_name FROM order_steps s JOIN processes pr ON pr.id=s.process_id LEFT JOIN users u ON u.id=s.assignee_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
   ok(res, { order: o, steps, workers });
 });
