@@ -19,7 +19,10 @@
 set -e
 
 APP_DIR=/opt/mes-light
-HOST_PORT=8080
+# 对外端口：可用 MES_PORT 环境变量覆盖（需与云平台安全组放行的端口一致）
+#   例： MES_PORT=80 bash deploy/deploy_centos.sh /root/mes_live_export.json
+HOST_PORT="${MES_PORT:-8080}"
+export MES_PORT="$HOST_PORT"
 BACKUP="$1"
 FORCE_IP="$2"
 

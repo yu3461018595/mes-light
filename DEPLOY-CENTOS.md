@@ -174,6 +174,41 @@ users 失败：NOT NULL constraint failed: users.password
 
 ---
 
+## 4.8 已知坑：本机 curl 200，但浏览器打不开
+
+这是**最常见**的情况，和应用无关，90% 是云平台防火墙没放行端口。
+
+**判定方法**（服务器端执行）：
+
+```bash
+bash /opt/mes-light/deploy/diagnose.sh
+```
+
+| 诊断结果 | 说明 | 处理 |
+|---|---|---|
+| 本机 curl **200**，外网打不开 | 应用正常，网络层被拦 | 到云平台放行端口 |
+| 本机 curl **非 200** | 应用没起来 | 看诊断脚本输出的日志部分 |
+
+**放行端口（必须做，脚本管不到这一层）：**
+
+- 轻量应用服务器 → **防火墙** → 添加规则：`TCP : 8080`（来源 `0.0.0.0/0`）
+- CVM → **安全组** → 入站规则 → 添加：`TCP : 8080`
+
+> 新建实例默认往往**只开放了 22（SSH）**，80/443/8080 都是关闭的，必须手工添加。
+> 可用 `bash deploy/diagnose.sh` 输出的第 6 项拿到公网 IP，让外部协助确认。
+
+**换端口**（不想用 8080，或已放行的是别端口）：脚本与 compose 均支持 `MES_PORT` 环境变量：
+
+```bash
+MES_PORT=80 bash deploy/deploy_centos.sh /root/mes_live_export.json
+# 或已部署后单独重建：
+cd /opt/mes-light && MES_PORT=80 docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d
+```
+
+注意：改端口后需同步更新 `.env` 里的 `PUBLIC_BASE_URL`，否则扫码链接仍指向旧端口。
+
+---
+
 ## 5. 下一步：买域名 + ICP 备案（微信扫码才能直接打开）
 
 当前用 IP 访问时，**微信仍会拦截**（微信不信任 IP 形式的链接）。彻底解决需要：

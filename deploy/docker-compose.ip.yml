@@ -3,9 +3,12 @@
 # 用法：
 #   docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d
 #
+# 端口可用环境变量覆盖（需与云平台安全组放行的端口一致）：
+#   MES_PORT=80 docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d
+#
 # 备案完成、改用 Nginx + HTTPS 后，请只用主文件（仅监听 127.0.0.1，由 Nginx 反代）：
 #   docker compose up -d
 services:
   mes:
     ports:
-      - "0.0.0.0:8080:3000"
+      - "0.0.0.0:${MES_PORT:-8080}:3000"
