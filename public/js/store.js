@@ -111,7 +111,29 @@
     const pr = find('processes', s.process_id) || {};
     const w = s.work_center_id ? find('work_centers', s.work_center_id) : null;
     const u = s.assignee_id ? find('users', s.assignee_id) : null;
-    return Object.assign({}, s, { process_code: pr.code, process_name: pr.name, wc_name: w ? w.name : '', assignee_name: u ? u.name : '' });
+    const f = flowInfo(s.order_id, s);
+    return Object.assign({}, s, {
+      process_code: pr.code, process_name: pr.name, wc_name: w ? w.name : '', assignee_name: u ? u.name : '',
+      flow_first: f.first, flow_limit: f.limit, flow_in: f.first ? null : f.limit,
+      flow_used: f.used, flow_remain: f.remain, flow_prev: f.prev_process_name,
+    });
+  }
+
+  /* 工序流转约束（与后端 flowInfo 口径一致）：
+     下工序累计投入(合格+不良) ≤ 上工序累计合格；首工序以工单计划数为上限。 */
+  function flowInfo(orderId, step) {
+    const prev = T('order_steps')
+      .filter((x) => x.order_id === Number(orderId) && x.seq < step.seq)
+      .sort((a, b) => b.seq - a.seq)[0];
+    const used = num(step.qty_good) + num(step.qty_bad);
+    if (!prev) {
+      const o = find('orders', orderId);
+      const limit = num(o && o.qty_plan);
+      return { first: true, limit, used, remain: limit - used, prev_step_id: null, prev_process_name: '', prev_good: null };
+    }
+    const limit = num(prev.qty_good);
+    const pr = find('processes', prev.process_id) || {};
+    return { first: false, limit, used, remain: limit - used, prev_step_id: prev.id, prev_process_name: pr.name || '', prev_good: limit };
   }
   function reportView(rp) {
     const u = find('users', rp.worker_id) || {};
@@ -132,6 +154,13 @@
     const order = find('orders', b.order_id);
     if (!order) throw new Error('工单不存在');
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
+    const f = flowInfo(order.id, step);   // 流转上限校验
+    if (good + bad > f.remain) {
+      const src = f.first ? '工单计划 ' + f.limit + ' 件' : '上工序「' + f.prev_process_name + '」累计合格 ' + f.prev_good + ' 件';
+      throw new Error(f.remain < 0
+        ? '工序流转数据异常：' + src + '，但本工序已投入 ' + f.used + ' 件。请先修正历史报工。'
+        : '超出工序流转上限：' + src + '，本工序已投入 ' + f.used + ' 件，本次最多可报 ' + f.remain + ' 件（当前 合格 ' + good + ' + 不良 ' + bad + ' = ' + (good + bad) + ' 件）');
+    }
     const workerId = b.worker_id || act.id;
     const finished = (step.qty_good + good) >= step.qty_plan;
 

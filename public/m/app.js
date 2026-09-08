@@ -82,11 +82,12 @@
         : `<div class="card"><div class="card-h"><h3>选择工序</h3></div><div class="card-b" id="steps">
           ${S.steps.map((s) => `<div class="step ${s.id === (S.step && S.step.id) ? 'active' : ''} ${s.status === 'done' ? 'done' : ''}" data-s="${s.id}">
             <div class="nm">${s.seq}. ${esc(s.process_name)}</div>
-            <div class="sub">${esc(s.process_code || '')} · 已报 ${s.qty_good}/${s.qty_plan}${s.status === 'done' ? ' · 已完成' : ''}</div>
+            <div class="sub">${esc(s.process_code || '')} · 已报 ${s.qty_good}/${s.qty_plan}${s.status === 'done' ? ' · 已完成' : ''}${s.flow_remain != null ? (s.flow_remain < 0 ? ' · ⚠ 流转异常' : (s.flow_first ? ` · 计划上限 ${s.flow_limit}` : ` · 可报 ${Math.max(0, s.flow_remain)}`)) : ''}</div>
           </div>`).join('')}
         </div></div>
 
         <div class="card"><div class="card-h"><h3>报工录入</h3></div><div class="card-b">
+          <div id="flowTip" class="flow-tip"></div>
           <div class="field"><span>合格数量</span><div class="stepper">
             <button type="button" id="gDec">−</button>
             <input id="fGood" type="number" inputmode="numeric" min="0" value="0">
@@ -112,6 +113,31 @@
     $app.querySelector('#gInc').onclick = () => g.value = clamp(g.value) + 10;
     $app.querySelector('#bDec').onclick = () => b.value = Math.max(0, clamp(b.value) - 1);
     $app.querySelector('#bInc').onclick = () => b.value = clamp(b.value) + 1;
+
+    // 工序流转约束提示 + 实时超限高亮
+    const step = S.step || {};
+    const flowRemain = () => (step.flow_remain != null ? step.flow_remain : Number.MAX_SAFE_INTEGER);
+    const renderFlowTip = () => {
+      const tip = $app.querySelector('#flowTip');
+      if (!tip) return;
+      if (step.flow_remain != null && step.flow_remain < 0) {
+        tip.innerHTML = `⚠ 流转数据异常：本工序已投入量超过上工序合格数（上工序「${esc(step.flow_prev || '')}」合格 ${step.flow_in}，本工序已投 ${step.flow_used}），请先修正历史报工。`;
+      } else if (step.flow_first) {
+        tip.innerHTML = `工序流转：首道工序，投入总量以工单计划 <b>${step.flow_limit}</b> 件为上限 · 本工序已投 <b>${step.flow_used}</b> 件`;
+      } else if (step.flow_remain != null) {
+        tip.innerHTML = `工序流转：上工序「${esc(step.flow_prev || '—')}」累计合格 <b>${step.flow_in}</b> 件 · 本工序已投 <b>${step.flow_used}</b> 件 · 还可报 <b>${Math.max(0, step.flow_remain)}</b> 件`;
+      }
+    };
+    renderFlowTip();
+    const liveCheck = () => {
+      const rem = flowRemain();
+      if (rem < 0) return;
+      const over = clamp(g.value) + clamp(b.value) - rem;
+      const tip = $app.querySelector('#flowTip');
+      if (tip) tip.classList.toggle('over', over > 0);
+    };
+    g.addEventListener('input', liveCheck);
+    b.addEventListener('input', liveCheck);
     $app.querySelector('#submit').onclick = submit;
   }
 
@@ -119,6 +145,11 @@
     const good = Math.max(0, Math.floor(Number($app.querySelector('#fGood').value) || 0));
     const bad = Math.max(0, Math.floor(Number($app.querySelector('#fBad').value) || 0));
     if (good + bad <= 0) { toast('请填写合格数或不良数'); return; }
+    const step = S.step || {};
+    if (step.flow_remain != null && step.flow_remain >= 0 && good + bad > step.flow_remain) {
+      toast(`超出工序流转上限：本次共 ${good + bad} 件，最多可报 ${Math.max(0, step.flow_remain)} 件`);
+      return;
+    }
     const workerId = S.w ? S.w : Number($app.querySelector('#fWorker').value);
     const btn = $app.querySelector('#submit'); btn.disabled = true;
     try {

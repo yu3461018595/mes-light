@@ -211,6 +211,10 @@ textarea.input{min-height:64px;resize:vertical}
 .step-card:hover{border-color:#b9c6e8}
 .step-card.active{border-color:var(--primary);background:var(--primary-l);box-shadow:0 0 0 3px rgba(29,78,216,.1)}
 .step-card.done{opacity:.72}
+.flow-tip{border:1px solid #cfe0ff;background:var(--primary-l);color:#1d3c7a;border-radius:10px;
+  padding:8px 12px;font-size:13px;line-height:1.6;margin-bottom:12px}
+.flow-tip b{font-variant-numeric:tabular-nums}
+.flow-tip.over{border-color:#f0c2c2;background:var(--danger-l);color:var(--danger)}
 .scan-row{display:flex;gap:8px}
 .scan-row input{font-size:16px;height:44px}
 
