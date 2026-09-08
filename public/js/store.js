@@ -490,13 +490,13 @@
     const o = find('orders', m[0]); if (!o) return fail('工单不存在', 404);
     const p = find('products', o.product_id) || {};
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_good), 0), qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
-    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, process_name: pr.name, process_code: pr.code }; });
+    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_name: au ? au.name : '', process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
   });
   R('GET', '/public/worker/(\\d+)', (m) => {
     const w = find('users', m[0]); if (!w) return fail('员工不存在', 404);
-    const orders = T('orders').filter((o) => ['released', 'running', 'paused'].includes(o.status) && T('order_steps').some((s) => s.order_id === o.id && s.assignee_id === w.id))
+    const orders = T('orders').filter((o) => ['released', 'running', 'paused'].includes(o.status) && (T('order_steps').some((s) => s.order_id === o.id && s.assignee_id === w.id) || T('order_steps').some((s) => s.order_id === o.id && (s.assignee_id === null || s.assignee_id === undefined))))
       .map(orderRow).map((o) => ({ id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: o.qty_done, qty_bad: o.qty_bad, product_name: o.product_name }))
       .sort((a, b) => a.priority - b.priority || (a.plan_end > b.plan_end ? 1 : -1));
     return ok({ worker: { id: w.id, name: w.name, team: w.team }, orders });

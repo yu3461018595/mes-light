@@ -3,6 +3,10 @@ node_modules/
 .env.*
 !.env.example
 
+# 密钥与部署脚本（含令牌，切勿提交）
+.secret
+push_flow.cjs
+
 # 生产/本地数据库与导出的数据备份（切勿提交）
 data/
 *.db

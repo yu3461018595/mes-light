@@ -82,7 +82,7 @@
         : `<div class="card"><div class="card-h"><h3>选择工序</h3></div><div class="card-b" id="steps">
           ${S.steps.map((s) => `<div class="step ${s.id === (S.step && S.step.id) ? 'active' : ''} ${s.status === 'done' ? 'done' : ''}" data-s="${s.id}">
             <div class="nm">${s.seq}. ${esc(s.process_name)}</div>
-            <div class="sub">${esc(s.process_code || '')} · 已报 ${s.qty_good}/${s.qty_plan}${s.status === 'done' ? ' · 已完成' : ''}${s.flow_remain != null ? (s.flow_remain < 0 ? ' · ⚠ 流转异常' : (s.flow_first ? ` · 计划上限 ${s.flow_limit}` : ` · 可报 ${Math.max(0, s.flow_remain)}`)) : ''}</div>
+            <div class="sub">${esc(s.process_code || '')} · 责任人 ${esc(s.assignee_name || '暂无')}${s.status === 'done' ? ' · 已完成' : ''}${s.flow_remain != null ? (s.flow_remain < 0 ? ' · ⚠ 流转异常' : (s.flow_first ? ` · 计划上限 ${s.flow_limit}` : ` · 可报 ${Math.max(0, s.flow_remain)}`)) : ''} · 已报 ${s.qty_good}/${s.qty_plan}</div>
           </div>`).join('')}
         </div></div>
 

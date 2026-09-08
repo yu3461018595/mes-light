@@ -765,16 +765,19 @@ route('GET', '/api/qr/worker/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) 
 // 免登录：按工单令牌读取工单与工序（员工码可凭 wid 访问其被指派的工单）
 route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
   const orderOk = checkQrToken(q.t, 'order', m[1]);
-  const workerOk = q.wid && checkQrToken(q.t, 'worker', q.wid)
-    && get('SELECT 1 c FROM order_steps WHERE order_id=? AND assignee_id=?', [m[1], num(q.wid)]);
-  if (!orderOk && !workerOk) return fail(res, '二维码已失效或无权限', 403);
+  const wAssigned = q.wid && checkQrToken(q.t, 'worker', q.wid);
+  // 存在未指定责任人的工序 → 该工单对全员开放报工；否则仅被指派的员工可看
+  const orderOpen = !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_id IS NULL', [m[1]]);
+  const workerHere = wAssigned && !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_id=?', [m[1], num(q.wid)]);
+  if (!orderOk && !wAssigned) return fail(res, '二维码已失效或无权限', 403);
+  if (!orderOk && wAssigned && !workerHere && !orderOpen) return fail(res, '您暂无该工单的报工权限', 403);
   const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
       (SELECT COALESCE(MIN(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_id,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]).map((s) => withFlow(s, o.id));
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_id,pr.name process_name,pr.code process_code,u.name assignee_name FROM order_steps s JOIN processes pr ON pr.id=s.process_id LEFT JOIN users u ON u.id=s.assignee_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]).map((s) => withFlow(s, o.id));
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
   ok(res, { order: o, steps, workers });
 });
@@ -790,7 +793,8 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name
      FROM orders o JOIN products p ON p.id=o.product_id
      WHERE o.status IN ('released','running','paused')
-       AND o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_id=?)
+       AND (o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_id=?)
+            OR o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_id IS NULL))
      ORDER BY o.priority,o.plan_end`, [m[1]]);
   ok(res, { worker: w, orders });
 });
