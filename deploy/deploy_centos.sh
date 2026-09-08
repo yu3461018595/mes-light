@@ -49,24 +49,34 @@ echo "   公网 IP: $IP"
 
 # 把发行版映射到「可用的 docker-ce 仓库版本号」
 detect_compat_ver() {
-  local id="" vid="" maj="" v=""
+  local id="" vid="" pid="" maj="" v=""
   if [ -r /etc/os-release ]; then
     id=$(. /etc/os-release 2>/dev/null; echo "${ID:-}")
     vid=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")
+    pid=$(. /etc/os-release 2>/dev/null; echo "${PLATFORM_ID:-}")
   fi
-  maj="${vid%%.*}"
-  case "$id" in
-    tencentos|tlinux)
-      case "$maj" in
-        4) v=9 ;;   # TencentOS Server 4 ≈ RHEL 9
-        3) v=8 ;;   # TencentOS Server 3 ≈ RHEL 8
-        2) v=7 ;;
-      esac ;;
-    opencloudos)
-      case "$maj" in 9) v=9 ;; 8) v=8 ;; esac ;;
-    centos|rhel|rocky|almalinux|anolis)
-      v="$maj" ;;
-  esac
+  # 1) 最可靠：PLATFORM_ID（RHEL 系衍生版都带，如 TencentOS Server 4 → platform:el9）
+  local pv="${pid#platform:el}"
+  case "$pv" in 7|8|9) v="$pv" ;; esac
+  # 2) 兜底：按发行版 ID 映射
+  if [ -z "$v" ]; then
+    maj="${vid%%.*}"
+    case "$id" in
+      tencentos|tlinux)
+        case "$maj" in
+          4) v=9 ;;   # TencentOS Server 4 ≈ RHEL 9
+          3) v=8 ;;   # TencentOS Server 3 ≈ RHEL 8
+          2) v=7 ;;
+        esac ;;
+      *) ;;
+    esac
+  fi
+  # 3) 再兜底：直接看 VERSION_ID 主版本
+  if [ -z "$v" ]; then
+    maj="${vid%%.*}"
+    case "$maj" in 7|8|9) v="$maj" ;; esac
+  fi
+  # 4) 最后看 rpm 宏
   if [ -z "$v" ]; then
     local rh; rh=$(rpm -E '%{rhel}' 2>/dev/null || echo "")
     case "$rh" in 7|8|9) v="$rh" ;; esac
