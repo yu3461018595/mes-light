@@ -1,0 +1,22 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# 生产/本地数据库与导出的数据备份（切勿提交）
+data/
+*.db
+*.sqlite
+*.sqlite3
+mes_live_export.json
+backups/
+
+# 日志
+logs/
+*.log
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

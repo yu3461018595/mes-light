@@ -45,15 +45,49 @@ SSH 登录服务器后（root）：
 # 3.1 拉代码
 git clone https://github.com/yu3461018595/mes-light.git /opt/mes-light
 cd /opt/mes-light
+```
 
-# 3.2 一键部署并导入线上数据
+> 若 `git clone` 很慢或失败：在 GitHub 下载 ZIP 解压到 `/opt/mes-light` 再继续。
+
+### 路线 A：Docker 部署（推荐）
+
+```bash
 bash deploy/deploy_centos.sh /root/mes_live_export.json
 ```
 
-脚本会自动完成：装 Docker（阿里云源）→ 生成 `.env`（二维码指向本机 IP）→ 构建镜像 →
-**在应用首次启动前导入数据**（避免混入演示数据）→ 启动容器 → 放行 8080。
+脚本会自动完成：清理坏源 → 装 Docker（自动兼容 TencentOS Server 4）→ 生成 `.env`（二维码指向本机 IP）
+→ 构建镜像 → **在应用首次启动前导入数据**（避免混入演示数据）→ 启动容器 → 放行 8080。
 
-> 若 `git clone` 很慢或失败：在 GitHub 下载 ZIP 解压到 `/opt/mes-light`，再执行第 3.2 步。
+> 公网 IP 若识别不准，可手工指定：`bash deploy/deploy_centos.sh /root/mes_live_export.json 你的公网IP`
+
+### 路线 B：零 Docker 部署（Docker 装不上时用）
+
+直接跑 Node + systemd，不依赖任何容器，也不需要从 Docker Hub 拉镜像：
+
+```bash
+bash deploy/deploy_node.sh /root/mes_live_export.json
+```
+
+自动完成：安装 Node 22（多镜像源自动选取）→ 拉代码 → 导入数据 → 注册 systemd 服务并启动 → 放行 8080。
+
+---
+
+## 3.5 已知坑：TencentOS Server 4 装不了 Docker CE
+
+**现象**：`https://mirrors.aliyun.com/docker-ce/linux/centos/4/x86_64/stable/repodata/repomd.xml` 返回 404。
+
+**原因**：TencentOS Server 4 的 `$releasever` 是 **4**，而 Docker CE 官方及镜像源只维护
+`centos/7`、`centos/8`、`centos/9` 三条路径，没有 `centos/4`。
+
+**脚本已自动处理**，无需手工干预：
+
+1. 先把上一轮可能写入的坏源 `docker-ce*.repo` 删掉（否则后续任何 `dnf` 都会报错）
+2. 按发行版映射到正确版本号（TencentOS 4 → `centos/9`，TencentOS 3 → `centos/8`）
+3. **repo 文件里硬编码写死版本号**，不再使用 `$releasever` 变量
+4. 多个源依次回退：腾讯云 → 阿里云 → Docker 官方
+5. 都失败则退到系统内置 **Moby** 引擎；仍失败会提示改用路线 B
+
+> 若你手工折腾过导致环境残留，先执行：`rm -f /etc/yum.repos.d/docker-ce*.repo && dnf clean all`
 
 ---
 
@@ -105,7 +139,21 @@ docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d
 
 ## 6. 运维备忘
 
+**通用**
+
 - **数据文件**：`/opt/mes-light/data/mes.db`，备份直接拷贝该文件
+- **更新代码（推荐）**：`bash /opt/mes-light/deploy/update.sh`
+  → 自动备份数据库 → `git pull` → 按部署方式重启（systemd 或 Docker）
+
+**Docker 方式**
+
 - **重启**：`cd /opt/mes-light && docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml restart`
-- **更新代码**：`cd /opt/mes-light && git pull && docker compose build && docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d`
 - **看日志**：`docker logs -f mes-light`
+
+**systemd 方式（路线 B）**
+
+- **重启/停止**：`systemctl restart|stop mes-light`
+- **看日志**：`journalctl -u mes-light -f`
+- **环境变量**：`/etc/mes-light.env`（改完执行 `systemctl daemon-reload && systemctl restart mes-light`）
+
+> `update.sh` 会在更新前把数据库备份到 `/opt/mes-light/backups/`，出问题可回滚。
