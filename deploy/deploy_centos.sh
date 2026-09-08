@@ -30,6 +30,60 @@ err()  { echo -e "\033[31m$*\033[0m"; }
 PM="dnf"; command -v dnf >/dev/null 2>&1 || PM="yum"
 
 # ==========================================================
+# 获取源码：多级回退，绕开国内服务器访问 GitHub 被重置的问题
+# 顺序：git pull → 直连 clone → 代理 clone → tarball 直连 → tarball 代理
+# 任何方式成功都不会动已有的 data/（业务数据库在 data/mes.db）
+# ==========================================================
+REPO_URL=yu3461018595/mes-light
+fetch_code() {
+  local dir="$1"
+  local tmp="/tmp/mes-src-$$"
+  local got=0
+
+  if [ -d "$dir/.git" ]; then
+    if git -C "$dir" pull -q 2>/dev/null; then
+      say "   ✓ git pull 成功"; return 0
+    fi
+    warn "   git pull 失败（GitHub 连接被重置），自动切换到其他通道…"
+  fi
+
+  local mirror
+  for mirror in "" "https://gh-proxy.com/" "https://ghps.cc/"; do
+    [ "$got" -eq 1 ] && break
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    if timeout 180 git clone -q --depth 1 "${mirror}https://github.com/${REPO_URL}.git" "$tmp" 2>/dev/null \
+       && [ -f "$tmp/server.js" ]; then
+      got=1; say "   ✓ clone 成功${mirror:+（镜像：${mirror}）}"
+    fi
+  done
+
+  if [ "$got" -eq 0 ]; then
+    for mirror in "https://codeload.github.com" "https://gh-proxy.com/https://codeload.github.com"; do
+      [ "$got" -eq 1 ] && break
+      rm -rf "$tmp"; mkdir -p "$tmp"
+      if curl -fsSL --retry 2 --connect-timeout 10 --max-time 180 \
+           "${mirror}/${REPO_URL}/tar.gz/refs/heads/main" -o /tmp/mes-src.tgz 2>/dev/null \
+         && tar -xzf /tmp/mes-src.tgz -C "$tmp" --strip-components=1 2>/dev/null \
+         && [ -f "$tmp/server.js" ]; then
+        got=1; say "   ✓ 源码包下载成功（${mirror}）"
+      fi
+    done
+  fi
+
+  if [ "$got" -eq 0 ]; then
+    err "   所有通道均失败，无法获取源码。"
+    err "   请手工下载源码包放到 /opt/mes-light 后重跑本脚本："
+    err "     https://github.com/${REPO_URL}/archive/refs/heads/main.tar.gz"
+    return 1
+  fi
+
+  mkdir -p "$dir"
+  cp -a "$tmp"/. "$dir"/ 2>/dev/null   # 保留已有 data/ 与 .env
+  rm -rf "$tmp" /tmp/mes-src.tgz 2>/dev/null
+  return 0
+}
+
+# ==========================================================
 echo "== 0/7 检测公网 IP =="
 # ==========================================================
 IP="$FORCE_IP"
@@ -196,14 +250,9 @@ fi
 # ==========================================================
 echo "== 2/7 获取代码（GitHub main，含最新修复）=="
 # ==========================================================
-$PM install -y git >/dev/null 2>&1 || true
+$PM install -y git tar curl >/dev/null 2>&1 || true
 mkdir -p /opt
-if [ -d "$APP_DIR/.git" ]; then
-  (cd "$APP_DIR" && git pull -q)
-  say "   已更新到最新代码"
-else
-  git clone -q https://github.com/yu3461018595/mes-light.git "$APP_DIR"
-fi
+fetch_code "$APP_DIR"
 cd "$APP_DIR"
 
 # ==========================================================

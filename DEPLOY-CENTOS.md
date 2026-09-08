@@ -41,13 +41,26 @@
 
 SSH 登录服务器后（root）：
 
+### 3.1 拿最新代码
+
+国内服务器直连 GitHub 经常被重置（`Failure when receiving data from the peer`）。
+**推荐直接用源码包，绕开 git**：
+
 ```bash
-# 3.1 拉代码
-git clone https://github.com/yu3461018595/mes-light.git /opt/mes-light
-cd /opt/mes-light
+cd /tmp && rm -rf mes-new && mkdir mes-new
+curl -fsSL --retry 3 --connect-timeout 10 \
+  https://codeload.github.com/yu3461018595/mes-light/tar.gz/refs/heads/main -o mes.tar.gz \
+  && tar -xzf mes.tar.gz -C mes-new --strip-components=1
+mkdir -p /opt/mes-light
+cp -a /tmp/mes-new/. /opt/mes-light/    # 保留已有 data/，只覆盖代码
+cd /opt/mes-light && ls deploy/
 ```
 
-> 若 `git clone` 很慢或失败：在 GitHub 下载 ZIP 解压到 `/opt/mes-light` 再继续。
+> 若 codeload 也不通，换镜像前缀重试：
+> `https://gh-proxy.com/https://codeload.github.com/yu3461018595/mes-light/tar.gz/refs/heads/main`
+>
+> **部署脚本本身已内置四级自动回退**（git pull → 直连 clone → 代理 clone → 源码包），
+> 后续更新直接重跑部署脚本即可，不用手工拉代码。
 
 ### 路线 A：Docker 部署（推荐）
 
