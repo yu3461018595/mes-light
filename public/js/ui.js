@@ -69,7 +69,7 @@ window.UI = (function () {
     const mask = document.createElement('div');
     mask.className = 'mask';
     mask.innerHTML = `
-      <div class="modal ${opt.size === 'lg' ? 'modal-lg' : ''}">
+      <div class="modal ${opt.size === 'xl' ? 'modal-xl' : opt.size === 'lg' ? 'modal-lg' : ''}">
         <div class="modal-h"><h3>${esc(opt.title || '')}</h3>
           <button class="icon-btn" data-close>${icon('close')}</button></div>
         <div class="modal-b">${opt.body || ''}</div>
@@ -175,8 +175,16 @@ window.UI = (function () {
     list.map((x) => `<option value="${esc(x[valKey])}"${String(x[valKey]) === String(val) ? ' selected' : ''}>${esc(x[labelKey])}</option>`).join('');
 
   /* ---------- 图表（纯 SVG） ---------- */
+  /* 说明：全局样式里有 svg{fill:none;stroke:currentColor;stroke-width:1.9}，
+     而 stroke/fill 是可继承属性 —— 图表里的 <text> 会继承到 currentColor 描边，
+     字被描一圈边所以发虚。已在 app.css 用 .chart text{stroke:none} 统一关掉。 */
+
+  // 图表容器：点击可放大；title 用于放大弹窗标题
+  const chartBox = (svgHtml, title, legendHtml) =>
+    `<div class="chart-box" data-zoom data-title="${esc(title || '图表')}" title="点击放大">${svgHtml}${legendHtml || ''}</div>`;
+
   function lineChart(rows, series, opt = {}) {
-    const W = opt.w || 640, H = opt.h || 220, PL = 44, PR = 14, PT = 14, PB = 26;
+    const W = opt.w || 640, H = opt.h || 230, PL = 52, PR = 18, PT = 16, PB = 30;
     if (!rows.length) return `<div class="empty">${icon('empty')}<div>暂无数据</div></div>`;
     let max = 0;
     rows.forEach((r) => series.forEach((s) => { max = Math.max(max, Number(r[s.key]) || 0); }));
@@ -187,8 +195,8 @@ window.UI = (function () {
     let g = '';
     for (let i = 0; i <= 4; i++) {
       const y = PT + (ih * i) / 4;
-      g += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="#eef1f5"/>
-            <text x="${PL - 8}" y="${y + 4}" font-size="10" fill="#8b96a3" text-anchor="end">${n2(max - (max * i) / 4)}</text>`;
+      g += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="#e6eaf0" stroke-width="1"/>
+            <text x="${PL - 8}" y="${y + 5}" font-size="13" font-weight="500" fill="#5b6673" text-anchor="end">${n2(max - (max * i) / 4)}</text>`;
     }
     let paths = '', dots = '';
     series.forEach((s) => {
@@ -199,37 +207,84 @@ window.UI = (function () {
       paths += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
       if (rows.length <= 31) {
         rows.forEach((r, i) => {
-          dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(Number(r[s.key]) || 0).toFixed(1)}" r="${rows.length > 15 ? 2 : 3}" fill="#fff" stroke="${s.color}" stroke-width="1.8"/>`;
+          dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(Number(r[s.key]) || 0).toFixed(1)}" r="${rows.length > 15 ? 2.5 : 3.5}" fill="#fff" stroke="${s.color}" stroke-width="1.8"/>`;
         });
       }
     });
-    const step = Math.ceil(rows.length / (opt.xTicks || 7));
+    // X 轴标签：按可用宽度估算间隔，避免标签互相重叠
+    const perLabel = 62;
+    const maxTicks = Math.max(2, Math.floor(iw / perLabel));
+    const step = Math.max(1, Math.ceil(rows.length / maxTicks));
     let xlab = '';
     rows.forEach((r, i) => {
       if (i % step === 0 || i === rows.length - 1) {
-        xlab += `<text x="${X(i).toFixed(1)}" y="${H - 8}" font-size="10" fill="#8b96a3" text-anchor="middle">${esc(md(r.d || r.name))}</text>`;
+        xlab += `<text x="${X(i).toFixed(1)}" y="${H - 9}" font-size="12.5" font-weight="500" fill="#5b6673" text-anchor="middle">${esc(md(r.d || r.name))}</text>`;
       }
     });
-    return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${paths}${dots}${xlab}</svg>
-      <div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join('')}</div>`;
+    const svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${paths}${dots}${xlab}</svg>`;
+    const legend = `<div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join('')}</div>`;
+    return chartBox(svg, opt.title || '趋势图', legend);
   }
 
   function barChart(rows, opt = {}) {
     const color = opt.color || '#1d4ed8';
     if (!rows.length) return `<div class="empty">${icon('empty')}<div>暂无数据</div></div>`;
     const max = Math.max(1, ...rows.map((r) => Number(r.qty || r.value || 0)));
-    const rowH = 30, W = 640, padL = Math.min(120, opt.labelW || 90);
-    const H = rows.length * rowH + 8;
-    const bw = W - padL - 46;
-    return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${rows.map((r, i) => {
+    const rowH = 36, W = 640, padL = Math.min(130, opt.labelW || 96);
+    const H = rows.length * rowH + 10;
+    const bw = W - padL - 60;
+    const svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${rows.map((r, i) => {
       const v = Number(r.qty || r.value || 0);
       const w = Math.max(2, (v / max) * bw);
-      const y = i * rowH + 6;
-      return `<text x="${padL - 8}" y="${y + 13}" font-size="12" fill="#5a6673" text-anchor="end">${esc(r.name)}</text>
-        <rect x="${padL}" y="${y + 3}" width="${w.toFixed(1)}" height="15" rx="4" fill="${color}" opacity="${0.9 - i * 0.06}"/>
-        <text x="${padL + w + 7}" y="${y + 15}" font-size="11.5" fill="#1f2733" font-weight="600">${n2(v)}${esc(r.unit || '')}</text>`;
+      const y = i * rowH + 8;
+      return `<text x="${padL - 10}" y="${y + 15}" font-size="14.5" font-weight="500" fill="#39414d" text-anchor="end">${esc(r.name)}</text>
+        <rect x="${padL}" y="${y + 2}" width="${w.toFixed(1)}" height="19" rx="5" fill="${color}" opacity="${0.92 - i * 0.06}"/>
+        <text x="${padL + w + 9}" y="${y + 16}" font-size="14.5" fill="#141b24" font-weight="700">${n2(v)}${esc(r.unit || '')}</text>`;
     }).join('')}</svg>`;
+    return chartBox(svg, opt.title || '排行图');
   }
+
+  /* ---------- 图表点击放大 ---------- */
+  // 用事件委托：看板每 30 秒整块重绘，委托到 document 才能一直生效
+  let _zoomBound = false;
+  function bindChartZoom() {
+    if (_zoomBound) return;
+    _zoomBound = true;
+    document.addEventListener('click', (e) => {
+      if (!e.target || !e.target.closest) return;
+      const box = e.target.closest('.chart-box[data-zoom]');
+      if (box) chartZoom(box);
+    });
+  }
+
+  function chartZoom(box) {
+    if (!box.querySelector('svg')) return;
+    modal({
+      title: box.dataset.title || '图表',
+      size: 'xl',
+      body: '<div class="chart-zoom"></div>',
+      footer: '<button class="btn" data-close>关闭</button>',
+      onMount: (mask) => {
+        const holder = mask.querySelector('.chart-zoom');
+        if (!holder) return;
+        // 整块复制（含图例），避免只放大图形却丢了标注
+        const copy = document.createElement('div');
+        copy.className = 'chart-zoom-inner';
+        copy.innerHTML = box.innerHTML;
+        const sv = copy.querySelector('svg');
+        if (sv) sv.classList.add('chart-zoom-svg');
+        holder.appendChild(copy);
+        const onKey = (ev) => {
+          if (ev.key === 'Escape') {
+            document.removeEventListener('keydown', onKey);
+            mask.remove();
+          }
+        };
+        document.addEventListener('keydown', onKey);
+      },
+    });
+  }
+  bindChartZoom();
 
   function ring(p, opt = {}) {
     const size = opt.size || 118, sw = opt.sw || 11, r = (size - sw) / 2, c = 2 * Math.PI * r;
@@ -249,6 +304,6 @@ window.UI = (function () {
 
   return {
     esc, n2, f1, pct, today, md, hours, badge, prioChip, STATUS, WC_STATUS, ICONS, icon,
-    toast, modal, confirm, qrModal, table, options, lineChart, barChart, ring, progress,
+    toast, modal, confirm, qrModal, table, options, lineChart, barChart, chartZoom, ring, progress,
   };
 })();

@@ -67,7 +67,7 @@ Views.dashboard = {
             ${UI.lineChart(trend, [
               { key: 'good', label: '合格数', color: '#1d4ed8' },
               { key: 'bad', label: '不良数', color: '#d93b3b', area: false },
-            ], { w: 660, h: 230 })}
+            ], { w: 660, h: 230, title: '近 14 天产量趋势' })}
           </div>
         </div>
         <div class="card">
@@ -109,14 +109,14 @@ Views.dashboard = {
           <div class="card">
             <div class="card-h"><h3>不良原因 TOP（14天）</h3></div>
             <div class="card-b">
-              ${UI.barChart(bad.slice(0, 6), { color: '#d93b3b', labelW: 76 })}
+              ${UI.barChart(bad.slice(0, 6), { color: '#d93b3b', labelW: 76, title: '不良原因 TOP（14天）' })}
               <div class="small muted" style="margin-top:8px">近 14 天不良合计 <b>${UI.n2(bad.reduce((s, x) => s + x.qty, 0))}</b> 件</div>
             </div>
           </div>
           <div class="card">
             <div class="card-h"><h3>人员产出排行（7天）</h3></div>
             <div class="card-b">
-              ${UI.barChart(rank.slice(0, 6).map((r) => ({ name: r.name, qty: r.good, unit: ' 件' })), { color: '#1d4ed8', labelW: 60 })}
+              ${UI.barChart(rank.slice(0, 6).map((r) => ({ name: r.name, qty: r.good, unit: ' 件' })), { color: '#1d4ed8', labelW: 60, title: '人员产出排行（7天）' })}
             </div>
           </div>
         </div>

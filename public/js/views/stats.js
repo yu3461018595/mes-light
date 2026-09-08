@@ -50,14 +50,14 @@ Views.stats = {
         <div class="card-b">${UI.lineChart(trend, [
           { key: 'good', label: '合格数', color: '#1d4ed8' },
           { key: 'bad', label: '不良数', color: '#d93b3b', area: false },
-        ], { w: 900, h: 240 })}</div>
+        ], { w: 900, h: 240, title: '产量与不良趋势' })}</div>
       </div>
 
       <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
         <div class="card"><div class="card-h"><h3>每日良率</h3></div>
-          <div class="card-b">${UI.lineChart(yieldRows, [{ key: 'good', label: '良率 %', color: '#0f9d58' }], { w: 460, h: 210 })}</div></div>
+          <div class="card-b">${UI.lineChart(yieldRows, [{ key: 'good', label: '良率 %', color: '#0f9d58' }], { w: 460, h: 210, title: '每日良率' })}</div></div>
         <div class="card"><div class="card-h"><h3>不良原因分布</h3></div>
-          <div class="card-b">${UI.barChart(bad, { color: '#d93b3b', labelW: 84 })}</div></div>
+          <div class="card-b">${UI.barChart(bad, { color: '#d93b3b', labelW: 84, title: '不良原因分布' })}</div></div>
       </div>
 
       <div class="card" style="margin-bottom:14px">
