@@ -327,6 +327,38 @@
   R('DELETE', '/reports/(\\d+)', (m) => { try { return ok(undoReport(num(m[0]))); } catch (e) { return fail(e.message, 404); } });
 
   /* 统计 */
+
+  /* 全流程合格完工量：一件产品所有工序都合格才算合格，
+     故工单完工量 = 该工单各工序累计合格数的**最小值**（瓶颈工序），
+     某区间产量 = 期末完工量 - 期初完工量。
+     历史累计用「当前工序合格数 - 该日之后的报工合计」回推，
+     这样即使工序合格数被手工改过（无对应报工记录），也不会凭空算成当日产量。 */
+  const finishedByOrder = (upTo) => {
+    const after = {};
+    for (const r of T('reports')) {
+      if (r.report_date > upTo) {
+        const sid = num(r.order_step_id);
+        after[sid] = (after[sid] || 0) + num(r.qty_good);
+      }
+    }
+    const m = {};
+    for (const s of T('order_steps')) {
+      const v = Math.max(0, num(s.qty_good) - (after[num(s.id)] || 0));
+      const k = num(s.order_id);
+      m[k] = m[k] === undefined ? v : Math.min(m[k], v);
+    }
+    return m;
+  };
+  const flowDelta = (upTo, prevTo) => {
+    const now = finishedByOrder(upTo), prev = finishedByOrder(prevTo);
+    let good = 0, cum = 0;
+    for (const k of Object.keys(now)) {
+      good += Math.max(0, now[k] - (prev[k] === undefined ? now[k] : prev[k]));
+      cum += now[k];
+    }
+    return { good, cum };
+  };
+
   R('GET', '/stats/overview', () => {
     const t = today();
     const day = T('reports').filter((r) => r.report_date === t);
@@ -345,18 +377,44 @@
     const wc = { running: 0, fault: 0, maintain: 0, total: T('work_centers').length };
     for (const w of T('work_centers')) { if (w.status === 'running') wc.running++; else if (w.status === 'fault') wc.fault++; else if (w.status === 'maintain') wc.maintain++; }
     const monthGood = T('reports').filter((r) => r.report_date >= t.slice(0, 8) + '01').reduce((a, r) => a + num(r.qty_good), 0);
+
+    const monthStart = t.slice(0, 8) + '01';
+    const monthStepGood = T('reports').filter((r) => r.report_date >= monthStart).reduce((a, r) => a + num(r.qty_good), 0);
+    const monthPrev = new Date(Date.parse(monthStart) - 86400000).toISOString().slice(0, 10);
+    const fg = flowDelta(t, dayOffset(-1));      // 今日新增完工
+    const fgm = flowDelta(t, monthPrev);         // 本月新增完工
+
     return ok({
-      today: { good, bad, hours: +(minu / 60).toFixed(1), people },
+      // good = 全流程合格（新增完工）；stepGood = 工序级作业合格量（各工序累加，未去重）
+      today: { good: fg.good, stepGood: good, cumulative: fg.cum, bad, hours: +(minu / 60).toFixed(1), people },
       yield: good + bad > 0 ? +((good / (good + bad)) * 100).toFixed(1) : 100,
-      orders: ord, workCenters: wc, monthGood,
+      orders: ord, workCenters: wc, monthGood: fgm.good, monthStepGood,
     });
   });
   R('GET', '/stats/trend', (_p, _b, q) => {
     const days = Math.min(90, Math.max(3, num(q.days, 14)));
     const from = dayOffset(-(days - 1));
+    // 工序级：不良、工时（一人一道工序，按工序口径统计）
     const map = {};
-    for (const r of T('reports')) { if (r.report_date >= from) { const e = map[r.report_date] || (map[r.report_date] = { d: r.report_date, good: 0, bad: 0, minu: 0 }); e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); } }
-    return ok(Object.values(map).sort((a, b) => a.d < b.d ? -1 : 1));
+    for (const r of T('reports')) {
+      if (r.report_date >= from) {
+        const e = map[r.report_date] || (map[r.report_date] = { d: r.report_date, bad: 0, minu: 0 });
+        e.bad += num(r.qty_bad); e.minu += num(r.work_min);
+      }
+    }
+    // 全流程：每日新增完工数 = 当日完工量 - 前一日完工量
+    const out = [];
+    let prev = finishedByOrder(dayOffset(-days));
+    for (let i = 0; i < days; i++) {
+      const d = dayOffset(-(days - 1 - i));
+      const now = finishedByOrder(d);
+      let good = 0;
+      for (const k of Object.keys(now)) good += Math.max(0, now[k] - (prev[k] === undefined ? now[k] : prev[k]));
+      prev = now;
+      const e = map[d] || {};
+      out.push({ d, good, bad: e.bad || 0, minu: e.minu || 0 });
+    }
+    return ok(out);
   });
   R('GET', '/stats/bad', (_p, _b, q) => {
     const days = Math.min(90, Math.max(3, num(q.days, 14)));

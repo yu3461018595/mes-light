@@ -556,12 +556,55 @@ route('DELETE', '/api/reports/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u)
   ok(res, true);
 });
 
+/* ------------------------------ 全流程合格产量 ------------------------------
+   口径：一件产品必须「所有工序都合格」才算合格。
+   所以工单完工量 = 该工单各工序累计合格数的**最小值**（瓶颈工序），
+   某区间产量 = 期末完工量 - 期初完工量。
+   历史累计用「当前工序合格数 - 该日之后的报工合计」回推：
+   即使有人手工改过工序合格数（没有对应报工记录），也不会凭空算成当日产量。 */
+function flowIndex() {
+  const steps = all('SELECT s.id sid, s.order_id oid, s.qty_good cur FROM order_steps s');
+  const reps = {};
+  for (const r of all('SELECT order_step_id sid, report_date d, SUM(qty_good) g FROM reports GROUP BY order_step_id, report_date')) {
+    (reps[r.sid] = reps[r.sid] || {})[r.d] = r.g;
+  }
+  return { steps, reps };
+}
+
+// 截至 upTo 日，每个工单的完工量
+function finishedByOrder(idx, upTo) {
+  const m = {};
+  for (const s of idx.steps) {
+    let after = 0;
+    const by = idx.reps[s.sid];
+    if (by) for (const d of Object.keys(by)) if (d > upTo) after += by[d];
+    const v = Math.max(0, (s.cur || 0) - after);
+    m[s.oid] = Math.min(m[s.oid] === undefined ? Infinity : m[s.oid], v);
+  }
+  return m;
+}
+
+// 某区间的全流程合格产量；cum 为期末累计完工量
+function flowDelta(idx, upTo, prevTo) {
+  const now = finishedByOrder(idx, upTo), prev = finishedByOrder(idx, prevTo);
+  let good = 0, cum = 0;
+  for (const k of Object.keys(now)) {
+    const p = prev[k] === undefined ? now[k] : prev[k];   // 该工单在区间前不存在 → 按 0 增量计
+    good += Math.max(0, now[k] - p);
+    cum += now[k];
+  }
+  return { good, cum };
+}
+
+const shiftDay = (d, n) => get('SELECT date(?, ?) d', [d, n + ' day']).d;
+
 /* ------------------------------ 统计 ------------------------------ */
 route('GET', '/api/stats/overview', [], (req, res) => {
   const t = today();
   const day = get(`SELECT COALESCE(SUM(qty_good),0) good, COALESCE(SUM(qty_bad),0) bad,
       COALESCE(SUM(work_min),0) minu, COUNT(DISTINCT worker_id) people
     FROM reports WHERE report_date=?`, [t]);
+
   const ord = get(`SELECT
       SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running,
       SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END) paused,
@@ -572,23 +615,48 @@ route('GET', '/api/stats/overview', [], (req, res) => {
   const wc = get(`SELECT SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running,
       SUM(CASE WHEN status='fault' THEN 1 ELSE 0 END) fault,
       SUM(CASE WHEN status='maintain' THEN 1 ELSE 0 END) maintain, COUNT(*) total FROM work_centers`);
+  const monthStart = t.slice(0, 8) + '01';
   const month = get(`SELECT COALESCE(SUM(qty_good),0) good FROM reports WHERE report_date >= ?`,
-    [t.slice(0, 8) + '01']);
+    [monthStart]);
+  // 全流程口径：今日新增完工、本月新增完工
+  const idx = flowIndex();
+  const fg = flowDelta(idx, t, shiftDay(t, -1));
+  const fgm = flowDelta(idx, t, shiftDay(monthStart, -1));
   ok(res, {
-    today: { good: day.good, bad: day.bad, hours: +(day.minu / 60).toFixed(1), people: day.people },
+    // good = 全流程合格（新增完工）；stepGood = 工序级作业合格量（各工序累加，未去重）
+    today: {
+      good: fg.good, stepGood: day.good, cumulative: fg.cum,
+      bad: day.bad, hours: +(day.minu / 60).toFixed(1), people: day.people,
+    },
     yield: day.good + day.bad > 0 ? +((day.good / (day.good + day.bad)) * 100).toFixed(1) : 100,
     orders: { running: ord.running || 0, paused: ord.paused || 0, waiting: ord.waiting || 0, done: ord.done || 0, overdue: ord.overdue || 0 },
     workCenters: { running: wc.running || 0, fault: wc.fault || 0, maintain: wc.maintain || 0, total: wc.total || 0 },
-    monthGood: month.good,
+    monthGood: fgm.good, monthStepGood: month.good,
   });
 });
 
 route('GET', '/api/stats/trend', [], (req, res, _m, _b, _u, q) => {
   const days = Math.min(90, Math.max(3, num(q.days, 14)));
-  const rows = all(`SELECT report_date d, SUM(qty_good) good, SUM(qty_bad) bad, SUM(work_min) minu
-    FROM reports WHERE report_date >= date('now', ?) GROUP BY report_date ORDER BY report_date`,
-    ['-' + (days - 1) + ' day']);
-  ok(res, rows);
+  const start = get(`SELECT date('now', ?) d`, ['-' + (days - 1) + ' day']).d;
+  // 工序级：不良、工时（一人一道工序，按工序口径统计）
+  const rows = all(`SELECT report_date d, SUM(qty_bad) bad, SUM(work_min) minu
+    FROM reports WHERE report_date >= ? GROUP BY report_date`, [start]);
+  const byDay = {};
+  for (const r of rows) byDay[r.d] = r;
+  // 全流程：每日新增完工数 = 当日完工量 - 前一日完工量
+  const idx = flowIndex();
+  const maps = [finishedByOrder(idx, shiftDay(start, -1))];
+  for (let i = 0; i < days; i++) maps.push(finishedByOrder(idx, shiftDay(start, i)));
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const d = shiftDay(start, i);
+    const now = maps[i + 1], prev = maps[i];
+    let good = 0;
+    for (const k of Object.keys(now)) good += Math.max(0, now[k] - (prev[k] === undefined ? now[k] : prev[k]));
+    const b = byDay[d] || {};
+    out.push({ d, good, stepGood: 0, bad: b.bad || 0, minu: b.minu || 0 });
+  }
+  ok(res, out);
 });
 
 route('GET', '/api/stats/bad', [], (req, res, _m, _b, _u, q) => {

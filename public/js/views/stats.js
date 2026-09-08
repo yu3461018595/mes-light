@@ -48,8 +48,8 @@ Views.stats = {
       <div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>产量与不良趋势</h3></div>
         <div class="card-b">${UI.lineChart(trend, [
-          { key: 'good', label: '合格数', color: '#1d4ed8' },
-          { key: 'bad', label: '不良数', color: '#d93b3b', area: false },
+          { key: 'good', label: '合格（全流程）', color: '#1d4ed8' },
+          { key: 'bad', label: '不良（工序）', color: '#d93b3b', area: false },
         ], { w: 900, h: 240, title: '产量与不良趋势' })}</div>
       </div>
 

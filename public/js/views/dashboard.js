@@ -40,10 +40,10 @@ Views.dashboard = {
         <div class="stat">
           <div class="stat-l"><i class="dot" style="background:var(--ok)"></i>今日合格产量</div>
           <div class="stat-v" style="color:var(--ok)">${UI.n2(ov.today.good)}</div>
-          <div class="stat-s">不良 ${UI.n2(ov.today.bad)} 件 · 投入 ${UI.n2(ov.today.good + ov.today.bad)} 件</div>
+          <div class="stat-s">全部工序合格才算计入 · 工序作业 ${UI.n2(ov.today.stepGood)} 件 · 不良 ${UI.n2(ov.today.bad)} 件</div>
         </div>
         <div class="stat">
-          <div class="stat-l"><i class="dot" style="background:var(--primary)"></i>今日良率</div>
+          <div class="stat-l"><i class="dot" style="background:var(--primary)"></i>今日良率（工序口径）</div>
           <div class="stat-v">${UI.f1(ov.yield)}%</div>
           <div class="stat-s">${UI.progress(ov.yield, yieldCls)}</div>
         </div>
@@ -55,14 +55,14 @@ Views.dashboard = {
         <div class="stat">
           <div class="stat-l"><i class="dot" style="background:var(--danger)"></i>逾期工单</div>
           <div class="stat-v" style="color:${ov.orders.overdue ? 'var(--danger)' : 'inherit'}">${ov.orders.overdue}</div>
-          <div class="stat-s">本月累计产量 ${UI.n2(ov.monthGood)} 件</div>
+          <div class="stat-s">本月完工 ${UI.n2(ov.monthGood)} 件 · 工序作业 ${UI.n2(ov.monthStepGood)} 件</div>
         </div>
       </div>
 
       <div class="grid" style="grid-template-columns:1.55fr 1fr;margin-bottom:14px">
         <div class="card">
           <div class="card-h"><h3>近 14 天产量趋势</h3>
-            <span class="small muted">合格 / 不良</span></div>
+            <span class="small muted">合格（全流程）/ 不良（工序）</span></div>
           <div class="card-b">
             ${UI.lineChart(trend, [
               { key: 'good', label: '合格数', color: '#1d4ed8' },
