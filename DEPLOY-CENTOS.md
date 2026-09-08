@@ -110,15 +110,54 @@ products 4 / processes 12 / work_centers 6 / customers 6 / bad_reasons 8
 users 18 / routes 4 / route_steps 20 / orders 2 / order_steps 8 / reports 4
 ```
 
-若工单里出现 12 张演示工单，说明先启动了容器、后导入数据，重跑一次即可：
+若工单里出现 12 张演示工单，说明先启动了容器、后导入数据，重跑一次即可（注意**必须重新 build**，原因见 4.5）：
 
 ```bash
 cd /opt/mes-light
-docker compose stop
+git pull                 # 1. 拉取修复后的迁移脚本
+docker compose stop      # 2. 停容器，避免它继续 seed 演示数据
+docker compose build     # 3. 重建镜像，否则容器内仍是旧脚本
 docker compose run --rm -v /opt/mes-light/mes_live_export.json:/tmp/backup.json:ro mes \
   node deploy/migrate_db.cjs /tmp/backup.json --clean
 docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d
 ```
+
+---
+
+## 4.5 已知坑：迁移脚本在镜像里 / 数据导入的外键连锁失败
+
+### ① 迁移脚本是烘焙进镜像的
+
+`migrate_db.cjs` 在**容器镜像内部**，宿主机 `git pull` 拿到新脚本后，
+**必须执行 `docker compose build` 重新构建镜像**才会生效，否则 `docker compose run mes ...`
+跑的仍是镜像里的旧脚本，故障依旧。
+
+### ② FOREIGN KEY constraint failed —— 真因在 users 表
+
+曾经的现象是插入 `orders` 时报外键错误，真正原因却是前面几张表的 `users`：
+
+```
+users 失败：NOT NULL constraint failed: users.password
+```
+
+- 线上导出的 JSON **不含 `password` 字段**（API 出于安全不返回），而 `users.password` 是 `NOT NULL`
+- 旧脚本用 `INSERT OR IGNORE`，失败行会被**静默丢弃**，18 个用户全部没入库、`users` 表为空
+- 于是 `orders.created_by=1` 找不到父记录 → 报成 `FOREIGN KEY constraint failed`
+- 连锁导致 `orders` / `order_steps` / `reports` 全部为空
+
+**报错位置与真正病因相隔好几张表**，只看最后的错误信息极易误判。
+
+修复后的脚本：
+
+1. `NOT NULL` 且无默认值的列自动补兜底值，`password` 统一补 `123456` 的哈希
+2. 不再用 `INSERT OR IGNORE`；改用 `ON CONFLICT(id) DO UPDATE` 的 upsert——
+   **不能用 `INSERT OR REPLACE`**，它底层是「先 DELETE 再 INSERT」，删除父行会触发
+   `ON DELETE CASCADE` 级联删掉子表数据（如删 products 会连带删 routes）
+3. 逐行捕获并打印失败明细，结束时输出「备份行数 vs 库内行数」逐表核对表
+4. 最后执行 `PRAGMA foreign_key_check` 完整性校验，成功打印 `导入完成，数据与备份完全一致`
+5. 导入后统一重置所有用户密码为 `123456`（导出数据无密码，这是必然结果）
+
+> 导入失败时脚本会以非零退出码结束，部署脚本会立刻中断，不会带着残缺数据继续启动。
 
 ---
 
