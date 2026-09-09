@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], logs: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], logs: [], incoming_materials: [], finished_goods_in: [] };
     try {
       const res = await fetch('/data/seed.json', { cache: 'no-store' });
       DB = res.ok ? await res.json() : EMPTY;
@@ -539,6 +539,8 @@
   crud('work_centers', '工作中心', { unique: 'code', onDelete: (id) => { if (T('order_steps').some((s) => s.work_center_id === id) || T('users').some((u) => u.work_center_id === id) || T('route_steps').some((s) => s.work_center_id === id)) return '该工作中心已被使用，无法删除'; return ''; } });
   crud('customers', '客户', { unique: 'code' });
   crud('bad_reasons', '不良原因', { unique: 'name' });
+  crud('incoming_materials', '来料记录', { roles: ['admin', 'leader'] });
+  crud('finished_goods_in', '成品入库', { roles: ['admin', 'leader'] });
   crud('users', '用户', { admin: true, unique: 'username', onDelete: (id) => { if (Store.currentUser && id === Store.currentUser.id) return '不能删除当前登录的账号'; const rep = T('reports').filter((r) => r.worker_id === id).length; const asg = T('order_steps').filter((s) => s.assignee_id === id).length; if (rep || asg) return `该员工已有 ${rep} 条报工、${asg} 条派工记录，无法删除；如需停用，请在“编辑”中将其状态设为“停用”。`; return ''; } });
   // 工艺路线：写操作走下方专用处理器（会展开 steps → route_steps），故这里 noWrite
   crud('routes', '工艺路线', { roles: ['admin', 'leader'], unique: 'code', noWrite: true, onDelete: (id) => { if (T('orders').some((o) => o.route_id === id)) return '该工艺路线已被工单使用，无法删除'; return ''; } });
