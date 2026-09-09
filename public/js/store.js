@@ -129,48 +129,63 @@
 
   /* ------------------------------ 报工核心 ------------------------------ */
   function doReport(b, act) {
-    const step = find('order_steps', b.order_step_id);
-    if (!step || step.order_id !== Number(b.order_id)) throw new Error('工序不存在');
-    // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
-    // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
-    if (step.assignee_team && act.role !== 'admin' && act.role !== 'leader') {
-      const wid = b.worker_id || act.id;
-      const wu = find('users', wid);
-      const wteam = (act.team) || (wu && wu.team);
-      if (wteam !== step.assignee_team) {
-        throw new Error('您所在班组「' + (wteam || '未分组') + '」无该工序的报工权限（限「' + step.assignee_team + '」班组）');
-      }
-    }
-    const good = Math.max(0, Math.floor(num(b.qty_good)));
-    const bad = Math.max(0, Math.floor(num(b.qty_bad)));
-    if (good + bad <= 0) throw new Error('请填写合格数或不良数');
-    const order = find('orders', b.order_id);
+    const order = find('orders', Number(b.order_id));
     if (!order) throw new Error('工单不存在');
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
-    const workerId = b.worker_id || act.id;
-    const finished = (step.qty_good + good) >= step.qty_plan;
 
-    insert('reports', {
-      id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
-      work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
-      bad_reason: bad ? (b.bad_reason || '其他') : '', work_min: num(b.work_min),
-      report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
+    const items = Array.isArray(b.steps)
+      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason }))
+      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason }];
+    if (!items.length) throw new Error('请至少选择一道工序');
+
+    const workerId = Number(b.worker_id) || act.id;
+    const results = [];
+
+    items.forEach((it) => {
+      const step = find('order_steps', it.order_step_id);
+      if (!step || Number(step.order_id) !== Number(b.order_id)) throw new Error('工序不存在（#' + it.order_step_id + '）');
+      if (step.assignee_team && act.role !== 'admin' && act.role !== 'leader') {
+        const wid = Number(b.worker_id) || act.id;
+        const wu = find('users', wid);
+        const wteam = (act.team) || (wu && wu.team);
+        if (wteam !== step.assignee_team) {
+          throw new Error('工序「' + step.seq + '」限「' + step.assignee_team + '」班组报工（您为「' + (wteam || '未分组') + '」）');
+        }
+      }
+      if (step.allow_report === 0 && act.role !== 'admin' && act.role !== 'leader') {
+        throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
+      }
+      const good = Math.max(0, Math.floor(num(it.qty_good)));
+      const bad = Math.max(0, Math.floor(num(it.qty_bad)));
+      if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
+      const finished = (step.qty_good + good) >= step.qty_plan;
+
+      insert('reports', {
+        id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
+        work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
+        bad_reason: bad ? (it.bad_reason || '其他') : '', work_min: num(b.work_min),
+        report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
+      });
+      update('order_steps', step.id, {
+        qty_good: step.qty_good + good, qty_bad: step.qty_bad + bad, work_min: step.work_min + num(b.work_min),
+        status: finished ? 'done' : 'running', start_time: step.start_time || nowISO(),
+        finish_time: finished ? nowISO() : null, assignee_id: step.assignee_id || workerId,
+      });
+      if (order.status === 'created' || order.status === 'released') update('orders', order.id, { status: 'running', start_time: order.start_time || nowISO() });
+      if (finished) {
+        const nxt = T('order_steps').filter((s) => s.order_id === order.id && s.status === 'pending').sort((a, b) => a.seq - b.seq)[0];
+        if (nxt) update('order_steps', nxt.id, { status: 'running' });
+      }
+      results.push({ order_step_id: step.id, seq: step.seq, finished });
     });
-    update('order_steps', step.id, {
-      qty_good: step.qty_good + good, qty_bad: step.qty_bad + bad, work_min: step.work_min + num(b.work_min),
-      status: finished ? 'done' : 'running', start_time: step.start_time || nowISO(),
-      finish_time: finished ? nowISO() : null, assignee_id: step.assignee_id || workerId,
-    });
-    if (order.status === 'created' || order.status === 'released') update('orders', order.id, { status: 'running', start_time: order.start_time || nowISO() });
-    if (finished) {
-      const nxt = T('order_steps').filter((s) => s.order_id === order.id && s.status === 'pending').sort((a, b) => a.seq - b.seq)[0];
-      if (nxt) update('order_steps', nxt.id, { status: 'running' });
-    }
+
     if (!T('order_steps').some((s) => s.order_id === order.id && s.status !== 'done')) {
       update('orders', order.id, { status: 'done', finish_time: nowISO() });
     }
-    writeLog(act, '生产报工', order.code + ' 合格 ' + good + ' / 不良 ' + bad);
-    return { order_step_id: step.id, finished };
+    const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
+    const tb = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_bad))), 0);
+    writeLog(act, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + tg + ' / 不良 ' + tb);
+    return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
   }
   function undoReport(id) {
     const r = find('reports', id);
@@ -304,7 +319,7 @@
   });
   R('PATCH', '/orders/(\\d+)/steps/(\\d+)', (m, b) => {
     if (requireOrderMgr()) return fail('无权限', 403);
-    update('order_steps', m[1], { assignee_team: b.assignee_team || null, work_center_id: b.work_center_id ? num(b.work_center_id) : null });
+    update('order_steps', m[1], { assignee_team: b.assignee_team || null, work_center_id: b.work_center_id ? num(b.work_center_id) : null, allow_report: (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1 });
     const o = find('orders', m[0]);
     writeLog(actor(), '工序派工', (o ? o.code : m[0]) + ' 工序#' + m[1] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
     return ok(true);
@@ -481,7 +496,7 @@
     if (q.t && wTeam && !workerHere && !orderOpen) return fail('您暂无该工单的报工权限', 403);
     const p = find('products', o.product_id) || {};
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_good), 0), qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
-    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', process_name: pr.name, process_code: pr.code }; });
+    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
   });

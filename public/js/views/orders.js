@@ -208,6 +208,7 @@ Views.orders = {
             { t: '工序', f: (r) => `<b>${UI.esc(r.process_name)}</b><div class="small muted">${UI.esc(r.process_code)}</div>` },
             { t: '工作中心', f: (r) => UI.esc(r.wc_name || '—') },
             { t: '指派班组', f: (r) => r.assignee_team ? UI.esc(r.assignee_team) : '<span class="muted">暂无</span>' },
+            { t: '员工可报工', f: (r) => r.allow_report === 0 ? '<span style="color:#d93b3b">否（仅管理）</span>' : '<span style="color:#0f9d58">是</span>' },
             { t: '合格', f: (r) => `<span class="mono">${UI.n2(r.qty_good)}</span>` },
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${r.qty_bad ? UI.n2(r.qty_bad) : '0'}</span>` },
             { t: '进度', w: '130px', f: (r) => `<div class="row" style="gap:8px;flex-wrap:nowrap">
@@ -265,17 +266,23 @@ Views.orders = {
       const st = o.steps.find((x) => x.id == b.dataset.assign);
       const teams = ((meta.teams && meta.teams.length ? meta.teams : (o.teams || [])).map((t) => (t && t.team) ? t.team : t));
       UI.modal({
-        title: '指派班组 · ' + st.process_name,
+        title: '工序派工 · ' + st.process_name,
         body: `<label class="field"><span>指派班组</span>
             <select class="input" id="aTeam"><option value="">不指定（全员可报工）</option>${teams.map((t) => `<option value="${UI.esc(t)}"${st.assignee_team === t ? ' selected' : ''}>${UI.esc(t)}</option>`).join('')}</select></label>
           <label class="field"><span>工作中心 / 设备</span>
-            <select class="input" id="aWc"><option value="">不指定</option>${UI.options(meta.workCenters, st.work_center_id || '', 'name')}</select></label>`,
+            <select class="input" id="aWc"><option value="">不指定</option>${UI.options(meta.workCenters, st.work_center_id || '', 'name')}</select></label>
+          <label class="field"><span>允许员工扫码申报</span>
+            <select class="input" id="aReport">
+              <option value="1"${st.allow_report !== 0 ? ' selected' : ''}>是（员工可报工）</option>
+              <option value="0"${st.allow_report === 0 ? ' selected' : ''}>否（仅管理员/班组长可报）</option>
+            </select></label>`,
         onOk: async (mask) => {
           await API.patch(`/orders/${id}/steps/${st.id}`, {
             assignee_team: mask.querySelector('#aTeam').value || null,
             work_center_id: mask.querySelector('#aWc').value || null,
+            allow_report: mask.querySelector('#aReport').value === '0' ? 0 : 1,
           });
-          UI.toast('已指派班组', 'ok');
+          UI.toast('已更新工序派工', 'ok');
           App.render();
         },
       });

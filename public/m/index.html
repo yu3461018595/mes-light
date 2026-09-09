@@ -26,9 +26,23 @@
   .bar { height: 9px; background: #eef1f5; border-radius: 999px; overflow: hidden; }
   .bar > i { display: block; height: 100%; background: linear-gradient(90deg,#1d4ed8,#4f7df0); }
   .prog-txt { display: flex; justify-content: space-between; font-size: 13px; color: #5a6673; margin-top: 8px; }
-  .step { border: 1.5px solid #e6eaf0; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .step { border: 1.5px solid #e6eaf0; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 12px; cursor: pointer; }
   .step.active { border-color: #1d4ed8; background: #f5f8ff; }
+  .step.sel { border-color: #1d4ed8; background: #f5f8ff; box-shadow: 0 0 0 2px rgba(29,78,216,.15); }
   .step.done { opacity: .55; }
+  .step.locked { cursor: not-allowed; background: #f7f8fa; }
+  .step .step-main { flex: 1 1 200px; min-width: 0; }
+  .step .tick { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #cdd5e0; flex: 0 0 auto;
+    margin-top: 2px; color: #fff; font-size: 15px; line-height: 20px; text-align: center; font-weight: 800; }
+  .step.sel .tick { background: #1d4ed8; border-color: #1d4ed8; }
+  .step .lock { display: inline-block; margin-top: 6px; font-size: 12px; color: #d93b3b; background: #fdecec;
+    border-radius: 6px; padding: 2px 8px; }
+  .step .subrep { flex-basis: 100%; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e3e8ef; }
+  .pick-tools { display: flex; gap: 14px; }
+  .link { background: none; border: none; color: #1d4ed8; font-size: 13px; font-weight: 700; padding: 0; }
+  .sel-count { padding: 0 16px 14px; font-size: 13px; color: #5a6673; }
+  .sel-count b { color: #1d4ed8; font-size: 15px; }
   .step .nm { font-weight: 700; font-size: 15px; }
   .step .sub { font-size: 12.5px; color: #6b7682; margin-top: 3px; }
   .field { margin-bottom: 14px; }

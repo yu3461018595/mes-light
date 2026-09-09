@@ -428,10 +428,11 @@ route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'leader'], (req, res, m, b
 });
 
 route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
-  run('UPDATE order_steps SET assignee_team=?, work_center_id=? WHERE id=? AND order_id=?',
-    [b.assignee_team || null, b.work_center_id || null, m[2], m[1]]);
+  const allowReport = (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1;
+  run('UPDATE order_steps SET assignee_team=?, work_center_id=?, allow_report=? WHERE id=? AND order_id=?',
+    [b.assignee_team || null, b.work_center_id || null, allowReport, m[2], m[1]]);
   const o = get('SELECT code FROM orders WHERE id=?', [m[1]]);
-  writeLog(u, '工序派工', (o ? o.code : m[1]) + ' 工序#' + m[2] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
+  writeLog(u, '工序派工', (o ? o.code : m[1]) + ' 工序#' + m[2] + (b.assignee_team ? ' → ' + b.assignee_team : '') + (allowReport ? '' : '（员工不可申报）'));
   ok(res, true);
 });
 
@@ -496,52 +497,85 @@ route('GET', '/api/reports', [], (req, res, _m, _b, _u, query) => {
   ok(res, all(sql, p));
 });
 
-/* 报工核心逻辑（登录态与扫码免登录态共用）。actor 为 {id,name} 形式的操作人。 */
+/* 报工核心逻辑（登录态与扫码免登录态共用）。actor 为 {id,name,role,team} 形式的操作人。
+ * 支持两种调用形态：
+ *   1) 单工序（向后兼容）：b = { order_id, order_step_id, qty_good, qty_bad, bad_reason, ... }
+ *   2) 多工序一次性申报：b = { order_id, worker_id, steps: [ {order_step_id, qty_good, qty_bad, bad_reason}, ... ] }
+ *      用于「员工身兼多岗」场景：一次提交同时申报多道工序。 */
 function doReport(b, actor) {
-  const step = get('SELECT * FROM order_steps WHERE id=? AND order_id=?', [b.order_step_id, b.order_id]);
-  if (!step) throw new Error('工序不存在');
-  // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
-  // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
-  if (step.assignee_team && actor.role !== 'admin' && actor.role !== 'leader') {
-    const wid = b.worker_id || actor.id;
-    const wteam = actor.team || (get('SELECT team FROM users WHERE id=?', [wid]) || {}).team;
-    if (wteam !== step.assignee_team) {
-      throw new Error('您所在班组「' + (wteam || '未分组') + '」无该工序的报工权限（限「' + step.assignee_team + '」班组）');
-    }
-  }
-  const good = Math.max(0, Math.floor(num(b.qty_good)));
-  const bad = Math.max(0, Math.floor(num(b.qty_bad)));
-  if (good + bad <= 0) throw new Error('请填写合格数或不良数');
-  const order = get('SELECT * FROM orders WHERE id=?', [b.order_id]);
+  const order_id = num(b.order_id);
+  const order = get('SELECT * FROM orders WHERE id=?', [order_id]);
   if (!order) throw new Error('工单不存在');
   if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
-  const workerId = b.worker_id || actor.id;
-  let finished = false;
+
+  // 归一化为「工序条目」数组
+  const items = Array.isArray(b.steps)
+    ? b.steps.map((s) => ({
+        order_step_id: num(s.order_step_id),
+        qty_good: s.qty_good, qty_bad: s.qty_bad,
+        bad_reason: s.bad_reason, work_center_id: s.work_center_id,
+        report_date: s.report_date || b.report_date, remark: s.remark || '',
+      }))
+    : [{
+        order_step_id: num(b.order_step_id),
+        qty_good: b.qty_good, qty_bad: b.qty_bad,
+        bad_reason: b.bad_reason, work_center_id: b.work_center_id,
+        report_date: b.report_date, remark: b.remark || '',
+      }];
+  if (!items.length) throw new Error('请至少选择一道工序');
+
+  const workerId = num(b.worker_id) || actor.id;
+  const results = [];
 
   tx(() => {
-    insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,work_min,report_date,remark,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-      [b.order_id, step.id, workerId, b.work_center_id || step.work_center_id,
-        good, bad, bad ? (b.bad_reason || '其他') : '', num(b.work_min),
-        b.report_date || today(), b.remark || '', now()]);
+    for (const it of items) {
+      const step = get('SELECT * FROM order_steps WHERE id=? AND order_id=?', [it.order_step_id, order_id]);
+      if (!step) throw new Error('工序不存在（#' + it.order_step_id + '）');
+      // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
+      // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
+      if (step.assignee_team && actor.role !== 'admin' && actor.role !== 'leader') {
+        const wid = num(b.worker_id) || actor.id;
+        const wteam = actor.team || (get('SELECT team FROM users WHERE id=?', [wid]) || {}).team;
+        if (wteam !== step.assignee_team) {
+          throw new Error('工序「' + step.seq + '」限「' + step.assignee_team + '」班组报工（您为「' + (wteam || '未分组') + '」）');
+        }
+      }
+      // 员工可申报开关：关闭时仅管理员/班组长可报此工序
+      if (step.allow_report === 0 && actor.role !== 'admin' && actor.role !== 'leader') {
+        throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
+      }
+      const good = Math.max(0, Math.floor(num(it.qty_good)));
+      const bad = Math.max(0, Math.floor(num(it.qty_bad)));
+      if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
+      insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,work_min,report_date,remark,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
+          good, bad, bad ? (it.bad_reason || '其他') : '', num(b.work_min),
+          it.report_date || today(), it.remark || '', now()]);
 
-    const done = step.qty_good + good;
-    finished = done >= step.qty_plan;
-    run('UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, status=?, start_time=IFNULL(start_time,?), finish_time=?, assignee_id=IFNULL(assignee_id,?) WHERE id=?',
-      [good, bad, num(b.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
+      const done = step.qty_good + good;
+      const finished = done >= step.qty_plan;
+      run('UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, status=?, start_time=IFNULL(start_time,?), finish_time=?, assignee_id=IFNULL(assignee_id,?) WHERE id=?',
+        [good, bad, num(b.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
 
-    if (order.status === 'created' || order.status === 'released') {
-      run("UPDATE orders SET status='running', start_time=IFNULL(start_time,?) WHERE id=?", [now(), b.order_id]);
+      if (order.status === 'created' || order.status === 'released') {
+        run("UPDATE orders SET status='running', start_time=IFNULL(start_time,?) WHERE id=?", [now(), order_id]);
+      }
+      if (finished) {
+        run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [order_id]);
+      }
+      results.push({ order_step_id: step.id, seq: step.seq, finished });
     }
-    if (finished) {
-      run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [b.order_id]);
-    }
-    const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [b.order_id]);
-    if (left.c === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), b.order_id]);
+
+    // 全部工序完成 → 工单完工
+    const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [order_id]);
+    if (left.c === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), order_id]);
   });
 
-  writeLog(actor, '生产报工', order.code + ' 合格 ' + good + ' / 不良 ' + bad);
-  return { order_step_id: step.id, finished };
+  const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
+  const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_bad))), 0);
+  writeLog(actor, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + totalGood + ' / 不良 ' + totalBad);
+  return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
 }
 
 route('POST', '/api/reports', [], (req, res, _m, b, u) => {
@@ -557,9 +591,9 @@ route('POST', '/api/public/reports', [], (req, res, _m, b) => {
     const validOrder = checkQrToken(b.token, 'order', order_id);
     const validWorker = worker_id && checkQrToken(b.token, 'worker', worker_id);
     if (!validOrder && !validWorker) return fail(res, '二维码已失效或无权限', 403);
-    const w = get('SELECT id,name FROM users WHERE id=?', [worker_id]);
+    const w = get('SELECT id,name,role,team FROM users WHERE id=?', [worker_id]);
     if (!w) return fail(res, '报工人不存在', 400);
-    ok(res, doReport({ ...b, order_id, worker_id }, { id: w.id, name: w.name }));
+    ok(res, doReport({ ...b, order_id, worker_id }, w));
   } catch (e) { fail(res, e.message, 400); }
 });
 
@@ -737,7 +771,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
   ok(res, { order: o, steps, workers });
 });
