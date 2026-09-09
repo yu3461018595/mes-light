@@ -1,0 +1,27 @@
+{
+  "name": "智工生产管理 · 扫码报工",
+  "short_name": "智工MES",
+  "description": "工单、报工、看板与质量管理的轻量生产系统",
+  "lang": "zh-CN",
+  "start_url": "/m/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#1d4ed8",
+  "theme_color": "#1d4ed8",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-512.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
