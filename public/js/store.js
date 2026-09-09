@@ -134,8 +134,8 @@
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
 
     const items = Array.isArray(b.steps)
-      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason }))
-      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason }];
+      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, work_min: s.work_min }))
+      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, work_min: b.work_min }];
     if (!items.length) throw new Error('请至少选择一道工序');
 
     const workerId = Number(b.worker_id) || act.id;
@@ -163,11 +163,11 @@
       insert('reports', {
         id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
-        bad_reason: bad ? (it.bad_reason || '其他') : '', work_min: num(b.work_min),
+        bad_reason: bad ? (it.bad_reason || '其他') : '', work_min: num(it.work_min),
         report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
       });
       update('order_steps', step.id, {
-        qty_good: step.qty_good + good, qty_bad: step.qty_bad + bad, work_min: step.work_min + num(b.work_min),
+        qty_good: step.qty_good + good, qty_bad: step.qty_bad + bad, work_min: step.work_min + num(it.work_min),
         status: finished ? 'done' : 'running', start_time: step.start_time || nowISO(),
         finish_time: finished ? nowISO() : null, assignee_id: step.assignee_id || workerId,
       });

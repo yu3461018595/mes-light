@@ -514,12 +514,14 @@ function doReport(b, actor) {
         order_step_id: num(s.order_step_id),
         qty_good: s.qty_good, qty_bad: s.qty_bad,
         bad_reason: s.bad_reason, work_center_id: s.work_center_id,
+        work_min: s.work_min,
         report_date: s.report_date || b.report_date, remark: s.remark || '',
       }))
     : [{
         order_step_id: num(b.order_step_id),
         qty_good: b.qty_good, qty_bad: b.qty_bad,
         bad_reason: b.bad_reason, work_center_id: b.work_center_id,
+        work_min: b.work_min,
         report_date: b.report_date, remark: b.remark || '',
       }];
   if (!items.length) throw new Error('请至少选择一道工序');
@@ -550,13 +552,13 @@ function doReport(b, actor) {
       insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,work_min,report_date,remark,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
-          good, bad, bad ? (it.bad_reason || '其他') : '', num(b.work_min),
+          good, bad, bad ? (it.bad_reason || '其他') : '', num(it.work_min),
           it.report_date || today(), it.remark || '', now()]);
 
       const done = step.qty_good + good;
       const finished = done >= step.qty_plan;
       run('UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, status=?, start_time=IFNULL(start_time,?), finish_time=?, assignee_id=IFNULL(assignee_id,?) WHERE id=?',
-        [good, bad, num(b.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
+        [good, bad, num(it.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
 
       if (order.status === 'created' || order.status === 'released') {
         run("UPDATE orders SET status='running', start_time=IFNULL(start_time,?) WHERE id=?", [now(), order_id]);

@@ -80,7 +80,7 @@
       const cls = ['step'];
       if (sel) cls.push('sel');
       if (lock || done) cls.push('locked');
-      const v = S.vals[s.id] || { good: 0, bad: 0, reason: '' };
+      const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
       const note = lock ? '<span class="lock">🔒 需管理员/班组长报工</span>'
         : (done ? '<span class="lock" style="color:#6b7682;background:#eef1f5">已完成</span>' : '');
       const detail = (sel && canReport(s)) ? `
@@ -93,6 +93,7 @@
             <button type="button" class="dec" data-bdec="${s.id}" aria-label="减少不良数量"></button>
             <input id="b${s.id}" type="number" inputmode="numeric" min="0" value="${v.bad}">
             <button type="button" class="inc" data-binc="${s.id}" aria-label="增加不良数量"></button></div></div>
+          <div class="field"><span>工时（分钟，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 30"></div>
           <div class="field"><span>不良原因（选填）</span><textarea id="r${s.id}" class="reason" placeholder="如：尺寸超差 / 划伤">${esc(v.reason)}</textarea></div>
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
@@ -164,12 +165,13 @@
   // 将当前页面各工序输入框数值读回 S.vals，便于重渲染后保留
   function readVals() {
     S.steps.forEach((s) => {
-      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id), r = $app.querySelector('#r' + s.id);
-      const prev = S.vals[s.id] || { good: 0, bad: 0, reason: '' };
+      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id), r = $app.querySelector('#r' + s.id), w = $app.querySelector('#w' + s.id);
+      const prev = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
       S.vals[s.id] = {
         good: g ? Math.max(0, Math.floor(Number(g.value) || 0)) : prev.good,
         bad: b ? Math.max(0, Math.floor(Number(b.value) || 0)) : prev.bad,
         reason: r ? r.value.trim() : prev.reason,
+        min: w ? (w.value === '' ? '' : Math.max(0, Number(w.value) || 0)) : prev.min,
       };
     });
   }
@@ -180,8 +182,8 @@
     const steps = S.steps
       .filter((s) => S.sel.has(s.id) && s.allow_report !== 0 && s.status !== 'done')
       .map((s) => {
-        const v = S.vals[s.id] || { good: 0, bad: 0, reason: '' };
-        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason: v.reason };
+        const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
+        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason: v.reason, work_min: Number(v.min) || 0 };
       })
       .filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }
