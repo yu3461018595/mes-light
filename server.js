@@ -373,6 +373,11 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
     LEFT JOIN work_centers w ON w.id=s.work_center_id
     LEFT JOIN users u ON u.id=s.assignee_id
     WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
+  // 责任人 = 实际报工的人（可多人）；未报工则为空数组
+  const repsQ = all(`SELECT rp.order_step_id sid, u.name wname FROM reports rp JOIN users u ON u.id=rp.worker_id WHERE rp.order_step_id IN (SELECT id FROM order_steps WHERE order_id=?)`, [m[1]]);
+  const repMap = {};
+  for (const r of repsQ) { (repMap[r.sid] = repMap[r.sid] || new Set()).add(r.wname); }
+  o.steps.forEach((s) => { s.reporter_names = repMap[s.id] ? [...repMap[s.id]] : []; });
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id

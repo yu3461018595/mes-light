@@ -111,8 +111,11 @@
     const pr = find('processes', s.process_id) || {};
     const w = s.work_center_id ? find('work_centers', s.work_center_id) : null;
     const u = s.assignee_id ? find('users', s.assignee_id) : null;
+    const repNames = [...new Set(T('reports').filter((rp) => rp.order_step_id === s.id && rp.worker_id)
+      .map((rp) => { const wu = find('users', rp.worker_id); return wu ? wu.name : null; }).filter(Boolean))];
     return Object.assign({}, s, {
       process_code: pr.code, process_name: pr.name, wc_name: w ? w.name : '', assignee_name: u ? u.name : '',
+      reporter_names: repNames,
     });
   }
   function reportView(rp) {
