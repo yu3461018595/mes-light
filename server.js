@@ -154,7 +154,7 @@ route('GET', '/api/meta', [], (req, res) => {
     customers: all('SELECT id,code,name FROM customers ORDER BY code'),
     badReasons: all('SELECT * FROM bad_reasons ORDER BY id'),
     workers: all("SELECT id,name,team,work_center_id FROM users WHERE role='worker' AND active=1 ORDER BY name"),
-    teams: all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team"),
+    teams: all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team),
     routes: all('SELECT r.*, p.name product_name FROM routes r JOIN products p ON p.id=r.product_id ORDER BY r.code'),
     statuses: [
       ['created', '待下发'], ['released', '已下发'], ['running', '生产中'],
@@ -379,7 +379,7 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   for (const r of repsQ) { (repMap[r.sid] = repMap[r.sid] || new Set()).add(r.wname); }
   o.steps.forEach((s) => { s.reporter_names = repMap[s.id] ? [...repMap[s.id]] : []; });
   // 班组下拉数据源
-  o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team");
+  o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team);
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id

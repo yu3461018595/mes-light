@@ -263,7 +263,7 @@ Views.orders = {
     el.querySelectorAll('[data-report]').forEach((b) => b.onclick = () => location.hash = '#/report/' + id + '/' + b.dataset.report);
     el.querySelectorAll('[data-assign]').forEach((b) => b.onclick = () => {
       const st = o.steps.find((x) => x.id == b.dataset.assign);
-      const teams = (meta.teams && meta.teams.length) ? meta.teams : (o.teams || []);
+      const teams = ((meta.teams && meta.teams.length ? meta.teams : (o.teams || [])).map((t) => (t && t.team) ? t.team : t));
       UI.modal({
         title: '指派班组 · ' + st.process_name,
         body: `<label class="field"><span>指派班组</span>
