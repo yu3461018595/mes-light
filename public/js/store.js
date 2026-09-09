@@ -115,7 +115,7 @@
       .map((rp) => { const wu = find('users', rp.worker_id); return wu ? wu.name : null; }).filter(Boolean))];
     return Object.assign({}, s, {
       process_code: pr.code, process_name: pr.name, wc_name: w ? w.name : '', assignee_name: u ? u.name : '',
-      reporter_names: repNames,
+      assignee_team: s.assignee_team || '', reporter_names: repNames,
     });
   }
   function reportView(rp) {
@@ -131,6 +131,16 @@
   function doReport(b, act) {
     const step = find('order_steps', b.order_step_id);
     if (!step || step.order_id !== Number(b.order_id)) throw new Error('工序不存在');
+    // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
+    // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
+    if (step.assignee_team && act.role !== 'admin' && act.role !== 'leader') {
+      const wid = b.worker_id || act.id;
+      const wu = find('users', wid);
+      const wteam = (act.team) || (wu && wu.team);
+      if (wteam !== step.assignee_team) {
+        throw new Error('您所在班组「' + (wteam || '未分组') + '」无该工序的报工权限（限「' + step.assignee_team + '」班组）');
+      }
+    }
     const good = Math.max(0, Math.floor(num(b.qty_good)));
     const bad = Math.max(0, Math.floor(num(b.qty_bad)));
     if (good + bad <= 0) throw new Error('请填写合格数或不良数');
@@ -216,6 +226,7 @@
     customers: T('customers').map((r) => ({ id: r.id, code: r.code, name: r.name })),
     badReasons: T('bad_reasons'),
     workers: T('users').filter((u) => u.role === 'worker' && u.active).map((r) => ({ id: r.id, name: r.name, team: r.team, work_center_id: r.work_center_id })),
+    teams: [...new Set(T('users').map((u) => u.team).filter(Boolean))].sort(),
     routes: T('routes').map((r) => Object.assign({}, r, { product_name: (find('products', r.product_id) || {}).name || '' })),
     statuses: [['created', '待下发'], ['released', '已下发'], ['running', '生产中'], ['paused', '已暂停'], ['done', '已完成'], ['closed', '已关闭']],
   }));
@@ -293,9 +304,9 @@
   });
   R('PATCH', '/orders/(\\d+)/steps/(\\d+)', (m, b) => {
     if (requireOrderMgr()) return fail('无权限', 403);
-    update('order_steps', m[1], { assignee_id: b.assignee_id ? num(b.assignee_id) : null, work_center_id: b.work_center_id ? num(b.work_center_id) : null });
+    update('order_steps', m[1], { assignee_team: b.assignee_team || null, work_center_id: b.work_center_id ? num(b.work_center_id) : null });
     const o = find('orders', m[0]);
-    writeLog(actor(), '工序派工', (o ? o.code : m[0]) + ' 工序#' + m[1]);
+    writeLog(actor(), '工序派工', (o ? o.code : m[0]) + ' 工序#' + m[1] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
     return ok(true);
   });
   R('DELETE', '/orders/(\\d+)', (m) => {
@@ -464,15 +475,19 @@
   });
   R('GET', '/public/order/(\\d+)', (m, _b, q) => {
     const o = find('orders', m[0]); if (!o) return fail('工单不存在', 404);
+    const wTeam = q.wid ? (find('users', num(q.wid)) || {}).team : null;
+    const orderOpen = T('order_steps').some((s) => s.order_id === o.id && !s.assignee_team);
+    const workerHere = wTeam && T('order_steps').some((s) => s.order_id === o.id && s.assignee_team === wTeam);
+    if (q.t && wTeam && !workerHere && !orderOpen) return fail('您暂无该工单的报工权限', 403);
     const p = find('products', o.product_id) || {};
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_good), 0), qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
-    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_name: au ? au.name : '', process_name: pr.name, process_code: pr.code }; });
+    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
   });
   R('GET', '/public/worker/(\\d+)', (m) => {
     const w = find('users', m[0]); if (!w) return fail('员工不存在', 404);
-    const orders = T('orders').filter((o) => ['released', 'running', 'paused'].includes(o.status) && (T('order_steps').some((s) => s.order_id === o.id && s.assignee_id === w.id) || T('order_steps').some((s) => s.order_id === o.id && (s.assignee_id === null || s.assignee_id === undefined))))
+    const orders = T('orders').filter((o) => ['released', 'running', 'paused'].includes(o.status) && (T('order_steps').some((s) => s.order_id === o.id && s.assignee_team === w.team) || T('order_steps').some((s) => s.order_id === o.id && !s.assignee_team)))
       .map(orderRow).map((o) => ({ id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: o.qty_done, qty_bad: o.qty_bad, product_name: o.product_name }))
       .sort((a, b) => a.priority - b.priority || (a.plan_end > b.plan_end ? 1 : -1));
     return ok({ worker: { id: w.id, name: w.name, team: w.team }, orders });

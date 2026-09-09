@@ -154,6 +154,7 @@ route('GET', '/api/meta', [], (req, res) => {
     customers: all('SELECT id,code,name FROM customers ORDER BY code'),
     badReasons: all('SELECT * FROM bad_reasons ORDER BY id'),
     workers: all("SELECT id,name,team,work_center_id FROM users WHERE role='worker' AND active=1 ORDER BY name"),
+    teams: all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team"),
     routes: all('SELECT r.*, p.name product_name FROM routes r JOIN products p ON p.id=r.product_id ORDER BY r.code'),
     statuses: [
       ['created', '待下发'], ['released', '已下发'], ['running', '生产中'],
@@ -367,17 +368,18 @@ route('GET', '/api/orders', [], (req, res, _m, _b, _u, query) => {
 route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   const o = get(ORDER_SQL + ' WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, w.name wc_name, u.name assignee_name
+  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, w.name wc_name, s.assignee_team
     FROM order_steps s
     JOIN processes pr ON pr.id=s.process_id
     LEFT JOIN work_centers w ON w.id=s.work_center_id
-    LEFT JOIN users u ON u.id=s.assignee_id
     WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
   // 责任人 = 实际报工的人（可多人）；未报工则为空数组
   const repsQ = all(`SELECT rp.order_step_id sid, u.name wname FROM reports rp JOIN users u ON u.id=rp.worker_id WHERE rp.order_step_id IN (SELECT id FROM order_steps WHERE order_id=?)`, [m[1]]);
   const repMap = {};
   for (const r of repsQ) { (repMap[r.sid] = repMap[r.sid] || new Set()).add(r.wname); }
   o.steps.forEach((s) => { s.reporter_names = repMap[s.id] ? [...repMap[s.id]] : []; });
+  // 班组下拉数据源
+  o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team");
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
@@ -424,10 +426,10 @@ route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'leader'], (req, res, m, b
 });
 
 route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
-  run('UPDATE order_steps SET assignee_id=?, work_center_id=? WHERE id=? AND order_id=?',
-    [b.assignee_id || null, b.work_center_id || null, m[2], m[1]]);
+  run('UPDATE order_steps SET assignee_team=?, work_center_id=? WHERE id=? AND order_id=?',
+    [b.assignee_team || null, b.work_center_id || null, m[2], m[1]]);
   const o = get('SELECT code FROM orders WHERE id=?', [m[1]]);
-  writeLog(u, '工序派工', (o ? o.code : m[1]) + ' 工序#' + m[2]);
+  writeLog(u, '工序派工', (o ? o.code : m[1]) + ' 工序#' + m[2] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
   ok(res, true);
 });
 
@@ -496,6 +498,15 @@ route('GET', '/api/reports', [], (req, res, _m, _b, _u, query) => {
 function doReport(b, actor) {
   const step = get('SELECT * FROM order_steps WHERE id=? AND order_id=?', [b.order_step_id, b.order_id]);
   if (!step) throw new Error('工序不存在');
+  // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
+  // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
+  if (step.assignee_team && actor.role !== 'admin' && actor.role !== 'leader') {
+    const wid = b.worker_id || actor.id;
+    const wteam = actor.team || (get('SELECT team FROM users WHERE id=?', [wid]) || {}).team;
+    if (wteam !== step.assignee_team) {
+      throw new Error('您所在班组「' + (wteam || '未分组') + '」无该工序的报工权限（限「' + step.assignee_team + '」班组）');
+    }
+  }
   const good = Math.max(0, Math.floor(num(b.qty_good)));
   const bad = Math.max(0, Math.floor(num(b.qty_bad)));
   if (good + bad <= 0) throw new Error('请填写合格数或不良数');
@@ -708,13 +719,14 @@ route('GET', '/api/qr/worker/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) 
   ok(res, { worker: w, token, url, svg: makeQr(url) });
 });
 
-// 免登录：按工单令牌读取工单与工序（员工码可凭 wid 访问其被指派的工单）
+// 免登录：按工单令牌读取工单与工序（员工码可凭 wid 访问其被指派班组的工单）
 route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
   const orderOk = checkQrToken(q.t, 'order', m[1]);
   const wAssigned = q.wid && checkQrToken(q.t, 'worker', q.wid);
-  // 存在未指定责任人的工序 → 该工单对全员开放报工；否则仅被指派的员工可看
-  const orderOpen = !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_id IS NULL', [m[1]]);
-  const workerHere = wAssigned && !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_id=?', [m[1], num(q.wid)]);
+  // 存在未指派班组的工序 → 该工单对全员开放报工；否则仅被指派班组的员工可看
+  const wTeam = q.wid ? (get('SELECT team FROM users WHERE id=?', [num(q.wid)]) || {}).team : null;
+  const orderOpen = !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_team IS NULL', [m[1]]);
+  const workerHere = wTeam && !!get('SELECT 1 FROM order_steps WHERE order_id=? AND assignee_team=?', [m[1], wTeam]);
   if (!orderOk && !wAssigned) return fail(res, '二维码已失效或无权限', 403);
   if (!orderOk && wAssigned && !workerHere && !orderOpen) return fail(res, '您暂无该工单的报工权限', 403);
   const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
@@ -723,7 +735,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_id,pr.name process_name,pr.code process_code,u.name assignee_name FROM order_steps s JOIN processes pr ON pr.id=s.process_id LEFT JOIN users u ON u.id=s.assignee_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
   ok(res, { order: o, steps, workers });
 });
@@ -739,9 +751,9 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name
      FROM orders o JOIN products p ON p.id=o.product_id
      WHERE o.status IN ('released','running','paused')
-       AND (o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_id=?)
-            OR o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_id IS NULL))
-     ORDER BY o.priority,o.plan_end`, [m[1]]);
+       AND (o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_team=?)
+            OR o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_team IS NULL))
+     ORDER BY o.priority,o.plan_end`, [w.team]);
   ok(res, { worker: w, orders });
 });
 

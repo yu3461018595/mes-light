@@ -207,10 +207,7 @@ Views.orders = {
             { t: '序', f: (r) => `<span class="mono muted">${r.seq}</span>` },
             { t: '工序', f: (r) => `<b>${UI.esc(r.process_name)}</b><div class="small muted">${UI.esc(r.process_code)}</div>` },
             { t: '工作中心', f: (r) => UI.esc(r.wc_name || '—') },
-            { t: '责任人', f: (r) => {
-              const names = (r.reporter_names || []).filter(Boolean);
-              return names.length ? names.map((n) => UI.esc(n)).join('、') : '<span class="muted">暂无</span>';
-            } },
+            { t: '指派班组', f: (r) => r.assignee_team ? UI.esc(r.assignee_team) : '<span class="muted">暂无</span>' },
             { t: '合格', f: (r) => `<span class="mono">${UI.n2(r.qty_good)}</span>` },
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${r.qty_bad ? UI.n2(r.qty_bad) : '0'}</span>` },
             { t: '进度', w: '130px', f: (r) => `<div class="row" style="gap:8px;flex-wrap:nowrap">
@@ -219,7 +216,7 @@ Views.orders = {
             { t: '状态', f: (r) => UI.badge(r.status) },
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
-                ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">派工</button>` : ''}` },
+                ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}` },
           ], o.steps)}
         </div>
       </div>
@@ -266,18 +263,19 @@ Views.orders = {
     el.querySelectorAll('[data-report]').forEach((b) => b.onclick = () => location.hash = '#/report/' + id + '/' + b.dataset.report);
     el.querySelectorAll('[data-assign]').forEach((b) => b.onclick = () => {
       const st = o.steps.find((x) => x.id == b.dataset.assign);
+      const teams = (meta.teams && meta.teams.length) ? meta.teams : (o.teams || []);
       UI.modal({
-        title: '派工 · ' + st.process_name,
-        body: `<label class="field"><span>责任人</span>
-            <select class="input" id="aUser"><option value="">不指定</option>${UI.options(meta.workers, st.assignee_id || '', 'name')}</select></label>
+        title: '指派班组 · ' + st.process_name,
+        body: `<label class="field"><span>指派班组</span>
+            <select class="input" id="aTeam"><option value="">不指定（全员可报工）</option>${teams.map((t) => `<option value="${UI.esc(t)}"${st.assignee_team === t ? ' selected' : ''}>${UI.esc(t)}</option>`).join('')}</select></label>
           <label class="field"><span>工作中心 / 设备</span>
             <select class="input" id="aWc"><option value="">不指定</option>${UI.options(meta.workCenters, st.work_center_id || '', 'name')}</select></label>`,
         onOk: async (mask) => {
           await API.patch(`/orders/${id}/steps/${st.id}`, {
-            assignee_id: mask.querySelector('#aUser').value || null,
+            assignee_team: mask.querySelector('#aTeam').value || null,
             work_center_id: mask.querySelector('#aWc').value || null,
           });
-          UI.toast('派工成功', 'ok');
+          UI.toast('已指派班组', 'ok');
           App.render();
         },
       });

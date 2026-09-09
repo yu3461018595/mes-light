@@ -67,7 +67,7 @@
     const pct = o.qty_plan > 0 ? Math.round((o.qty_done / o.qty_plan) * 100) : 0;
     const workerSel = S.w
       ? `<input type="hidden" id="fWorker" value="${S.w}"><div class="pname">报工人：<b>${esc(S.worker ? S.worker.name : '本人')}</b></div>`
-      : `<select id="fWorker" class="input">${S.workers.map((x) => `<option value="${x.id}"${S.step && x.id === S.step.assignee_id ? ' selected' : ''}>${esc(x.name)}（${esc(x.team || '—')}）</option>`).join('')}</select>`;
+      : `<select id="fWorker" class="input">${S.workers.map((x) => `<option value="${x.id}"${S.worker && x.id == S.worker.id ? ' selected' : ''}>${esc(x.name)}（${esc(x.team || '—')}）</option>`).join('')}</select>`;
 
     $app.innerHTML = `
       <div class="card"><div class="card-b">
@@ -82,7 +82,7 @@
         : `<div class="card"><div class="card-h"><h3>选择工序</h3></div><div class="card-b" id="steps">
           ${S.steps.map((s) => `<div class="step ${s.id === (S.step && S.step.id) ? 'active' : ''} ${s.status === 'done' ? 'done' : ''}" data-s="${s.id}">
             <div class="nm">${s.seq}. ${esc(s.process_name)}</div>
-            <div class="sub">${esc(s.process_code || '')} · 责任人 ${esc(s.assignee_name || '暂无')}${s.status === 'done' ? ' · 已完成' : ''} · 已报 ${s.qty_good}/${s.qty_plan}</div>
+            <div class="sub">${esc(s.process_code || '')} · 指派班组 ${esc(s.assignee_team || '暂无')}${s.status === 'done' ? ' · 已完成' : ''} · 已报 ${s.qty_good}/${s.qty_plan}</div>
           </div>`).join('')}
         </div></div>
 
