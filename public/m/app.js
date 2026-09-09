@@ -88,13 +88,13 @@
 
         <div class="card"><div class="card-h"><h3>报工录入</h3></div><div class="card-b">
           <div class="field"><span>合格数量</span><div class="stepper">
-            <button type="button" id="gDec">−</button>
+            <button type="button" id="gDec" class="dec" aria-label="减少合格数量"></button>
             <input id="fGood" type="number" inputmode="numeric" min="0" value="0">
-            <button type="button" id="gInc">＋</button></div></div>
+            <button type="button" id="gInc" class="inc" aria-label="增加合格数量"></button></div></div>
           <div class="field"><span>不良数量</span><div class="stepper">
-            <button type="button" id="bDec">−</button>
+            <button type="button" id="bDec" class="dec" aria-label="减少不良数量"></button>
             <input id="fBad" type="number" inputmode="numeric" min="0" value="0">
-            <button type="button" id="bInc">＋</button></div></div>
+            <button type="button" id="bInc" class="inc" aria-label="增加不良数量"></button></div></div>
           <div class="field"><span>不良原因（选填）</span><input id="fReason" type="text" placeholder="如：尺寸超差 / 划伤"></div>
           <div class="field"><span>报工人</span>${workerSel}</div>
           <button class="btn" id="submit">提交报工</button>
