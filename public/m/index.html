@@ -43,6 +43,14 @@
     width: 4px; height: 22px; border-radius: 3px; background: currentColor; }
   .stepper input { flex: 1; height: 52px; border: 1.5px solid #e6eaf0; border-radius: 12px; text-align: center;
     font-size: 22px; font-weight: 700; -webkit-appearance: none; }
+  /* 缩小型 stepper：用于合格/不良数量，整体更紧凑 */
+  .stepper.sm { gap: 8px; }
+  .stepper.sm button { width: 42px; height: 42px; border-radius: 10px; }
+  .stepper.sm button::before { width: 18px; height: 3px; border-radius: 2px; }
+  .stepper.sm button.inc::after { width: 3px; height: 18px; border-radius: 2px; }
+  .stepper.sm input { height: 42px; font-size: 19px; border-radius: 10px; }
+  /* 放大型文本框：用于不良原因 */
+  .reason { height: 104px; line-height: 1.5; }
   select, input[type=date], textarea { width: 100%; height: 48px; border: 1.5px solid #e6eaf0; border-radius: 12px;
     padding: 0 12px; font-size: 15px; background: #fff; -webkit-appearance: none; }
   textarea { height: 70px; padding: 10px 12px; resize: none; }
