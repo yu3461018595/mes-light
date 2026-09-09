@@ -211,8 +211,8 @@ Views.orders = {
             { t: '合格', f: (r) => `<span class="mono">${UI.n2(r.qty_good)}</span>` },
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${r.qty_bad ? UI.n2(r.qty_bad) : '0'}</span>` },
             { t: '进度', w: '130px', f: (r) => `<div class="row" style="gap:8px;flex-wrap:nowrap">
-                ${UI.progress(UI.pct(r.qty_good + r.qty_bad, r.qty_plan), r.status === 'done' ? 'ok' : '')}
-                <span class="small mono">${UI.f1(UI.pct(r.qty_good + r.qty_bad, r.qty_plan))}%</span></div>` },
+                ${UI.progress(UI.pct(r.qty_good, r.qty_plan), r.status === 'done' ? 'ok' : '')}
+                <span class="small mono">${UI.f1(UI.pct(r.qty_good, r.qty_plan))}%</span></div>` },
             { t: '状态', f: (r) => UI.badge(r.status) },
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
