@@ -40,6 +40,13 @@ cp -a "$TMP/mes/." "$APP_DIR/"
 say "   代码覆盖完成，新增/改动文件已生效"
 
 say "== 3/4 停止旧容器并重建镜像 =="
+# 二维码稳定性：先从旧容器抢救扫码密钥到持久数据卷（data/.secret），避免重建后已印二维码失效
+if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^mes-light$'; then
+  if [ ! -f "$APP_DIR/data/.secret" ] && docker exec mes-light test -f /app/.secret 2>/dev/null; then
+    docker cp mes-light:/app/.secret "$APP_DIR/data/.secret" && chmod 600 "$APP_DIR/data/.secret" \
+      && say "   已迁移扫码密钥到 data/.secret（二维码保持有效）"
+  fi
+fi
 if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^mes-light$'; then
   if docker compose version >/dev/null 2>&1; then
     docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml down

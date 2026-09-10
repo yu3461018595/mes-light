@@ -86,13 +86,27 @@ const genCode = (p) => p + new Date().toISOString().slice(2, 10).replace(/-/g, '
 
 /* ------------------------------ 扫码报工（免登录令牌） ------------------------------
  * 用 HMAC(密钥, type:id) 生成二维码令牌，无需新增表，重启后仍稳定、不可伪造。
- * 两种令牌：order:<id>（机台/工单码，扫码后可选报工人） 与 worker:<id>（员工码，绑定本人）。 */
+ * 两种令牌：order:<id>（机台/工单码，扫码后可选报工人） 与 worker:<id>（员工码，绑定本人）。
+ * 密钥保存在数据目录（DATA_DIR，Docker 持久卷）下，镜像重建/重新部署不会丢失，
+ * 从而保证已印刷的工单/员工二维码永久有效；旧版密钥（应用根目录 .secret）会自动迁移。 */
 const SECRET = (() => {
-  const f = path.join(__dirname, '.secret');
-  try { if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8').trim(); } catch (e) { /* ignore */ }
-  const s = crypto.randomBytes(32).toString('hex');
-  try { fs.writeFileSync(f, s, { mode: 0o600 }); } catch (e) { /* ignore */ }
-  return s;
+  const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
+  const f = path.join(dataDir, '.secret');
+  const legacy = path.join(__dirname, '.secret');
+  const gen = () => crypto.randomBytes(32).toString('hex');
+  const save = (p, s) => { try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s, { mode: 0o600 }); } catch (e) { /* ignore */ } };
+  try {
+    if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8').trim();
+    if (fs.existsSync(legacy)) {
+      const s = fs.readFileSync(legacy, 'utf8').trim();
+      if (s) { save(f, s); return s; } // 迁移到数据目录，容器重建不再丢失
+    }
+    const s = gen();
+    save(f, s);
+    if (!fs.existsSync(f)) save(legacy, s); // 数据目录不可写时退回旧位置
+    return s;
+  } catch (e) { /* ignore */ }
+  return gen();
 })();
 const qrToken = (type, id) => crypto.createHmac('sha256', SECRET).update(type + ':' + id).digest('base64url');
 function checkQrToken(token, type, id) {
