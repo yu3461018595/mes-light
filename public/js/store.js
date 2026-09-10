@@ -461,11 +461,11 @@
     for (const r of T('reports')) {
       if (r.report_date >= from) {
         const u = find('users', r.worker_id) || { name: '?', team: '' };
-        const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0 });
-        e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min);
+        const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0, cnt: 0, dys: {} });
+        e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); e.cnt++; e.dys[r.report_date] = 1;
       }
     }
-    return ok(Object.values(map).sort((a, b) => b.good - a.good));
+    return ok(Object.values(map).map((e) => { const d = e.dys; delete e.dys; e.dys = Object.keys(d).length; return e; }).sort((a, b) => b.good - a.good));
   });
   R('GET', '/stats/orders', () => {
     const list = T('orders').filter((o) => o.status !== 'closed').map(orderRow)

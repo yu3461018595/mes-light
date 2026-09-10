@@ -61,14 +61,19 @@ Views.stats = {
       </div>
 
       <div class="card" style="margin-bottom:14px">
-        <div class="card-h"><h3>人员产出明细</h3><span class="small muted">按合格数排序</span></div>
-        <div class="card-b tight">${UI.table([
+        <div class="card-h"><h3>人员产出明细</h3><span class="small muted">按合格数排序 · 含工时统计</span></div>
+        <div class="card-b">
+          <div class="small muted" style="margin-bottom:8px">期间总工时 <b class="mono">${UI.f1(rank.reduce((s, r) => s + (r.minu || 0), 0) / 60)}</b> 小时 · 人均 <b class="mono">${UI.f1(rank.length ? rank.reduce((s, r) => s + (r.minu || 0), 0) / 60 / rank.length : 0)}</b> 小时 · 报工 <b class="mono">${UI.n2(rank.reduce((s, r) => s + (r.cnt || 0), 0))}</b> 次</div>
+          ${UI.table([
           { t: '排名', f: (r, i) => `<b style="color:${i < 3 ? 'var(--primary)' : 'var(--text3)'}">${i + 1}</b>` },
           { t: '姓名', k: 'name' }, { t: '班组', f: (r) => UI.esc(r.team || '—') },
           { t: '合格数', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.good)}</span>` },
           { t: '不良数', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.bad)}</span>` },
           { t: '良率', f: (r) => { const p = UI.pct(r.good, r.good + r.bad); return `<span class="chip ${p >= 98 ? 'chip-ok' : p >= 95 ? 'chip-warn' : 'chip-danger'}">${UI.f1(p)}%</span>`; } },
+          { t: '报工次数', f: (r) => `<span class="mono">${UI.n2(r.cnt || 0)}</span>` },
+          { t: '出勤天数', f: (r) => `<span class="mono">${UI.n2(r.dys || 0)}</span>` },
           { t: '工时', f: (r) => `<span class="mono">${UI.f1(r.minu / 60)} h</span>` },
+          { t: '日均工时', f: (r) => `<span class="mono">${r.dys ? UI.f1(r.minu / r.dys / 60) : '—'} h/天</span>` },
           { t: '件均工时', f: (r) => `<span class="mono">${r.good ? UI.f1(r.minu / r.good) : '—'} 分/件</span>` },
         ], rank, { emptyText: '所选区间没有报工数据' })}</div>
       </div>
@@ -97,8 +102,9 @@ Views.stats = {
     trend.forEach((r) => lines.push([r.d, r.good, r.bad, UI.f1(r.minu)].join(',')));
     lines.push('', '【不良原因】', '原因,数量');
     bad.forEach((r) => lines.push([r.name, r.qty].join(',')));
-    lines.push('', '【人员产出】', '姓名,班组,合格数,不良数,工时(分钟)');
-    rank.forEach((r) => lines.push([r.name, r.team || '', r.good, r.bad, UI.f1(r.minu)].join(',')));
+    lines.push('', '【人员产出】', '姓名,班组,合格数,不良数,良率%,报工次数,出勤天数,工时(小时),日均工时(h/天),件均工时(分/件)');
+    rank.forEach((r) => lines.push([r.name, r.team || '', r.good, r.bad, UI.f1(UI.pct(r.good, r.good + r.bad)), r.cnt || 0, r.dys || 0,
+      UI.f1(r.minu / 60), r.dys ? UI.f1(r.minu / r.dys / 60) : '', r.good ? UI.f1(r.minu / r.good) : ''].join(',')));
     lines.push('', '【工单达成】', '工单号,产品,状态,计划数,完工数,达成率%,交期');
     orders.forEach((r) => lines.push([r.code, r.product_name, UI.STATUS[r.status] ? UI.STATUS[r.status][0] : r.status,
       r.qty_plan, r.qty_done, UI.pct(r.qty_done, r.qty_plan), r.plan_end].join(',')));

@@ -725,7 +725,8 @@ route('GET', '/api/stats/bad', [], (req, res, _m, _b, _u, q) => {
 
 route('GET', '/api/stats/ranking', [], (req, res, _m, _b, _u, q) => {
   const days = Math.min(90, Math.max(3, num(q.days, 7)));
-  ok(res, all(`SELECT u.id, u.name, u.team, SUM(r.qty_good) good, SUM(r.qty_bad) bad, SUM(r.work_min) minu
+  ok(res, all(`SELECT u.id, u.name, u.team, SUM(r.qty_good) good, SUM(r.qty_bad) bad, SUM(r.work_min) minu,
+      COUNT(*) cnt, COUNT(DISTINCT r.report_date) dys
     FROM reports r JOIN users u ON u.id=r.worker_id
     WHERE r.report_date >= date('now', ?)
     GROUP BY u.id ORDER BY good DESC`, ['-' + (days - 1) + ' day']));

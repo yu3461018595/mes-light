@@ -117,6 +117,7 @@ Views.dashboard = {
             <div class="card-h"><h3>人员产出排行（7天）</h3></div>
             <div class="card-b">
               ${UI.barChart(rank.slice(0, 6).map((r) => ({ name: r.name, qty: r.good, unit: ' 件' })), { color: '#1d4ed8', labelW: 60, title: '人员产出排行（7天）' })}
+              <div class="small muted" style="margin-top:8px">近 7 天合计工时 <b>${UI.f1(rank.reduce((s, x) => s + (x.minu || 0), 0) / 60)}</b> 小时 · 人均 <b>${UI.f1(rank.length ? rank.reduce((s, x) => s + (x.minu || 0), 0) / 60 / rank.length : 0)}</b> 小时</div>
             </div>
           </div>
         </div>
