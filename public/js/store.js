@@ -619,6 +619,21 @@
     });
     DB.inventory_tx = T('inventory_tx').filter((t) => !(t.ref_type === refType && Number(t.ref_id) === Number(refId)));
   }
+  // 仅传 material_id 时，从物料档案回带编码/名称/规格/单位/默认仓库
+  function fillFromMaterial(b, mid) {
+    if (!mid) return b;
+    const m = T('materials').find((x) => Number(x.id) === Number(mid));
+    if (!m) return b;
+    if (!String(b.material_code || '').trim()) b.material_code = m.code;
+    if (!String(b.material_name || '').trim()) b.material_name = m.name;
+    if (!String(b.product_code || '').trim()) b.product_code = m.code;
+    if (!String(b.product_name || '').trim()) b.product_name = m.name;
+    if (!String(b.material_spec || '').trim()) b.material_spec = m.spec || null;
+    if (!String(b.spec || '').trim()) b.spec = m.spec || null;
+    if (!String(b.unit || '').trim()) b.unit = m.unit || '件';
+    if (!b.warehouse_id && m.warehouse_id) b.warehouse_id = m.warehouse_id;
+    return b;
+  }
   function docWrite(table, name, txType, prefix) {
     const check = () => (requireRole('admin', 'leader') ? fail('无权限', 403) : null);
     R('POST', '/' + table, (_p, b) => {
@@ -626,6 +641,7 @@
       const code = b.code || prefix + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
       let mid = b.material_id ? num(b.material_id) : null;
       if (!mid) { const c = String(b.material_code || b.product_code || '').trim(); const m = c ? T('materials').find((x) => x.code === c) : null; if (m) mid = m.id; }
+      fillFromMaterial(b, mid);
       const id = insert(table, Object.assign({}, b, { code, material_id: mid || null, created_by: actor().id, created_at: nowISO() }));
       try {
         if (mid && b.result !== 'rejected') applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: txType, ref_type: table, ref_id: id, ref_code: code, order_id: b.order_id, operator: actor().name, tx_date: b.incoming_date || b.in_date || today(), remark: name + ' ' + code });
@@ -637,6 +653,7 @@
       const f = check(); if (f) return f;
       let mid = b.material_id ? num(b.material_id) : null;
       if (!mid) { const c = String(b.material_code || b.product_code || '').trim(); const mm = c ? T('materials').find((x) => x.code === c) : null; if (mm) mid = mm.id; }
+      fillFromMaterial(b, mid);
       const before = Object.assign({}, find(table, m[0]));
       try {
         revertStock(table, m[0], actor().name);

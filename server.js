@@ -830,6 +830,20 @@ function resolveMaterialId(b) {
   }
   return null;
 }
+// 单据仅传了 material_id 时，从物料档案回带编码/名称/规格/单位/默认仓库，避免 NOT NULL 字段落空
+function fillFromMaterial(b, mid) {
+  if (!mid) return;
+  const m = get('SELECT code,name,spec,unit,warehouse_id FROM materials WHERE id=?', [mid]);
+  if (!m) return;
+  if (!String(b.material_code || '').trim()) b.material_code = m.code;
+  if (!String(b.material_name || '').trim()) b.material_name = m.name;
+  if (!String(b.product_code || '').trim()) b.product_code = m.code;
+  if (!String(b.product_name || '').trim()) b.product_name = m.name;
+  if (!String(b.material_spec || '').trim()) b.material_spec = m.spec || null;
+  if (!String(b.spec || '').trim()) b.spec = m.spec || null;
+  if (!String(b.unit || '').trim()) b.unit = m.unit || '件';
+  if (!b.warehouse_id && m.warehouse_id) b.warehouse_id = m.warehouse_id;
+}
 function invEnsure(materialId, warehouseId, batch, location) {
   const wid = num(warehouseId) || 0;
   const bt = String(batch || '').trim();
@@ -889,6 +903,7 @@ route('POST', '/api/incoming_materials', ['admin', 'leader'], (req, res, _m, b, 
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('LM');
   if (get('SELECT id FROM incoming_materials WHERE code=?', [code])) return fail(res, '该来料单号已存在');
   const mid = resolveMaterialId(b);
+  fillFromMaterial(b, mid);
   let id;
   tx(() => {
     id = insert(`INSERT INTO incoming_materials(code,incoming_date,supplier,material_id,warehouse_id,material_code,material_name,material_spec,qty,unit,batch,order_id,inspector,result,remark,created_by,created_at)
@@ -906,6 +921,7 @@ route('POST', '/api/incoming_materials', ['admin', 'leader'], (req, res, _m, b, 
 });
 route('PUT', '/api/incoming_materials/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
   const mid = resolveMaterialId(b);
+  fillFromMaterial(b, mid);
   tx(() => {
     revertStock('incoming_materials', Number(m[1]), u.name);
     run(`UPDATE incoming_materials SET code=?,incoming_date=?,supplier=?,material_id=?,warehouse_id=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,batch=?,order_id=?,inspector=?,result=?,remark=? WHERE id=?`,
@@ -940,6 +956,7 @@ route('POST', '/api/finished_goods_in', ['admin', 'leader'], (req, res, _m, b, u
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('RK');
   if (get('SELECT id FROM finished_goods_in WHERE code=?', [code])) return fail(res, '该入库单号已存在');
   const mid = resolveMaterialId(b);
+  fillFromMaterial(b, mid);
   let id;
   tx(() => {
     id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
@@ -957,6 +974,7 @@ route('POST', '/api/finished_goods_in', ['admin', 'leader'], (req, res, _m, b, u
 });
 route('PUT', '/api/finished_goods_in/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
   const mid = resolveMaterialId(b);
+  fillFromMaterial(b, mid);
   tx(() => {
     revertStock('finished_goods_in', Number(m[1]), u.name);
     run(`UPDATE finished_goods_in SET code=?,in_date=?,order_id=?,material_id=?,warehouse_id=?,product_code=?,product_name=?,spec=?,qty=?,unit=?,batch=?,location=?,inspector=?,result=?,remark=? WHERE id=?`,
