@@ -9,6 +9,7 @@
 <link rel="apple-touch-icon" href="/icon-512.png">
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  input, select, textarea, button { max-width: 100%; }
   body { margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
     background: #f2f4f8; color: #1f2733; -webkit-text-size-adjust: 100%; }
   .top { background: #1d4ed8; color: #fff; padding: 14px 16px; font-size: 16px; font-weight: 600;
@@ -27,7 +28,7 @@
   .bar > i { display: block; height: 100%; background: linear-gradient(90deg,#1d4ed8,#4f7df0); }
   .prog-txt { display: flex; justify-content: space-between; font-size: 13px; color: #5a6673; margin-top: 8px; }
   .step { border: 1.5px solid #e6eaf0; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
-    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 12px; cursor: pointer; }
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 12px; cursor: pointer; max-width: 100%; }
   .step.active { border-color: #1d4ed8; background: #f5f8ff; }
   .step.sel { border-color: #1d4ed8; background: #f5f8ff; box-shadow: 0 0 0 2px rgba(29,78,216,.15); }
   .step.done { opacity: .55; }
@@ -38,16 +39,17 @@
   .step.sel .tick { background: #1d4ed8; border-color: #1d4ed8; }
   .step .lock { display: inline-block; margin-top: 6px; font-size: 12px; color: #d93b3b; background: #fdecec;
     border-radius: 6px; padding: 2px 8px; }
-  .step .subrep { flex-basis: 100%; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e3e8ef; }
+  .step .subrep { flex: 1 1 100%; min-width: 0; max-width: 100%; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e3e8ef; }
+  .step .subrep .field { min-width: 0; max-width: 100%; margin-bottom: 12px; }
   .pick-tools { display: flex; gap: 14px; }
   .link { background: none; border: none; color: #1d4ed8; font-size: 13px; font-weight: 700; padding: 0; }
   .sel-count { padding: 0 16px 14px; font-size: 13px; color: #5a6673; }
   .sel-count b { color: #1d4ed8; font-size: 15px; }
-  .step .nm { font-weight: 700; font-size: 15px; }
-  .step .sub { font-size: 12.5px; color: #6b7682; margin-top: 3px; }
+  .step .nm { font-weight: 700; font-size: 15px; overflow-wrap: anywhere; word-break: break-word; }
+  .step .sub { font-size: 12.5px; color: #6b7682; margin-top: 3px; overflow-wrap: anywhere; word-break: break-word; }
   .field { margin-bottom: 14px; }
   .field > span { display: block; font-size: 13px; color: #5a6673; margin-bottom: 6px; font-weight: 600; }
-  .stepper { display: flex; align-items: center; gap: 10px; }
+  .stepper { display: flex; align-items: center; gap: 10px; max-width: 100%; }
   .stepper button { position: relative; width: 52px; height: 52px; border-radius: 12px; border: none;
     background: #eef1f5; color: #1d4ed8; flex: 0 0 auto; overflow: hidden; }
   /* 用 CSS 绘制 ±，避免部分设备字体缺少全角加号字形导致加号不可见 */
@@ -55,7 +57,7 @@
     width: 22px; height: 4px; border-radius: 3px; background: currentColor; }
   .stepper button.inc::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
     width: 4px; height: 22px; border-radius: 3px; background: currentColor; }
-  .stepper input { flex: 1; height: 52px; border: 1.5px solid #e6eaf0; border-radius: 12px; text-align: center;
+  .stepper input { flex: 1 1 0; min-width: 0; width: 100%; height: 52px; border: 1.5px solid #e6eaf0; border-radius: 12px; text-align: center;
     font-size: 22px; font-weight: 700; -webkit-appearance: none; }
   /* 缩小型 stepper：用于合格/不良数量，整体更紧凑 */
   .stepper.sm { gap: 8px; }
