@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], logs: [], incoming_materials: [], finished_goods_in: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], logs: [], incoming_materials: [], finished_goods_in: [], materials: [], warehouses: [], inventory: [], inventory_tx: [] };
     try {
       const res = await fetch('/data/seed.json', { cache: 'no-store' });
       DB = res.ok ? await res.json() : EMPTY;
@@ -540,6 +540,7 @@
         return ok(true);
       });
     }
+    if (opts.noDelete) return;
     R('DELETE', '/' + table + '/(\\d+)', (m) => {
       if (forbid()) return fail('无权限', 403);
       const id = Number(m[0]);
@@ -554,8 +555,110 @@
   crud('work_centers', '工作中心', { unique: 'code', onDelete: (id) => { if (T('order_steps').some((s) => s.work_center_id === id) || T('users').some((u) => u.work_center_id === id) || T('route_steps').some((s) => s.work_center_id === id)) return '该工作中心已被使用，无法删除'; return ''; } });
   crud('customers', '客户', { unique: 'code' });
   crud('bad_reasons', '不良原因', { unique: 'name' });
-  crud('incoming_materials', '来料记录', { roles: ['admin', 'leader'] });
-  crud('finished_goods_in', '成品入库', { roles: ['admin', 'leader'] });
+  crud('materials', '物料档案', { roles: ['admin', 'leader'], unique: 'code', onDelete: (id) => { if (T('inventory_tx').some((t) => Number(t.material_id) === id)) return '该物料已有库存流水，不能删除（可停用）'; return ''; } });
+  crud('warehouses', '仓库', { roles: ['admin', 'leader'], unique: 'code', onDelete: (id) => { if (T('inventory').some((r) => Number(r.warehouse_id) === id)) return '该仓库已有库存记录，不能删除'; return ''; } });
+
+  R('POST', '/materials/import_products', () => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    let n = 0;
+    T('products').forEach((p) => {
+      if (!p.code || T('materials').some((m) => m.code === p.code)) return;
+      insert('materials', { code: p.code, name: p.name, spec: p.spec || null, material: null, category: '成品', unit: p.unit || '件', warehouse_id: null, location: null, safe_min: 0, safe_max: null, active: 1, remark: '从产品档案导入', created_at: nowISO() });
+      n++;
+    });
+    return ok({ imported: n });
+  });
+
+  /* ------------------------------ 库存台账 / 收发明细 ------------------------------ */
+  R('GET', '/inventory', () => ok(T('inventory').map((r) => {
+    const m = find('materials', r.material_id) || {};
+    const w = r.warehouse_id ? find('warehouses', r.warehouse_id) : null;
+    return Object.assign({}, r, { material_code: m.code, material_name: m.name, spec: m.spec, unit: m.unit, category: m.category, safe_min: m.safe_min, safe_max: m.safe_max, warehouse_name: w ? w.name : '' });
+  })));
+  R('GET', '/inventory_tx', (_p, _b, q) => {
+    let rows = T('inventory_tx').slice().sort((a, b) => b.id - a.id);
+    if (q.material_id) rows = rows.filter((t) => Number(t.material_id) === Number(q.material_id));
+    if (q.tx_type) rows = rows.filter((t) => t.tx_type === q.tx_type);
+    if (q.order_id) rows = rows.filter((t) => Number(t.order_id) === Number(q.order_id));
+    return ok(rows.slice(0, num(q.limit, 500)).map((t) => {
+      const m = find('materials', t.material_id) || {};
+      const w = t.warehouse_id ? find('warehouses', t.warehouse_id) : null;
+      const o = t.order_id ? find('orders', t.order_id) : null;
+      return Object.assign({}, t, { material_code: m.code, material_name: m.name, unit: m.unit, warehouse_name: w ? w.name : '', order_code: o ? o.code : '' });
+    }));
+  });
+
+  /* 单据写操作：同步生成收发明细并更新库存台账（与后端规则一致） */
+  function applyStock(o) {
+    const mid = Number(o.material_id);
+    const qty = num(o.qty);
+    if (!mid || !qty) return;
+    const m0 = find('materials', mid) || {};
+    const wh = o.warehouse_id ? Number(o.warehouse_id) : (m0.warehouse_id ? Number(m0.warehouse_id) : null);
+    let row = T('inventory').find((r) => Number(r.material_id) === mid && Number(r.warehouse_id || 0) === Number(wh || 0) && String(r.batch || '') === String(o.batch || ''));
+    if (!row) {
+      const id = insert('inventory', { material_id: mid, warehouse_id: wh, batch: o.batch || null, location: o.location || null, qty: 0, updated_at: nowISO() });
+      row = find('inventory', id);
+    }
+    const m = find('materials', mid) || {};
+    const before = num(row.qty), after = before + qty;
+    if (after < -1e-9) throw new Error('库存不足：' + (m.name || mid) + '，当前库存 ' + before + '，本次出库 ' + Math.abs(qty));
+    row.qty = after;
+    if (o.location) row.location = o.location;
+    row.updated_at = nowISO();
+    insert('inventory_tx', {
+      material_id: mid, warehouse_id: wh, batch: row.batch, tx_type: o.tx_type, qty,
+      before_qty: before, after_qty: after, ref_type: o.ref_type || null, ref_id: o.ref_id || null,
+      ref_code: o.ref_code || null, order_id: o.order_id ? Number(o.order_id) : null, operator: o.operator || null,
+      tx_date: o.tx_date || today(), remark: o.remark || null, created_at: nowISO(),
+    });
+  }
+  function revertStock(refType, refId, operator) {
+    T('inventory_tx').filter((t) => t.ref_type === refType && Number(t.ref_id) === Number(refId)).forEach((t) => {
+      applyStock({ material_id: t.material_id, warehouse_id: t.warehouse_id, batch: t.batch, qty: -num(t.qty), tx_type: t.tx_type, order_id: t.order_id, operator: operator || t.operator, tx_date: today(), remark: '单据修改/删除冲销' });
+    });
+    DB.inventory_tx = T('inventory_tx').filter((t) => !(t.ref_type === refType && Number(t.ref_id) === Number(refId)));
+  }
+  function docWrite(table, name, txType, prefix) {
+    const check = () => (requireRole('admin', 'leader') ? fail('无权限', 403) : null);
+    R('POST', '/' + table, (_p, b) => {
+      const f = check(); if (f) return f;
+      const code = b.code || prefix + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
+      let mid = b.material_id ? num(b.material_id) : null;
+      if (!mid) { const c = String(b.material_code || b.product_code || '').trim(); const m = c ? T('materials').find((x) => x.code === c) : null; if (m) mid = m.id; }
+      const id = insert(table, Object.assign({}, b, { code, material_id: mid || null, created_by: actor().id, created_at: nowISO() }));
+      try {
+        if (mid && b.result !== 'rejected') applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: txType, ref_type: table, ref_id: id, ref_code: code, order_id: b.order_id, operator: actor().name, tx_date: b.incoming_date || b.in_date || today(), remark: name + ' ' + code });
+      } catch (e) { remove(table, id); return fail(e.message, 400); }
+      writeLog(actor(), '新增' + name, code);
+      return ok({ id, code });
+    });
+    R('PUT', '/' + table + '/(\\d+)', (m, b) => {
+      const f = check(); if (f) return f;
+      let mid = b.material_id ? num(b.material_id) : null;
+      if (!mid) { const c = String(b.material_code || b.product_code || '').trim(); const mm = c ? T('materials').find((x) => x.code === c) : null; if (mm) mid = mm.id; }
+      const before = Object.assign({}, find(table, m[0]));
+      try {
+        revertStock(table, m[0], actor().name);
+        update(table, m[0], Object.assign({}, b, { material_id: mid || null }));
+        if (mid && b.result !== 'rejected') applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: txType, ref_type: table, ref_id: Number(m[0]), ref_code: b.code || '', order_id: b.order_id, operator: actor().name, tx_date: b.incoming_date || b.in_date || today(), remark: name + ' ' + (b.code || '') });
+      } catch (e) { update(table, m[0], before); return fail(e.message, 400); }
+      writeLog(actor(), '修改' + name, '#' + m[0]);
+      return ok(true);
+    });
+    R('DELETE', '/' + table + '/(\\d+)', (m) => {
+      if (requireRole('admin')) return fail('无权限', 403);
+      const id = Number(m[0]);
+      try { revertStock(table, id, actor().name); } catch (e) { return fail(e.message, 400); }
+      remove(table, id);
+      writeLog(actor(), '删除' + name, '#' + id);
+      return ok(true);
+    });
+  }
+  crud('incoming_materials', '来料记录', { roles: ['admin', 'leader'], noWrite: true, noDelete: true });
+  crud('finished_goods_in', '成品入库', { roles: ['admin', 'leader'], noWrite: true, noDelete: true });
+  docWrite('incoming_materials', '来料入库', 'in_incoming', 'LM');
+  docWrite('finished_goods_in', '成品入库', 'in_finish', 'RK');
   crud('users', '用户', { admin: true, unique: 'username', onDelete: (id) => { if (Store.currentUser && id === Store.currentUser.id) return '不能删除当前登录的账号'; const rep = T('reports').filter((r) => r.worker_id === id).length; const asg = T('order_steps').filter((s) => s.assignee_id === id).length; if (rep || asg) return `该员工已有 ${rep} 条报工、${asg} 条派工记录，无法删除；如需停用，请在“编辑”中将其状态设为“停用”。`; return ''; } });
   // 工艺路线：写操作走下方专用处理器（会展开 steps → route_steps），故这里 noWrite
   crud('routes', '工艺路线', { roles: ['admin', 'leader'], unique: 'code', noWrite: true, onDelete: (id) => { if (T('orders').some((o) => o.route_id === id)) return '该工艺路线已被工单使用，无法删除'; return ''; } });

@@ -28,7 +28,7 @@ seed();
 
 /* 列类型缓存：把空串按数值列转成 0，避免 NOT NULL 约束失败（新增/编辑时用户留空数字） */
 const colTypes = {};
-for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in']) {
+for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx']) {
   try {
     colTypes[t] = {};
     for (const row of all(`PRAGMA table_info(${t})`)) colTypes[t][row.name] = (row.type || '').toUpperCase();
@@ -815,65 +815,270 @@ route('GET', '/api/logs', [], (req, res, _m, _b, _u, q) => {
   ok(res, all('SELECT * FROM logs ORDER BY id DESC LIMIT ?', [limit]));
 });
 
+/* ------------------------------ 库存台账 / 收发明细（核心） ------------------------------
+ * 规则：
+ *  1) 单据（来料入库、成品入库…）保存时，在同一事务内写一条收发明细流水并更新库存台账；
+ *  2) 单据修改/删除前先冲销原流水、再重算库存，保证账实一致；
+ *  3) 出库导致库存为负时直接报错并回滚（库存不足不允许出库）；
+ *  4) 检验结论为「不合格(rejected)」的单据不计入库存（退货/待处理）。 */
+function resolveMaterialId(b) {
+  if (b.material_id) return num(b.material_id) || null;
+  const code = String(b.material_code || b.product_code || '').trim();
+  if (code) {
+    const m = get('SELECT id FROM materials WHERE code=?', [code]);
+    if (m) return m.id;
+  }
+  return null;
+}
+function invEnsure(materialId, warehouseId, batch, location) {
+  const wid = num(warehouseId) || 0;
+  const bt = String(batch || '').trim();
+  let r = get('SELECT * FROM inventory WHERE material_id=? AND IFNULL(warehouse_id,0)=? AND IFNULL(batch,\'\')=?', [materialId, wid, bt]);
+  if (r) return r;
+  const id = insert('INSERT INTO inventory(material_id,warehouse_id,batch,location,qty,updated_at) VALUES(?,?,?,?,0,?)',
+    [materialId, wid || null, bt || null, location || null, now()]);
+  return get('SELECT * FROM inventory WHERE id=?', [id]);
+}
+function applyStock(o) {
+  const materialId = num(o.material_id);
+  const qty = num(o.qty);
+  if (!materialId || !qty) return null;
+  const m = get('SELECT name,unit,warehouse_id FROM materials WHERE id=?', [materialId]);
+  if (!m) return null;
+  // 单据未指定仓库时，回退到物料档案的默认仓库，避免产生「无仓库」的平行台账行
+  const wh = num(o.warehouse_id) || num(m.warehouse_id) || null;
+  const row = invEnsure(materialId, wh, o.batch, o.location);
+  const before = num(row.qty);
+  const after = before + qty;
+  if (after < -1e-9) throw new Error('库存不足：' + m.name + '，当前库存 ' + before + '，本次出库 ' + Math.abs(qty));
+  run('UPDATE inventory SET qty=?, location=IFNULL(?,location), updated_at=? WHERE id=?', [after, o.location || null, now(), row.id]);
+  insert(`INSERT INTO inventory_tx(material_id,warehouse_id,batch,tx_type,qty,before_qty,after_qty,ref_type,ref_id,ref_code,order_id,operator,tx_date,remark,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [materialId, wh, String(o.batch || '').trim() || null, o.tx_type, qty, before, after,
+      o.ref_type || null, o.ref_id || null, o.ref_code || null, o.order_id ? num(o.order_id) : null,
+      o.operator || null, o.tx_date || today(), o.remark || null, now()]);
+  return { before, after };
+}
+function revertStock(refType, refId, operator) {
+  for (const t of all('SELECT * FROM inventory_tx WHERE ref_type=? AND ref_id=?', [refType, refId])) {
+    applyStock({
+      material_id: t.material_id, warehouse_id: t.warehouse_id, batch: t.batch, qty: -num(t.qty),
+      tx_type: t.tx_type, order_id: t.order_id, operator: operator || t.operator, tx_date: today(),
+      ref_code: (t.ref_code || '') + '(冲销)', remark: '单据' + (operator ? '修改' : '删除') + '冲销',
+    });
+  }
+  run('DELETE FROM inventory_tx WHERE ref_type=? AND ref_id=?', [refType, refId]);
+}
+
 /* ------------------------------ 来料记录 / 成品入库 ------------------------------
  * 对标市面小工单系统的「来料检验(IQC)」与「成品入库」模块。
  * 来料记录：供应商来料登记 + 检验结论；成品入库：完工成品按工单入库（含产品快照）。
- * 单号留空时由服务端自动生成（LM/RK + 日期 + 序号）。 */
-const INCOMING_FIELDS = ['code', 'incoming_date', 'supplier', 'material_code', 'material_name', 'material_spec', 'qty', 'unit', 'batch', 'order_id', 'inspector', 'result', 'remark'];
-const FINISHED_FIELDS = ['code', 'in_date', 'order_id', 'product_code', 'product_name', 'spec', 'qty', 'unit', 'batch', 'location', 'inspector', 'result', 'remark'];
+ * 单号留空时由服务端自动生成（LM/RK + 日期 + 序号）。
+ * 关联了物料档案的单据会自动增减库存并生成收发明细。 */
+const INCOMING_FIELDS = ['code', 'incoming_date', 'supplier', 'material_id', 'warehouse_id', 'material_code', 'material_name', 'material_spec', 'qty', 'unit', 'batch', 'order_id', 'inspector', 'result', 'remark'];
+const FINISHED_FIELDS = ['code', 'in_date', 'order_id', 'material_id', 'warehouse_id', 'product_code', 'product_name', 'spec', 'qty', 'unit', 'batch', 'location', 'inspector', 'result', 'remark'];
 
 // 来料记录
 route('GET', '/api/incoming_materials', [], (req, res) => {
-  ok(res, all(`SELECT i.*, o.code order_code FROM incoming_materials i LEFT JOIN orders o ON o.id=i.order_id ORDER BY i.id DESC`));
+  ok(res, all(`SELECT i.*, o.code order_code, m.code m_code, m.name m_name, w.name warehouse_name
+    FROM incoming_materials i LEFT JOIN orders o ON o.id=i.order_id
+    LEFT JOIN materials m ON m.id=i.material_id LEFT JOIN warehouses w ON w.id=i.warehouse_id
+    ORDER BY i.id DESC`));
 });
 route('POST', '/api/incoming_materials', ['admin', 'leader'], (req, res, _m, b, u) => {
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('LM');
   if (get('SELECT id FROM incoming_materials WHERE code=?', [code])) return fail(res, '该来料单号已存在');
-  const id = insert(`INSERT INTO incoming_materials(code,incoming_date,supplier,material_code,material_name,material_spec,qty,unit,batch,order_id,inspector,result,remark,created_by,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [code, b.incoming_date || today(), b.supplier || null, b.material_code || null, b.material_name, b.material_spec || null,
-      num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'pending', b.remark || null, u.id, now()]);
+  const mid = resolveMaterialId(b);
+  let id;
+  tx(() => {
+    id = insert(`INSERT INTO incoming_materials(code,incoming_date,supplier,material_id,warehouse_id,material_code,material_name,material_spec,qty,unit,batch,order_id,inspector,result,remark,created_by,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, b.incoming_date || today(), b.supplier || null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
+        b.material_code || null, b.material_name, b.material_spec || null,
+        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'qualified', b.remark || null, u.id, now()]);
+    if (mid && b.result !== 'rejected') {
+      applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: 'in_incoming',
+        ref_type: 'incoming_materials', ref_id: id, ref_code: code, order_id: b.order_id, operator: u.name, tx_date: b.incoming_date || today(), remark: '来料入库 ' + code });
+    }
+  });
   writeLog(u, '新增来料记录', code + ' ' + (b.material_name || ''));
   ok(res, { id, code });
 });
 route('PUT', '/api/incoming_materials/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
-  run(`UPDATE incoming_materials SET code=?,incoming_date=?,supplier=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,batch=?,order_id=?,inspector=?,result=?,remark=? WHERE id=?`,
-    [b.code || '', b.incoming_date || today(), b.supplier || null, b.material_code || null, b.material_name, b.material_spec || null,
-      num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'pending', b.remark || null, m[1]]);
+  const mid = resolveMaterialId(b);
+  tx(() => {
+    revertStock('incoming_materials', Number(m[1]), u.name);
+    run(`UPDATE incoming_materials SET code=?,incoming_date=?,supplier=?,material_id=?,warehouse_id=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,batch=?,order_id=?,inspector=?,result=?,remark=? WHERE id=?`,
+      [b.code || '', b.incoming_date || today(), b.supplier || null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
+        b.material_code || null, b.material_name, b.material_spec || null,
+        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'qualified', b.remark || null, m[1]]);
+    if (mid && b.result !== 'rejected') {
+      applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: 'in_incoming',
+        ref_type: 'incoming_materials', ref_id: Number(m[1]), ref_code: b.code || '', order_id: b.order_id, operator: u.name, tx_date: b.incoming_date || today(), remark: '来料入库 ' + (b.code || '') });
+    }
+  });
   writeLog(u, '修改来料记录', '#' + m[1]);
   ok(res, true);
 });
 route('DELETE', '/api/incoming_materials/(\\d+)', ['admin'], (req, res, m, _b, u) => {
-  run('DELETE FROM incoming_materials WHERE id=?', [m[1]]);
+  tx(() => {
+    revertStock('incoming_materials', Number(m[1]), u.name);
+    run('DELETE FROM incoming_materials WHERE id=?', [m[1]]);
+  });
   writeLog(u, '删除来料记录', '#' + m[1]);
   ok(res, true);
 });
 
 // 成品入库
 route('GET', '/api/finished_goods_in', [], (req, res) => {
-  ok(res, all(`SELECT f.*, o.code order_code FROM finished_goods_in f LEFT JOIN orders o ON o.id=f.order_id ORDER BY f.id DESC`));
+  ok(res, all(`SELECT f.*, o.code order_code, m.code m_code, m.name m_name, w.name warehouse_name
+    FROM finished_goods_in f LEFT JOIN orders o ON o.id=f.order_id
+    LEFT JOIN materials m ON m.id=f.material_id LEFT JOIN warehouses w ON w.id=f.warehouse_id
+    ORDER BY f.id DESC`));
 });
 route('POST', '/api/finished_goods_in', ['admin', 'leader'], (req, res, _m, b, u) => {
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('RK');
   if (get('SELECT id FROM finished_goods_in WHERE code=?', [code])) return fail(res, '该入库单号已存在');
-  const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [code, b.in_date || today(), b.order_id ? num(b.order_id) : null, b.product_code || null, b.product_name, b.spec || null,
-      num(b.qty), b.unit || '件', b.batch || null, b.location || null, b.inspector || null, b.result || 'pending', b.remark || null, u.id, now()]);
+  const mid = resolveMaterialId(b);
+  let id;
+  tx(() => {
+    id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, b.in_date || today(), b.order_id ? num(b.order_id) : null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
+        b.product_code || null, b.product_name, b.spec || null,
+        num(b.qty), b.unit || '件', b.batch || null, b.location || null, b.inspector || null, b.result || 'qualified', b.remark || null, u.id, now()]);
+    if (mid && b.result !== 'rejected') {
+      applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, location: b.location, qty: num(b.qty), tx_type: 'in_finish',
+        ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: b.order_id, operator: u.name, tx_date: b.in_date || today(), remark: '成品入库 ' + code });
+    }
+  });
   writeLog(u, '新增成品入库', code + ' ' + (b.product_name || ''));
   ok(res, { id, code });
 });
 route('PUT', '/api/finished_goods_in/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
-  run(`UPDATE finished_goods_in SET code=?,in_date=?,order_id=?,product_code=?,product_name=?,spec=?,qty=?,unit=?,batch=?,location=?,inspector=?,result=?,remark=? WHERE id=?`,
-    [b.code || '', b.in_date || today(), b.order_id ? num(b.order_id) : null, b.product_code || null, b.product_name, b.spec || null,
-      num(b.qty), b.unit || '件', b.batch || null, b.location || null, b.inspector || null, b.result || 'pending', b.remark || null, m[1]]);
+  const mid = resolveMaterialId(b);
+  tx(() => {
+    revertStock('finished_goods_in', Number(m[1]), u.name);
+    run(`UPDATE finished_goods_in SET code=?,in_date=?,order_id=?,material_id=?,warehouse_id=?,product_code=?,product_name=?,spec=?,qty=?,unit=?,batch=?,location=?,inspector=?,result=?,remark=? WHERE id=?`,
+      [b.code || '', b.in_date || today(), b.order_id ? num(b.order_id) : null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
+        b.product_code || null, b.product_name, b.spec || null,
+        num(b.qty), b.unit || '件', b.batch || null, b.location || null, b.inspector || null, b.result || 'qualified', b.remark || null, m[1]]);
+    if (mid && b.result !== 'rejected') {
+      applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, location: b.location, qty: num(b.qty), tx_type: 'in_finish',
+        ref_type: 'finished_goods_in', ref_id: Number(m[1]), ref_code: b.code || '', order_id: b.order_id, operator: u.name, tx_date: b.in_date || today(), remark: '成品入库 ' + (b.code || '') });
+    }
+  });
   writeLog(u, '修改成品入库', '#' + m[1]);
   ok(res, true);
 });
 route('DELETE', '/api/finished_goods_in/(\\d+)', ['admin'], (req, res, m, _b, u) => {
-  run('DELETE FROM finished_goods_in WHERE id=?', [m[1]]);
+  tx(() => {
+    revertStock('finished_goods_in', Number(m[1]), u.name);
+    run('DELETE FROM finished_goods_in WHERE id=?', [m[1]]);
+  });
   writeLog(u, '删除成品入库', '#' + m[1]);
   ok(res, true);
+});
+
+/* ------------------------------ 物料档案 ------------------------------ */
+route('GET', '/api/materials', [], (req, res) => {
+  ok(res, all(`SELECT m.*, w.name warehouse_name FROM materials m LEFT JOIN warehouses w ON w.id=m.warehouse_id ORDER BY m.code`));
+});
+route('POST', '/api/materials', ['admin', 'leader'], (req, res, _m, b, u) => {
+  const code = String(b.code || '').trim();
+  if (!code) return fail(res, '物料编码不能为空');
+  if (!b.name || !String(b.name).trim()) return fail(res, '物料名称不能为空');
+  if (get('SELECT id FROM materials WHERE code=?', [code])) return fail(res, '该物料编码已存在');
+  const id = insert(`INSERT INTO materials(code,name,spec,material,category,unit,warehouse_id,location,safe_min,safe_max,active,remark,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [code, String(b.name).trim(), b.spec || null, b.material || null, b.category || '原料', b.unit || '件',
+      b.warehouse_id ? num(b.warehouse_id) : null, b.location || null, num(b.safe_min), b.safe_max === '' || b.safe_max == null ? null : num(b.safe_max),
+      b.active === 0 || b.active === false ? 0 : 1, b.remark || null, now()]);
+  writeLog(u, '新增物料', code + ' ' + b.name);
+  ok(res, { id });
+});
+route('PUT', '/api/materials/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+  const code = String(b.code || '').trim();
+  if (!code) return fail(res, '物料编码不能为空');
+  const dup = get('SELECT id FROM materials WHERE code=? AND id<>?', [code, m[1]]);
+  if (dup) return fail(res, '该物料编码已存在');
+  run(`UPDATE materials SET code=?,name=?,spec=?,material=?,category=?,unit=?,warehouse_id=?,location=?,safe_min=?,safe_max=?,active=?,remark=? WHERE id=?`,
+    [code, String(b.name || '').trim() || code, b.spec || null, b.material || null, b.category || '原料', b.unit || '件',
+      b.warehouse_id ? num(b.warehouse_id) : null, b.location || null, num(b.safe_min), b.safe_max === '' || b.safe_max == null ? null : num(b.safe_max),
+      b.active === 0 || b.active === false ? 0 : 1, b.remark || null, m[1]]);
+  writeLog(u, '修改物料', code);
+  ok(res, true);
+});
+route('DELETE', '/api/materials/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  if (get('SELECT id FROM inventory_tx WHERE material_id=? LIMIT 1', [m[1]])) return fail(res, '该物料已有库存流水，不能删除（可停用）');
+  run('DELETE FROM materials WHERE id=?', [m[1]]);
+  writeLog(u, '删除物料', '#' + m[1]);
+  ok(res, true);
+});
+
+// 一键从产品档案导入成品类物料（已有相同编码的跳过）
+route('POST', '/api/materials/import_products', ['admin', 'leader'], (req, res, _m, _b, u) => {
+  let n = 0;
+  for (const p of all('SELECT code,name,spec,unit FROM products')) {
+    if (!p.code) continue;
+    if (get('SELECT id FROM materials WHERE code=?', [p.code])) continue;
+    insert(`INSERT INTO materials(code,name,spec,material,category,unit,warehouse_id,location,safe_min,safe_max,active,remark,created_at)
+      VALUES(?,?,?,NULL,'成品',?,NULL,NULL,0,NULL,1,'从产品档案导入',?)`,
+      [p.code, p.name, p.spec || null, p.unit || '件', now()]);
+    n++;
+  }
+  writeLog(u, '从产品导入物料', '新增 ' + n + ' 条');
+  ok(res, { imported: n });
+});
+
+/* ------------------------------ 仓库 ------------------------------ */
+route('GET', '/api/warehouses', [], (req, res) => {
+  ok(res, all('SELECT * FROM warehouses ORDER BY code'));
+});
+route('POST', '/api/warehouses', ['admin', 'leader'], (req, res, _m, b, u) => {
+  const code = String(b.code || '').trim();
+  if (!code) return fail(res, '仓库编号不能为空');
+  if (get('SELECT id FROM warehouses WHERE code=?', [code])) return fail(res, '该仓库编号已存在');
+  const id = insert('INSERT INTO warehouses(code,name,remark,created_at) VALUES(?,?,?,?)',
+    [code, String(b.name || '').trim() || code, b.remark || null, now()]);
+  writeLog(u, '新增仓库', code);
+  ok(res, { id });
+});
+route('PUT', '/api/warehouses/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+  const code = String(b.code || '').trim();
+  if (get('SELECT id FROM warehouses WHERE code=? AND id<>?', [code, m[1]])) return fail(res, '该仓库编号已存在');
+  run('UPDATE warehouses SET code=?,name=?,remark=? WHERE id=?', [code, String(b.name || '').trim() || code, b.remark || null, m[1]]);
+  writeLog(u, '修改仓库', code);
+  ok(res, true);
+});
+route('DELETE', '/api/warehouses/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  if (get('SELECT id FROM inventory WHERE warehouse_id=? LIMIT 1', [m[1]])) return fail(res, '该仓库已有库存记录，不能删除');
+  run('DELETE FROM warehouses WHERE id=?', [m[1]]);
+  writeLog(u, '删除仓库', '#' + m[1]);
+  ok(res, true);
+});
+
+/* ------------------------------ 库存台账 / 收发明细查询 ------------------------------
+ * 台账数量只读，由收发明细流水汇总而来；前端据此做安全库存预警（低于下限=缺料，高于上限=积压）。 */
+route('GET', '/api/inventory', [], (req, res) => {
+  ok(res, all(`SELECT i.id,i.material_id,i.warehouse_id,i.batch,i.location,i.qty,i.updated_at,
+      m.code material_code, m.name material_name, m.spec, m.unit, m.category, m.safe_min, m.safe_max,
+      w.name warehouse_name
+    FROM inventory i JOIN materials m ON m.id=i.material_id LEFT JOIN warehouses w ON w.id=i.warehouse_id
+    ORDER BY m.code, i.batch`));
+});
+route('GET', '/api/inventory_tx', [], (req, res, _m, _b, _u, q) => {
+  const limit = Math.min(1000, num(q.limit, 500));
+  const where = [];
+  const ps = [];
+  if (q.material_id) { where.push('t.material_id=?'); ps.push(num(q.material_id)); }
+  if (q.tx_type) { where.push('t.tx_type=?'); ps.push(q.tx_type); }
+  if (q.order_id) { where.push('t.order_id=?'); ps.push(num(q.order_id)); }
+  const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  ok(res, all(`SELECT t.*, m.code material_code, m.name material_name, m.unit, w.name warehouse_name, o.code order_code
+    FROM inventory_tx t JOIN materials m ON m.id=t.material_id
+    LEFT JOIN warehouses w ON w.id=t.warehouse_id LEFT JOIN orders o ON o.id=t.order_id
+    ${w} ORDER BY t.id DESC LIMIT ?`, [...ps, limit]));
 });
 
 /* ------------------------------ 请求分发 ------------------------------ */
