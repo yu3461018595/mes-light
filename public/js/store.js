@@ -324,6 +324,51 @@
     writeLog(actor(), '工序派工', (o ? o.code : m[0]) + ' 工序#' + m[1] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
     return ok(true);
   });
+  /* 工单工序增减：待下发/已下发/生产中/已暂停 可调整；已完成、已关闭禁止；已报工工序不可删 */
+  const STEP_EDIT = { created: 1, released: 1, running: 1, paused: 1 };
+  const STATUS_LABEL2 = { created: '待下发', released: '已下发', running: '生产中', paused: '已暂停', done: '已完成', closed: '已关闭' };
+  R('POST', '/orders/(\\d+)/steps', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整工序');
+    const pid = num(b.process_id);
+    if (!pid || !find('processes', pid)) return fail('请选择要增加的工序');
+    const qty = num(b.qty_plan) > 0 ? num(b.qty_plan) : num(o.qty_plan);
+    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b2) => a.seq - b2.seq);
+    const atPos = num(b.at_pos);
+    let seq;
+    if (atPos > 0 && atPos <= steps.length) {
+      seq = num(steps[atPos - 1].seq);
+      steps.slice(atPos - 1).forEach((s) => update('order_steps', s.id, { seq: num(s.seq) + 10 }));
+    } else {
+      seq = (steps.length ? Math.max.apply(null, steps.map((s) => num(s.seq))) : 0) + 10;
+    }
+    const proc = find('processes', pid);
+    insert('order_steps', {
+      id: 0, order_id: o.id, seq, process_id: pid, work_center_id: b.work_center_id ? num(b.work_center_id) : null,
+      assignee_id: null, assignee_team: b.assignee_team || null, allow_report: (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1,
+      qty_plan: qty, qty_good: 0, qty_bad: 0, work_min: 0, status: 'pending', start_time: null, finish_time: null,
+    });
+    writeLog(actor(), '工单增加工序', o.code + ' 增加「' + (proc ? proc.name : pid) + '」×' + qty);
+    return ok({ seq });
+  });
+  R('DELETE', '/orders/(\\d+)/steps/(\\d+)', (m) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整工序');
+    const st = find('order_steps', m[1]);
+    if (!st || st.order_id !== o.id) return fail('工序不存在', 404);
+    const rc = T('reports').filter((r) => Number(r.order_step_id) === Number(m[1])).length;
+    if (rc) return fail('该工序已有 ' + rc + ' 条报工记录，不能删除（请先在报工流水中撤销）');
+    if (num(st.qty_good) || num(st.qty_bad)) return fail('该工序已有报工数量，不能删除（请先在报工流水中撤销）');
+    if (T('order_steps').filter((s) => s.order_id === o.id).length <= 1) return fail('至少要保留一道工序');
+    const proc = find('processes', st.process_id);
+    remove('order_steps', st.id);
+    writeLog(actor(), '工单删除工序', o.code + ' 删除「' + (proc ? proc.name : '#' + st.id) + '」');
+    return ok(true);
+  });
   R('DELETE', '/orders/(\\d+)', (m) => {
     if (requireRole('admin')) return fail('无权限', 403);
     const o = find('orders', m[0]);

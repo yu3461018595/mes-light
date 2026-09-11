@@ -151,6 +151,9 @@ Views.orders = {
     const [o, meta] = await Promise.all([API.get('/orders/' + id), API.get('/meta')]);
     const p = UI.pct(o.qty_done, o.qty_plan);
     const canEdit = App.canEdit();
+    // 生产中/已暂停/已下发/待下发 都允许增减工序；已完成、已关闭不允许
+    const stepEditable = ['created', 'released', 'running', 'paused'].includes(o.status);
+    const busy = (r) => (Number(r.qty_good) || 0) + (Number(r.qty_bad) || 0) > 0;
 
     const actions = {
       created: [['released', '下发工单', 'btn-primary']],
@@ -201,7 +204,9 @@ Views.orders = {
       </div></div>
 
       <div class="card" style="margin-bottom:14px">
-        <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序</span></div>
+        <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序</span>
+          <div class="spacer"></div>
+          ${canEdit && stepEditable ? `<button class="btn btn-sm btn-primary" id="addStep">${UI.icon('plus')}增加工序</button>` : ''}</div>
         <div class="card-b tight">
           ${UI.table([
             { t: '序', f: (r) => `<span class="mono muted">${r.seq}</span>` },
@@ -217,7 +222,8 @@ Views.orders = {
             { t: '状态', f: (r) => UI.badge(r.status) },
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
-                ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}` },
+                ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}
+                ${canEdit && stepEditable ? `<button class="btn btn-sm btn-ghost" data-delstep="${r.id}" ${busy(r) ? 'disabled title="已有报工，需先撤销报工记录"' : ''}>删除</button>` : ''}` },
           ], o.steps)}
         </div>
       </div>
@@ -286,6 +292,46 @@ Views.orders = {
           App.render();
         },
       });
+    });
+    const addStepBtn = el.querySelector('#addStep');
+    if (addStepBtn) addStepBtn.onclick = () => {
+      const teams = ((meta.teams && meta.teams.length ? meta.teams : (o.teams || [])).map((t) => (t && t.team) ? t.team : t));
+      const posOpts = o.steps.map((s, i) => `<option value="${i + 1}">第 ${i + 1} 道 · ${UI.esc(s.process_name)}</option>`).join('')
+        + `<option value="${o.steps.length + 1}" selected>最后（追加）</option>`;
+      UI.modal({
+        title: '增加工序 · ' + o.code,
+        body: `<label class="field"><span>工序 <b style="color:var(--danger)">*</b></span>
+            <select class="input" id="sProc"><option value="">请选择</option>${meta.processes.map((x) => `<option value="${x.id}">${UI.esc(x.code)} · ${UI.esc(x.name)}</option>`).join('')}</select></label>
+          <label class="field"><span>插入位置</span><select class="input" id="sPos">${posOpts}</select></label>
+          <label class="field"><span>工作中心 / 设备</span>
+            <select class="input" id="sWc"><option value="">不指定</option>${UI.options(meta.workCenters, '', 'name')}</select></label>
+          <label class="field"><span>计划数量</span><input class="input" id="sQty" type="number" min="1" value="${o.qty_plan}"></label>
+          <label class="field"><span>指派班组</span>
+            <select class="input" id="sTeam"><option value="">不指定（全员可报工）</option>${teams.map((t) => `<option value="${UI.esc(t)}">${UI.esc(t)}</option>`).join('')}</select></label>
+          <div class="small muted">新工序状态为「待生产」，保存后可立即指派班组或报工。</div>`,
+        onOk: async (mask) => {
+          const pid = mask.querySelector('#sProc').value;
+          if (!pid) throw new Error('请选择工序');
+          await API.post('/orders/' + id + '/steps', {
+            process_id: Number(pid),
+            at_pos: Number(mask.querySelector('#sPos').value) || 0,
+            work_center_id: mask.querySelector('#sWc').value || null,
+            qty_plan: Number(mask.querySelector('#sQty').value) || o.qty_plan,
+            assignee_team: mask.querySelector('#sTeam').value || null,
+          });
+          UI.toast('工序已增加', 'ok');
+          App.render();
+        },
+      });
+    };
+    el.querySelectorAll('[data-delstep]').forEach((b) => b.onclick = async () => {
+      const st = o.steps.find((x) => x.id == b.dataset.delstep);
+      if (!(await UI.confirm('确定删除工序「' + (st ? st.process_name : '') + '」？该工序尚无报工记录，删除后不可恢复。', '删除工序'))) return;
+      try {
+        await API.del('/orders/' + id + '/steps/' + b.dataset.delstep);
+        UI.toast('工序已删除', 'ok');
+        App.render();
+      } catch (e) { UI.toast(e.message, 'err'); }
     });
     el.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
       if (!(await UI.confirm('撤销后将扣减该工序的累计数量，确定继续？', '撤销报工'))) return;

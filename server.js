@@ -450,6 +450,54 @@ route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res
   ok(res, true);
 });
 
+/* 工单工序增减：待下发 / 已下发 / 生产中 / 已暂停 均允许调整（生产中插工序常见：补返工、加检验）；
+   已完成 / 已关闭 禁止，避免影响已结算数据。已报工的工序不允许删除（会丢报工记录）。 */
+const STEP_EDIT_STATUS = { created: 1, released: 1, running: 1, paused: 1 };
+const ORDER_STATUS_LABEL = { created: '待下发', released: '已下发', running: '生产中', paused: '已暂停', done: '已完成', closed: '已关闭' };
+
+// 增加工序
+route('POST', '/api/orders/(\\d+)/steps', ['admin', 'leader'], (req, res, m, b, u) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
+  const pid = num(b.process_id);
+  const proc = pid ? get('SELECT id,name FROM processes WHERE id=?', [pid]) : null;
+  if (!proc) return fail(res, '请选择要增加的工序');
+  const qty = num(b.qty_plan) > 0 ? num(b.qty_plan) : num(o.qty_plan);
+  const steps = all('SELECT id,seq FROM order_steps WHERE order_id=? ORDER BY seq', [m[1]]);
+  const atPos = num(b.at_pos);                       // 插入位置（第几道，1 起）；留空=追加到最后
+  let seq = 0;
+  tx(() => {
+    if (atPos > 0 && atPos <= steps.length) {
+      seq = num(steps[atPos - 1].seq);               // 插入该位之前：其后工序整体后移 10
+      run('UPDATE order_steps SET seq=seq+10 WHERE order_id=? AND seq>=?', [m[1], seq]);
+    } else {
+      seq = (steps.length ? Math.max.apply(null, steps.map((s) => num(s.seq))) : 0) + 10;
+    }
+    insert(`INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,assignee_team,allow_report,status) VALUES(?,?,?,?,?,?,?,?)`,
+      [num(m[1]), seq, pid, b.work_center_id ? num(b.work_center_id) : null, qty, b.assignee_team || null,
+        (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1, 'pending']);
+  });
+  writeLog(u, '工单增加工序', o.code + ' 增加「' + proc.name + '」×' + qty + (atPos > 0 ? '（第' + atPos + '道）' : '（末尾）'));
+  ok(res, { seq });
+});
+
+// 删除工序
+route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
+  const st = get('SELECT s.*, p.name pname FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=? AND s.order_id=?', [m[2], m[1]]);
+  if (!st) return fail(res, '工序不存在', 404);
+  const rc = get('SELECT COUNT(*) c FROM reports WHERE order_step_id=?', [m[2]]).c;
+  if (rc) return fail(res, '该工序已有 ' + rc + ' 条报工记录，不能删除（请先在报工流水中撤销）');
+  if (num(st.qty_good) || num(st.qty_bad)) return fail(res, '该工序已有报工数量，不能删除（请先在报工流水中撤销）');
+  if (num(get('SELECT COUNT(*) c FROM order_steps WHERE order_id=?', [m[1]]).c) <= 1) return fail(res, '至少要保留一道工序');
+  run('DELETE FROM order_steps WHERE id=?', [m[2]]);
+  writeLog(u, '工单删除工序', o.code + ' 删除「' + (st.pname || '#' + m[2]) + '」');
+  ok(res, true);
+});
+
 route('PUT', '/api/orders/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
   const before = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!before) return fail(res, '工单不存在', 404);
