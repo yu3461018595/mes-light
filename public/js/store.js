@@ -369,6 +369,21 @@
     writeLog(actor(), '工单删除工序', o.code + ' 删除「' + (proc ? proc.name : '#' + st.id) + '」');
     return ok(true);
   });
+  R('PUT', '/orders/(\\d+)/steps/order', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整工序');
+    const ids = Array.isArray(b.order) ? b.order.map((x) => num(x)).filter((x) => x > 0) : [];
+    if (!ids.length) return fail('缺少工序顺序');
+    const steps = T('order_steps').filter((s) => s.order_id === o.id);
+    const have = new Set(steps.map((s) => s.id));
+    if (ids.length !== steps.length) return fail('工序顺序必须包含该工单的全部 ' + steps.length + ' 道工序');
+    if (!ids.every((id) => have.has(id))) return fail('工序顺序中包含不属于该工单的工序');
+    ids.forEach((id, i) => update('order_steps', id, { seq: (i + 1) * 10 }));
+    writeLog(actor(), '工单工序排序', o.code + ' 调整为 ' + ids.length + ' 道工序的新顺序');
+    return ok(true);
+  });
   R('DELETE', '/orders/(\\d+)', (m) => {
     if (requireRole('admin')) return fail('无权限', 403);
     const o = find('orders', m[0]);

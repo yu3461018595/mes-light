@@ -76,6 +76,24 @@ async function api(method, url, body, token) {
     od = (await api('GET', '/api/orders/' + id, null, H)).data;
     chk('删除后工序数 -1', od.steps.length === n0 + 1, od.steps.length);
 
+    // 3b. 调整工序顺序（重排 seq）
+    const beforeOrder = od.steps.map((s) => s.id);
+    const reversed = beforeOrder.slice().reverse();
+    const r3b = await api('PUT', '/api/orders/' + id + '/steps/order', { order: reversed }, H);
+    chk('可调整工序顺序', r3b.ok, r3b.msg);
+    od = (await api('GET', '/api/orders/' + id, null, H)).data;
+    chk('顺序已反转为指定顺序', od.steps.map((s) => s.id).join() === reversed.join(), od.steps.map((s) => s.id).join());
+    chk('按 10 递增重排 seq', od.steps.every((s, i) => Number(s.seq) === (i + 1) * 10), od.steps.map((s) => s.seq).join());
+    // 缺工序被拒
+    const r3c = await api('PUT', '/api/orders/' + id + '/steps/order', { order: reversed.slice(1) }, H);
+    chk('缺少工序的顺序被拒', !r3c.ok && /全部/.test(r3c.msg || ''), r3c.msg);
+    // 含非本工单工序被拒（同长度、替换一个为不存在的 id）
+    const r3d = await api('PUT', '/api/orders/' + id + '/steps/order', { order: beforeOrder.map((x, i) => i === 0 ? 999999 : x) }, H);
+    chk('含非法工序的顺序被拒', !r3d.ok && /不属于/.test(r3d.msg || ''), r3d.msg);
+    // 恢复原顺序，避免影响后续测试
+    await api('PUT', '/api/orders/' + id + '/steps/order', { order: beforeOrder }, H);
+    od = (await api('GET', '/api/orders/' + id, null, H)).data;
+
     // 4. 已报工工序不能删除
     const st0 = od.steps.find((s) => s.status !== 'done') || od.steps[0];
     const rep = await api('POST', '/api/reports', { order_id: id, order_step_id: st0.id, worker_id: meta.workers[0].id, qty_good: 5, qty_bad: 0, report_date: new Date().toISOString().slice(0, 10) }, H);

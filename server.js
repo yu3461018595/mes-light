@@ -498,6 +498,24 @@ route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, re
   ok(res, true);
 });
 
+// 调整工序顺序：传入完整有序的工序 id 列表，按 10 递增重排 seq（上移/下移/拖拽统一走此接口）
+route('PUT', '/api/orders/(\\d+)/steps/order', ['admin', 'leader'], (req, res, m, b, u) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
+  const ids = Array.isArray(b.order) ? b.order.map((x) => num(x)).filter((x) => x > 0) : [];
+  if (!ids.length) return fail(res, '缺少工序顺序');
+  const steps = all('SELECT id,seq FROM order_steps WHERE order_id=? ORDER BY seq', [m[1]]);
+  const have = new Set(steps.map((s) => s.id));
+  if (ids.length !== steps.length) return fail(res, '工序顺序必须包含该工单的全部 ' + steps.length + ' 道工序');
+  if (!ids.every((id) => have.has(id))) return fail(res, '工序顺序中包含不属于该工单的工序');
+  tx(() => {
+    ids.forEach((id, i) => run('UPDATE order_steps SET seq=? WHERE id=? AND order_id=?', [(i + 1) * 10, id, m[1]]));
+  });
+  writeLog(u, '工单工序排序', o.code + ' 调整为 ' + ids.length + ' 道工序的新顺序');
+  ok(res, true);
+});
+
 route('PUT', '/api/orders/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
   const before = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!before) return fail(res, '工单不存在', 404);

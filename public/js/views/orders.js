@@ -154,6 +154,7 @@ Views.orders = {
     // 生产中/已暂停/已下发/待下发 都允许增减工序；已完成、已关闭不允许
     const stepEditable = ['created', 'released', 'running', 'paused'].includes(o.status);
     const busy = (r) => (Number(r.qty_good) || 0) + (Number(r.qty_bad) || 0) > 0;
+    const stepIndex = {}; o.steps.forEach((s, i) => { stepIndex[s.id] = i; });
 
     const actions = {
       created: [['released', '下发工单', 'btn-primary']],
@@ -210,6 +211,12 @@ Views.orders = {
         <div class="card-b tight">
           ${UI.table([
             { t: '序', f: (r) => `<span class="mono muted">${r.seq}</span>` },
+            { t: '移动', align: 'center', w: '62px', f: (r) => {
+                if (!(canEdit && stepEditable)) return '';
+                const i = stepIndex[r.id];
+                return `<button class="btn btn-sm btn-ghost" data-moveup="${r.id}" ${i > 0 ? '' : 'disabled title="已是第一道"'} title="上移">↑</button>`
+                     + `<button class="btn btn-sm btn-ghost" data-movedown="${r.id}" ${i < o.steps.length - 1 ? '' : 'disabled title="已是最后一道"'} title="下移">↓</button>`;
+              } },
             { t: '工序', f: (r) => `<b>${UI.esc(r.process_name)}</b><div class="small muted">${UI.esc(r.process_code)}</div>` },
             { t: '工作中心', f: (r) => UI.esc(r.wc_name || '—') },
             { t: '指派班组', f: (r) => r.assignee_team ? UI.esc(r.assignee_team) : '<span class="muted">暂无</span>' },
@@ -333,6 +340,20 @@ Views.orders = {
         App.render();
       } catch (e) { UI.toast(e.message, 'err'); }
     });
+    const moveStep = async (stepId, dir) => {
+      const i = stepIndex[stepId];
+      const ids = o.steps.map((s) => s.id);
+      const j = dir === 'up' ? i - 1 : i + 1;
+      if (j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      try {
+        await API.put('/orders/' + id + '/steps/order', { order: ids });
+        UI.toast('工序顺序已调整', 'ok');
+        App.render();
+      } catch (e) { UI.toast(e.message, 'err'); }
+    };
+    el.querySelectorAll('[data-moveup]').forEach((b) => b.onclick = () => moveStep(Number(b.dataset.moveup), 'up'));
+    el.querySelectorAll('[data-movedown]').forEach((b) => b.onclick = () => moveStep(Number(b.dataset.movedown), 'down'));
     el.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
       if (!(await UI.confirm('撤销后将扣减该工序的累计数量，确定继续？', '撤销报工'))) return;
       await API.del('/reports/' + b.dataset.del);
