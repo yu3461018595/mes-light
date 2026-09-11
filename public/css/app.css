@@ -145,6 +145,12 @@ textarea.input{min-height:64px;resize:vertical}
 .table tbody tr:hover{background:#fafbfd}
 .table .num{text-align:right;font-variant-numeric:tabular-nums}
 .table-wrap{overflow-x:auto}
+.grp-role{margin:18px 0 2px;padding:9px 14px;border-radius:8px;background:#f3f6fb;font-size:14px;font-weight:600;color:#1f2d3d;display:flex;align-items:center;gap:10px}
+.grp-role::before{content:"";width:4px;height:16px;border-radius:2px;background:#3b82f6}
+.grp-role .cnt{font-weight:400;color:#9aa7b4;font-size:12px}
+.grp-team{margin:12px 0 4px;padding-left:16px;font-size:13px;font-weight:600;color:#5a6b7b}
+.grp-team .cnt{font-weight:400;color:#9aa7b4;margin-left:6px;font-size:12px}
+.grp:first-child .grp-role{margin-top:4px}
 .link{color:var(--primary);cursor:pointer;text-decoration:none}
 .link:hover{text-decoration:underline}
 

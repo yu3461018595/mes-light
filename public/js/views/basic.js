@@ -115,13 +115,16 @@ Views.basic = {
     el.querySelector('#tbTitle').textContent = c.name + '列表';
     const rows = await API.get(c.api);
     const canEdit = App.canEdit();
-    el.querySelector('#tb').innerHTML = UI.table(
-      c.cols.concat(canEdit ? [{
-        t: '操作', align: 'right', w: '130px',
-        f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`
-          + (this.tab === 'users' ? ` <button class="btn btn-sm" data-qr="${r.id}">二维码</button>` : '')
-          + ` <button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`,
-      }] : []), rows);
+    if (this.tab === 'users') {
+      el.querySelector('#tb').innerHTML = this.renderUsersGrouped(rows, canEdit, c);
+    } else {
+      el.querySelector('#tb').innerHTML = UI.table(
+        c.cols.concat(canEdit ? [{
+          t: '操作', align: 'right', w: '130px',
+          f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`
+            + ` <button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`,
+        }] : []), rows);
+    }
     el.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => this.form(b.dataset.edit));
     if (canEdit) el.querySelectorAll('[data-qr]').forEach((b) => b.onclick = async () => {
       try {
@@ -138,6 +141,49 @@ Views.basic = {
       try { await API.del(c.api + '/' + b.dataset.del); UI.toast('已删除', 'ok'); this.render(el); }
       catch (e) { UI.toast(e.message, 'err'); }
     });
+  },
+
+  /* 人员：先角色分组、再班组分组 */
+  renderUsersGrouped(rows, canEdit, c) {
+    const roleOrder = ['admin', 'leader', 'worker'];
+    const roleLabel = { admin: '管理员', leader: '班组长', worker: '操作工' };
+    const roleChip = { admin: 'chip-blue', leader: 'chip-info', worker: 'chip-gray' };
+    const opCol = canEdit ? [{
+      t: '操作', align: 'right', w: '130px',
+      f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`
+        + ` <button class="btn btn-sm" data-qr="${r.id}">二维码</button>`
+        + ` <button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`,
+    }] : [];
+    const cols = c.cols.filter((x) => x.t !== '角色' && x.t !== '班组').concat(opCol);
+    const keyOf = (r) => ({ role: roleOrder.includes(r.role) ? r.role : 'worker', team: (r.team || '').trim() });
+    if (!rows.length) return '<div class="muted" style="padding:20px 4px">暂无人员数据</div>';
+    const byRole = {};
+    for (const r of rows) {
+      const k = keyOf(r);
+      byRole[k.role] = byRole[k.role] || {};
+      const tk = k.team || '__none__';
+      byRole[k.role][tk] = byRole[k.role][tk] || [];
+      byRole[k.role][tk].push(r);
+    }
+    const roles = roleOrder.filter((rl) => byRole[rl]);
+    let html = '<div class="grp">';
+    for (const rl of roles) {
+      const teamMap = byRole[rl];
+      const total = Object.values(teamMap).reduce((s, a) => s + a.length, 0);
+      html += `<div class="grp-role"><span class="chip ${roleChip[rl]}">${roleLabel[rl]}</span><span class="cnt">共 ${total} 人</span></div>`;
+      const teamKeys = Object.keys(teamMap).sort((a, b) => {
+        if (a === '__none__') return 1; if (b === '__none__') return -1;
+        return a.localeCompare(b, 'zh');
+      });
+      for (const tk of teamKeys) {
+        const name = tk === '__none__' ? '未分组' : tk;
+        const arr = teamMap[tk];
+        html += `<div class="grp-team">${UI.esc(name)}<span class="cnt">${arr.length} 人</span></div>`;
+        html += UI.table(cols, arr);
+      }
+    }
+    html += '</div>';
+    return html;
   },
 
   async form(id) {
