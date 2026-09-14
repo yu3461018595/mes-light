@@ -133,6 +133,9 @@ Views.report = {
               <select class="input" id="fReason"><option value="">无</option>${UI.options((o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons), '', 'name')}</select></label>
             <label class="field"><span>实动工时（分钟）</span>
               <input class="input" id="fMin" type="number" min="0" value="0"></label>
+          </div>
+          <label class="field" id="reasonDetailWrap" style="display:none"><span>其他原因说明</span>
+            <input class="input" id="fReasonDetail" placeholder="请填写具体不良原因"></label>
             <label class="field"><span>报工人</span>
               <select class="input" id="fWorker">${UI.options(wks, App.user.id, 'name')}</select></label>
             <label class="field"><span>报工日期</span>
@@ -167,6 +170,19 @@ Views.report = {
     el.querySelector('#bDec').onclick = () => add(b, -1);
     el.querySelector('#bInc').onclick = () => add(b, 1);
 
+    // 选「其他」时显示具体原因备注框
+    const reasons = (o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons) || [];
+    const fReason = el.querySelector('#fReason');
+    const reasonDetailWrap = el.querySelector('#reasonDetailWrap');
+    const reasonIsOther = () => { const sel = reasons.find((r) => String(r.id) === String(fReason.value)); return !!(sel && sel.name === '其他'); };
+    const toggleReasonDetail = () => {
+      const isOther = reasonIsOther();
+      reasonDetailWrap.style.display = isOther ? '' : 'none';
+      if (!isOther) el.querySelector('#fReasonDetail').value = '';
+    };
+    fReason.addEventListener('change', toggleReasonDetail);
+    toggleReasonDetail();
+
     el.querySelectorAll('[data-s]').forEach((c) => c.onclick = () => {
       this.showOrder(el, orderId, c.dataset.s);
     });
@@ -180,6 +196,7 @@ Views.report = {
         qty_good: Number(g.value) || 0,
         qty_bad: Number(b.value) || 0,
         bad_reason_id: Number(el.querySelector('#fReason').value) || 0,
+        bad_reason_detail: reasonIsOther() ? (el.querySelector('#fReasonDetail').value.trim() || '') : '',
         work_min: Number(el.querySelector('#fMin').value) || 0,
         report_date: el.querySelector('#fDate').value,
         remark: el.querySelector('#fRemark').value,

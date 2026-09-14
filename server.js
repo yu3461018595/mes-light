@@ -619,14 +619,14 @@ function doReport(b, actor) {
     ? b.steps.map((s) => ({
         order_step_id: num(s.order_step_id),
         qty_good: s.qty_good, qty_bad: s.qty_bad,
-        bad_reason: s.bad_reason, bad_reason_id: num(s.bad_reason_id) || 0, work_center_id: s.work_center_id,
+        bad_reason: s.bad_reason, bad_reason_id: num(s.bad_reason_id) || 0, bad_reason_detail: s.bad_reason_detail, work_center_id: s.work_center_id,
         work_min: s.work_min,
         report_date: s.report_date || b.report_date, remark: s.remark || '',
       }))
     : [{
         order_step_id: num(b.order_step_id),
         qty_good: b.qty_good, qty_bad: b.qty_bad,
-        bad_reason: b.bad_reason, bad_reason_id: num(b.bad_reason_id) || 0, work_center_id: b.work_center_id,
+        bad_reason: b.bad_reason, bad_reason_id: num(b.bad_reason_id) || 0, bad_reason_detail: b.bad_reason_detail, work_center_id: b.work_center_id,
         work_min: b.work_min,
         report_date: b.report_date, remark: b.remark || '',
       }];
@@ -658,6 +658,7 @@ function doReport(b, actor) {
       // 不良原因：优先按 id 关联字典；兼容旧版自由文本；工单配置子集时校验范围
       let brId = num(it.bad_reason_id) || 0;
       let brName = '';
+      const detail = String(it.bad_reason_detail || '').trim();
       if (brId) {
         const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
         if (!br) throw new Error('不良原因不存在（#' + brId + '）');
@@ -665,7 +666,13 @@ function doReport(b, actor) {
         if (allowed.length && !allowed.some((a) => a.bad_reason_id === brId)) {
           throw new Error('不良原因「' + br.name + '」不在该工单可选范围内');
         }
-        brName = br.name;
+        // 选「其他」并填写具体说明 → 以说明作为具体原因；bad_reason_id 置空便于统计按具体原因聚合
+        if (br.name === '其他' && detail) {
+          brName = detail;
+          brId = 0;
+        } else {
+          brName = br.name;
+        }
       } else if (it.bad_reason) {
         brName = String(it.bad_reason); // 旧版自由文本兜底
       } else if (bad) {

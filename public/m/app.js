@@ -77,6 +77,7 @@
       const lock = s.allow_report === 0;
       const done = s.status === 'done';
       const sel = S.sel.has(s.id);
+      const otherId = (S.badReasons || []).find((x) => x.name === '其他');
       const cls = ['step'];
       if (sel) cls.push('sel');
       if (lock || done) cls.push('locked');
@@ -95,6 +96,7 @@
             <button type="button" class="inc" data-binc="${s.id}" aria-label="增加不良数量"></button></div></div>
           <div class="field"><span>工时（分钟，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 30"></div>
           <div class="field"><span>不良原因（选填）</span><select id="r${s.id}" class="plain reason"><option value="">无</option>${(S.badReasons || []).map((x) => `<option value="${x.id}"${v.reason == String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+          <input id="rd${s.id}" class="plain" type="text" placeholder="请填写具体原因" style="${(otherId && v.reason == String(otherId.id)) ? '' : 'display:none'}" value="${esc(v.reasonDetail || '')}">
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
         <div class="step-main">
@@ -157,6 +159,12 @@
       $app.querySelector('[data-inc="' + s.id + '"]').onclick = () => g.value = clamp(g.value) + 10;
       $app.querySelector('[data-bdec="' + s.id + '"]').onclick = () => b.value = Math.max(0, clamp(b.value) - 1);
       $app.querySelector('[data-binc="' + s.id + '"]').onclick = () => b.value = clamp(b.value) + 1;
+      const rsel = $app.querySelector('#r' + s.id), rdet = $app.querySelector('#rd' + s.id);
+      if (rsel && rdet) {
+        const sync = () => { const rid = Number(rsel.value); const o = (S.badReasons || []).find((x) => x.id === rid); const isOther = o && o.name === '其他'; rdet.style.display = isOther ? '' : 'none'; if (!isOther) rdet.value = ''; };
+        rsel.addEventListener('change', sync);
+        sync();
+      }
     });
 
     $app.querySelector('#submit').onclick = submit;
@@ -165,12 +173,14 @@
   // 将当前页面各工序输入框数值读回 S.vals，便于重渲染后保留
   function readVals() {
     S.steps.forEach((s) => {
-      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id), r = $app.querySelector('#r' + s.id), w = $app.querySelector('#w' + s.id);
-      const prev = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
+      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id), r = $app.querySelector('#r' + s.id), w = $app.querySelector('#w' + s.id), rd = $app.querySelector('#rd' + s.id);
+      const prev = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '', reasonDetail: '' };
+      const isOther = (() => { const o = (S.badReasons || []).find((x) => x.id === Number(r ? r.value : 0)); return !!(o && o.name === '其他'); })();
       S.vals[s.id] = {
         good: g ? Math.max(0, Math.floor(Number(g.value) || 0)) : prev.good,
         bad: b ? Math.max(0, Math.floor(Number(b.value) || 0)) : prev.bad,
         reason: r ? r.value.trim() : prev.reason,
+        reasonDetail: (r && isOther && rd) ? rd.value.trim() : '',
         min: w ? (w.value === '' ? '' : Math.max(0, Number(w.value) || 0)) : prev.min,
       };
     });
@@ -182,8 +192,8 @@
     const steps = S.steps
       .filter((s) => S.sel.has(s.id) && s.allow_report !== 0 && s.status !== 'done')
       .map((s) => {
-        const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
-        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, work_min: Number(v.min) || 0 };
+        const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '', reasonDetail: '' };
+        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, bad_reason_detail: (v.reason && v.reasonDetail) ? v.reasonDetail : '', work_min: Number(v.min) || 0 };
       })
       .filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }

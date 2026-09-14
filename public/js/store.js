@@ -134,8 +134,8 @@
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
 
     const items = Array.isArray(b.steps)
-      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, bad_reason_id: Number(s.bad_reason_id) || 0, work_min: s.work_min }))
-      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, bad_reason_id: Number(b.bad_reason_id) || 0, work_min: b.work_min }];
+      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, bad_reason_id: Number(s.bad_reason_id) || 0, bad_reason_detail: s.bad_reason_detail, work_min: s.work_min }))
+      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, bad_reason_id: Number(b.bad_reason_id) || 0, bad_reason_detail: b.bad_reason_detail, work_min: b.work_min }];
     if (!items.length) throw new Error('请至少选择一道工序');
 
     const workerId = Number(b.worker_id) || act.id;
@@ -160,10 +160,20 @@
       if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
       const finished = (step.qty_good + good) >= step.qty_plan;
 
+      // 不良原因：选「其他」并填写说明 → 以说明作为具体原因
+      const detail = String(it.bad_reason_detail || '').trim();
+      let resolved = '';
+      if (it.bad_reason_id) {
+        const br = find('bad_reasons', it.bad_reason_id);
+        if (br) resolved = (br.name === '其他' && detail) ? detail : br.name;
+        else resolved = it.bad_reason || '';
+      } else resolved = it.bad_reason || '';
+      const badReasonVal = bad ? (resolved || '其他') : '';
+
       insert('reports', {
         id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
-        bad_reason: bad ? (it.bad_reason || '其他') : '', work_min: num(it.work_min),
+        bad_reason: badReasonVal, work_min: num(it.work_min),
         report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
       });
       update('order_steps', step.id, {
