@@ -134,8 +134,8 @@
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
 
     const items = Array.isArray(b.steps)
-      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, work_min: s.work_min }))
-      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, work_min: b.work_min }];
+      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, bad_reason_id: Number(s.bad_reason_id) || 0, work_min: s.work_min }))
+      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, bad_reason_id: Number(b.bad_reason_id) || 0, work_min: b.work_min }];
     if (!items.length) throw new Error('请至少选择一道工序');
 
     const workerId = Number(b.worker_id) || act.id;
@@ -511,7 +511,12 @@
     const days = Math.min(90, Math.max(3, num(q.days, 14)));
     const from = dayOffset(-(days - 1));
     const map = {};
-    for (const r of T('reports')) { if (r.report_date >= from && num(r.qty_bad) > 0 && r.bad_reason) { map[r.bad_reason] = (map[r.bad_reason] || 0) + num(r.qty_bad); } }
+    for (const r of T('reports')) {
+      if (r.report_date >= from && num(r.qty_bad) > 0) {
+        const name = r.bad_reason_id ? (find('bad_reasons', r.bad_reason_id) || {}).name : r.bad_reason;
+        if (name) map[name] = (map[name] || 0) + num(r.qty_bad);
+      }
+    }
     return ok(Object.keys(map).map((k) => ({ name: k, qty: map[k] })).sort((a, b) => b.qty - a.qty));
   });
   R('GET', '/stats/ranking', (_p, _b, q) => {
@@ -559,6 +564,27 @@
     const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
+  });
+  R('GET', '/orders/(\\d+)/bad-reasons', (m) => {
+    const oid = Number(m[0]);
+    const reasons = T('bad_reasons') || [];
+    const obr = T('order_bad_reasons') || [];
+    const sel = obr.filter((x) => Number(x.order_id) === oid).map((x) => Number(x.bad_reason_id));
+    const configured = sel.length > 0;
+    const selected = configured ? reasons.filter((r) => sel.indexOf(r.id) >= 0) : reasons;
+    return ok({ configured, reasons, selected });
+  });
+  R('PUT', '/orders/(\\d+)/bad-reasons', (m, b) => {
+    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    const oid = Number(m[0]);
+    if (!find('orders', oid)) return fail('工单不存在', 404);
+    const ids = Array.isArray(b.ids) ? b.ids.map((x) => Number(x)).filter((x) => x > 0) : [];
+    const valid = new Set((T('bad_reasons') || []).map((r) => r.id));
+    const clean = [...new Set(ids)].filter((x) => valid.has(x));
+    DB.order_bad_reasons = (T('order_bad_reasons') || []).filter((x) => Number(x.order_id) !== oid);
+    for (const id of clean) DB.order_bad_reasons.push({ id: nextId('order_bad_reasons'), order_id: oid, bad_reason_id: id });
+    save();
+    return ok({ count: clean.length });
   });
   R('GET', '/public/worker/(\\d+)', (m) => {
     const w = find('users', m[0]); if (!w) return fail('员工不存在', 404);

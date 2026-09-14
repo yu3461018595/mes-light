@@ -28,7 +28,7 @@ seed();
 
 /* 列类型缓存：把空串按数值列转成 0，避免 NOT NULL 约束失败（新增/编辑时用户留空数字） */
 const colTypes = {};
-for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx']) {
+for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx', 'order_bad_reasons']) {
   try {
     colTypes[t] = {};
     for (const row of all(`PRAGMA table_info(${t})`)) colTypes[t][row.name] = (row.type || '').toUpperCase();
@@ -400,7 +400,33 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE rp.order_id=? ORDER BY rp.id DESC LIMIT 100`, [m[1]]);
+  const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
+  const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
+  o.badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
   ok(res, o);
+});
+
+route('GET', '/api/orders/(\\d+)/bad-reasons', [], (req, res, m) => {
+  const oid = num(m[1]);
+  const reasons = all('SELECT id,name FROM bad_reasons ORDER BY id');
+  const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [oid]).map((r) => r.bad_reason_id);
+  const configured = sel.length > 0;
+  const selected = configured ? reasons.filter((r) => sel.includes(r.id)) : reasons;
+  ok(res, { configured, reasons, selected });
+});
+
+route('PUT', '/api/orders/(\\d+)/bad-reasons', ['admin', 'leader'], (req, res, m, b, u) => {
+  const oid = num(m[1]);
+  if (!get('SELECT id FROM orders WHERE id=?', [oid])) return fail(res, '工单不存在', 404);
+  const ids = Array.isArray(b.ids) ? b.ids.map((x) => num(x)).filter((x) => x > 0) : [];
+  const valid = new Set(all('SELECT id FROM bad_reasons').map((r) => r.id));
+  const clean = [...new Set(ids)].filter((x) => valid.has(x));
+  tx(() => {
+    run('DELETE FROM order_bad_reasons WHERE order_id=?', [oid]);
+    for (const id of clean) insert('INSERT INTO order_bad_reasons(order_id,bad_reason_id) VALUES(?,?)', [oid, id]);
+  });
+  writeLog(u || null, '配置不良原因', '工单#' + oid + ' 可用不良原因 ' + clean.length + ' 项');
+  ok(res, { count: clean.length });
 });
 
 route('POST', '/api/orders', ['admin', 'leader'], (req, res, _m, b, u) => {
@@ -593,14 +619,14 @@ function doReport(b, actor) {
     ? b.steps.map((s) => ({
         order_step_id: num(s.order_step_id),
         qty_good: s.qty_good, qty_bad: s.qty_bad,
-        bad_reason: s.bad_reason, work_center_id: s.work_center_id,
+        bad_reason: s.bad_reason, bad_reason_id: num(s.bad_reason_id) || 0, work_center_id: s.work_center_id,
         work_min: s.work_min,
         report_date: s.report_date || b.report_date, remark: s.remark || '',
       }))
     : [{
         order_step_id: num(b.order_step_id),
         qty_good: b.qty_good, qty_bad: b.qty_bad,
-        bad_reason: b.bad_reason, work_center_id: b.work_center_id,
+        bad_reason: b.bad_reason, bad_reason_id: num(b.bad_reason_id) || 0, work_center_id: b.work_center_id,
         work_min: b.work_min,
         report_date: b.report_date, remark: b.remark || '',
       }];
@@ -629,10 +655,26 @@ function doReport(b, actor) {
       const good = Math.max(0, Math.floor(num(it.qty_good)));
       const bad = Math.max(0, Math.floor(num(it.qty_bad)));
       if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
-      insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,work_min,report_date,remark,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      // 不良原因：优先按 id 关联字典；兼容旧版自由文本；工单配置子集时校验范围
+      let brId = num(it.bad_reason_id) || 0;
+      let brName = '';
+      if (brId) {
+        const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
+        if (!br) throw new Error('不良原因不存在（#' + brId + '）');
+        const allowed = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [order_id]);
+        if (allowed.length && !allowed.some((a) => a.bad_reason_id === brId)) {
+          throw new Error('不良原因「' + br.name + '」不在该工单可选范围内');
+        }
+        brName = br.name;
+      } else if (it.bad_reason) {
+        brName = String(it.bad_reason); // 旧版自由文本兜底
+      } else if (bad) {
+        brName = '其他';
+      }
+      insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
-          good, bad, bad ? (it.bad_reason || '其他') : '', num(it.work_min),
+          good, bad, brName, brId || null, num(it.work_min),
           it.report_date || today(), it.remark || '', now()]);
 
       const done = step.qty_good + good;
@@ -798,9 +840,10 @@ route('GET', '/api/stats/trend', [], (req, res, _m, _b, _u, q) => {
 
 route('GET', '/api/stats/bad', [], (req, res, _m, _b, _u, q) => {
   const days = Math.min(90, Math.max(3, num(q.days, 14)));
-  ok(res, all(`SELECT bad_reason name, SUM(qty_bad) qty FROM reports
-    WHERE report_date >= date('now', ?) AND qty_bad>0 AND bad_reason<>''
-    GROUP BY bad_reason ORDER BY qty DESC`, ['-' + (days - 1) + ' day']));
+  ok(res, all(`SELECT COALESCE(br.name, r.bad_reason) name, SUM(r.qty_bad) qty FROM reports r
+    LEFT JOIN bad_reasons br ON br.id=r.bad_reason_id
+    WHERE r.report_date >= date('now', ?) AND r.qty_bad>0 AND COALESCE(br.name, r.bad_reason)<>''
+    GROUP BY name ORDER BY qty DESC`, ['-' + (days - 1) + ' day']));
 });
 
 route('GET', '/api/stats/ranking', [], (req, res, _m, _b, _u, q) => {
@@ -856,7 +899,10 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
   if (!o) return fail(res, '工单不存在', 404);
   const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
-  ok(res, { order: o, steps, workers });
+  const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
+  const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
+  const badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
+  ok(res, { order: o, steps, workers, badReasons });
 });
 
 // 免登录：按员工令牌读取该员工在制工单

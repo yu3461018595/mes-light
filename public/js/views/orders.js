@@ -253,6 +253,43 @@ Views.orders = {
       </div>`;
 
     el.querySelector('#back').onclick = () => location.hash = '#/orders';
+    const cfgBad = el.querySelector('#cfgBad');
+    if (cfgBad) cfgBad.onclick = async () => {
+      const d = await API.get('/orders/' + id + '/bad-reasons');
+      const reasons = d.reasons || [];
+      const sel = new Set((d.selected || []).map((x) => x.id));
+      UI.modal({
+        title: '配置不良原因 · ' + o.code,
+        body: `<div class="small muted" style="margin-bottom:8px">勾选本工单报工时可选的不良原因；不勾选任何项 = 默认全部可选。</div>
+          <div class="chk-list" id="brList">${reasons.map((r) => `<label class="chk"><input type="checkbox" value="${r.id}" ${sel.has(r.id) ? 'checked' : ''}>${UI.esc(r.name)}</label>`).join('')}</div>
+          <div class="hr"></div>
+          <label class="field"><span>新增不良原因到字典</span><div class="row"><input class="input" id="newBr" placeholder="如：粘砂、缺料"><button class="btn btn-sm" id="addBr">添加并勾选</button></div></label>
+          <div class="small muted">新增项写入「基础数据 → 不良原因」，并自动勾选到本工单。</div>`,
+        onOk: async (mask) => {
+          const ids = [...mask.querySelectorAll('#brList input:checked')].map((c) => Number(c.value));
+          await API.put('/orders/' + id + '/bad-reasons', { ids });
+          UI.toast('已配置 ' + ids.length + ' 项不良原因', 'ok');
+          App.render();
+        },
+      });
+      setTimeout(() => {
+        const addBtn = document.getElementById('addBr');
+        if (addBtn) addBtn.onclick = async () => {
+          const nm = (document.getElementById('newBr').value || '').trim();
+          if (!nm) return;
+          try {
+            const r = await API.post('/bad_reasons', { name: nm });
+            const d2 = await API.get('/orders/' + id + '/bad-reasons');
+            const reasons2 = d2.reasons || [];
+            const sel2 = new Set([...[...document.querySelectorAll('#brList input:checked')].map((c) => Number(c.value)), r.id]);
+            const list = document.getElementById('brList');
+            if (list) list.innerHTML = reasons2.map((x) => `<label class="chk"><input type="checkbox" value="${x.id}" ${sel2.has(x.id) ? 'checked' : ''}>${UI.esc(x.name)}</label>`).join('');
+            const nb = document.getElementById('newBr'); if (nb) nb.value = '';
+            UI.toast('已新增并勾选：' + nm, 'ok');
+          } catch (e) { UI.toast(e.message, 'err'); }
+        };
+      }, 0);
+    };
     el.querySelectorAll('[data-status]').forEach((b) => b.onclick = async () => {
       const st = b.dataset.status;
       if (st === 'closed') {

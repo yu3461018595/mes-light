@@ -25,7 +25,7 @@
   async function loadOrder(o, t, wid) {
     const q = wid ? `?t=${encodeURIComponent(t)}&wid=${wid}` : `?t=${encodeURIComponent(t)}`;
     const data = await api('/api/public/order/' + o + q);
-    S.order = data.order; S.steps = data.steps; S.workers = data.workers; S.mode = 'order'; S.o = o; S.t = t; S.w = wid || null;
+    S.order = data.order; S.steps = data.steps; S.workers = data.workers; S.badReasons = data.badReasons || []; S.mode = 'order'; S.o = o; S.t = t; S.w = wid || null;
     S.sel = new Set(); S.vals = {};
     const first = data.steps.find((s) => s.status !== 'done') || data.steps[0];
     S.step = first || null;
@@ -94,7 +94,7 @@
             <input id="b${s.id}" type="number" inputmode="numeric" min="0" value="${v.bad}">
             <button type="button" class="inc" data-binc="${s.id}" aria-label="增加不良数量"></button></div></div>
           <div class="field"><span>工时（分钟，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 30"></div>
-          <div class="field"><span>不良原因（选填）</span><textarea id="r${s.id}" class="reason" placeholder="如：尺寸超差 / 划伤">${esc(v.reason)}</textarea></div>
+          <div class="field"><span>不良原因（选填）</span><select id="r${s.id}" class="plain reason"><option value="">无</option>${(S.badReasons || []).map((x) => `<option value="${x.id}"${v.reason == String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
         <div class="step-main">
@@ -183,7 +183,7 @@
       .filter((s) => S.sel.has(s.id) && s.allow_report !== 0 && s.status !== 'done')
       .map((s) => {
         const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
-        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason: v.reason, work_min: Number(v.min) || 0 };
+        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, work_min: Number(v.min) || 0 };
       })
       .filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }
