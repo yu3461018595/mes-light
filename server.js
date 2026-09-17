@@ -355,7 +355,7 @@ route('DELETE', '/api/routes/(\\d+)', ['admin'], (req, res, m, _b, u) => {
 /* ------------------------------ 工单 ------------------------------ */
 const ORDER_SQL = `SELECT o.*, p.code product_code, p.name product_name, p.spec, p.unit, p.price product_price,
     r.code route_code, r.name route_name, c.name customer_name,
-    (SELECT COALESCE(MIN(s.qty_good),0) FROM order_steps s WHERE s.order_id=o.id) qty_done,
+    (SELECT COALESCE(qty_good,0) FROM order_steps s WHERE s.order_id=o.id ORDER BY s.seq DESC LIMIT 1) qty_done,
     (SELECT COALESCE(MAX(s.qty_good),0) FROM order_steps s WHERE s.order_id=o.id) qty_max,
     (SELECT COALESCE(SUM(s.qty_bad),0)  FROM order_steps s WHERE s.order_id=o.id) qty_bad,
     (SELECT COALESCE(SUM(s.work_min),0) FROM order_steps s WHERE s.order_id=o.id) work_min,
@@ -634,6 +634,9 @@ function doReport(b, actor) {
 
   const workerId = num(b.worker_id) || actor.id;
   const results = [];
+  // 末道工序（seq 最大）合格数自动计入成品仓
+  const product = get('SELECT * FROM products WHERE id=?', [order.product_id]);
+  const lastStepId = (get('SELECT id FROM order_steps WHERE order_id=? ORDER BY seq DESC LIMIT 1', [order_id]) || {}).id || null;
 
   tx(() => {
     for (const it of items) {
@@ -695,7 +698,12 @@ function doReport(b, actor) {
       if (finished) {
         run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [order_id]);
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished });
+      // 末道工序报工合格数 → 自动成品入库
+      let autoIn = null;
+      if (step.id === lastStepId && good > 0) {
+        autoIn = autoFinishIn(order, product, good, actor, step.id);
+      }
+      results.push({ order_step_id: step.id, seq: step.seq, finished, autoFinishIn: autoIn });
     }
 
     // 全部工序完成 → 工单完工
@@ -864,7 +872,7 @@ route('GET', '/api/stats/ranking', [], (req, res, _m, _b, _u, q) => {
 
 route('GET', '/api/stats/orders', [], (req, res) => {
   ok(res, all(`SELECT o.code, o.status, o.plan_end, p.name product_name, o.qty_plan,
-      (SELECT COALESCE(MIN(qty_good),0) FROM order_steps s WHERE s.order_id=o.id) qty_done
+      (SELECT COALESCE(qty_good,0) FROM order_steps s WHERE s.order_id=o.id ORDER BY s.seq DESC LIMIT 1) qty_done
     FROM orders o JOIN products p ON p.id=o.product_id
     WHERE o.status NOT IN ('closed') ORDER BY o.priority, o.plan_end LIMIT 200`));
 });
@@ -899,7 +907,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
   if (!orderOk && !wAssigned) return fail(res, '二维码已失效或无权限', 403);
   if (!orderOk && wAssigned && !workerHere && !orderOpen) return fail(res, '您暂无该工单的报工权限', 403);
   const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
-      (SELECT COALESCE(MIN(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
@@ -918,7 +926,7 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
   const w = get('SELECT id,name,team FROM users WHERE id=?', [m[1]]);
   if (!w) return fail(res, '员工不存在', 404);
   const orders = all(`SELECT o.id,o.code,o.status,o.qty_plan,
-      (SELECT COALESCE(MIN(qty_good),0) FROM order_steps WHERE order_id=o.id) qty_done,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name
      FROM orders o JOIN products p ON p.id=o.product_id
@@ -1001,6 +1009,41 @@ function revertStock(refType, refId, operator) {
     });
   }
   run('DELETE FROM inventory_tx WHERE ref_type=? AND ref_id=?', [refType, refId]);
+}
+
+/* ------------------------------ 报工自动成品入库（末道工序） ------------------------------
+ * 工单最后一道工序（seq 最大）报工合格数，自动计入成品仓，生成 finished_goods_in 单据 + 收发明细。
+ * 物料按产品编码映射：已有成品物料直接复用，否则按产品档案自动建档（成品类，默认进成品仓）。
+ * 与手动成品入库规则一致：合格数入库，不良数不计；仓库缺省回退成品仓。 */
+function ensureFgWarehouse() {
+  let w = get("SELECT id FROM warehouses WHERE code='FG'");
+  if (w) return w.id;
+  w = get("SELECT id FROM warehouses WHERE name LIKE '%成品%' LIMIT 1");
+  if (w) return w.id;
+  return insert("INSERT INTO warehouses(code,name,remark,created_at) VALUES('FG','成品仓','报工自动入库默认仓库',?)", [now()]);
+}
+function ensureFgMaterial(product) {
+  if (!product || !product.code) return null;
+  const m = get('SELECT id FROM materials WHERE code=?', [product.code]);
+  if (m) return m.id;
+  const wid = ensureFgWarehouse();
+  return insert(`INSERT INTO materials(code,name,spec,material,category,unit,warehouse_id,location,safe_min,safe_max,active,remark,created_at)
+    VALUES(?,?,?,NULL,'成品',?,?,NULL,0,NULL,1,?,?)`,
+    [product.code, product.name, product.spec || null, product.unit || '件', wid, '报工自动入库生成', now()]);
+}
+// 末道工序合格数自动成品入库；返回生成的单据摘要（供 doReport 回传前端提示）
+function autoFinishIn(order, product, good, actor, stepId) {
+  const mid = ensureFgMaterial(product);
+  if (!mid) return null;
+  const wh = ensureFgWarehouse();
+  const code = genCode('RK');
+  const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [code, today(), order.id, mid, wh, product.code || null, product.name, product.spec || null,
+      good, product.unit || '件', null, null, null, 'qualified', '报工自动入库（末道工序）', actor.id, now()]);
+  applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: good, tx_type: 'in_finish',
+    ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: order.id, operator: actor.name, tx_date: today(), remark: '成品入库 ' + code });
+  return { id, code, qty: good, material_id: mid, warehouse_id: wh };
 }
 
 /* ------------------------------ 来料记录 / 成品入库 ------------------------------

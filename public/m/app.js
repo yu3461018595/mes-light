@@ -199,18 +199,21 @@
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }
     const btn = $app.querySelector('#submit'); btn.disabled = true;
     try {
-      await post('/api/public/reports', {
+      const r = await post('/api/public/reports', {
         token: S.t, order_id: S.order.id, worker_id: workerId,
         steps, work_min: 0, report_date: today(), remark: '',
       });
-      showOk();
+      const auto = (r && r.steps || []).filter((s) => s.autoFinishIn);
+      const autoQty = auto.reduce((a, s) => a + Number(s.autoFinishIn.qty), 0);
+      showOk(autoQty);
     } catch (e) { toast(e.message); btn.disabled = false; }
   }
 
-  function showOk() {
+  function showOk(autoQty) {
     const mask = document.createElement('div'); mask.className = 'ok-mask';
     mask.innerHTML = `<div class="ok-circle"><svg viewBox="0 0 52 52"><path d="M14 27l8 8 16-18"/></svg></div>
       <div style="font-size:18px;font-weight:700">报工成功</div>
+      ${autoQty ? `<div style="color:#2bb673;margin-top:6px">末道工序已自动入库 ${autoQty} 件</div>` : ''}
       <button class="btn" style="max-width:220px" id="again">继续报工</button>
       ${S.mode === 'worker' ? '<button class="btn ghost" style="max-width:220px" id="wh">返回我的工单</button>' : ''}`;
     document.body.appendChild(mask);

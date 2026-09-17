@@ -203,8 +203,14 @@ Views.report = {
       };
       if (payload.qty_good + payload.qty_bad <= 0) return UI.toast('请填写合格数或不良数', 'err');
       try {
-        await API.post('/reports', payload);
-        UI.toast('报工成功', 'ok');
+        const r = await API.post('/reports', payload);
+        const auto = (r && r.steps || []).filter((s) => s.autoFinishIn);
+        if (auto.length) {
+          const qty = auto.reduce((a, s) => a + Number(s.autoFinishIn.qty), 0);
+          UI.toast('报工成功，末道工序已自动入库 ' + qty + ' 件', 'ok');
+        } else {
+          UI.toast('报工成功', 'ok');
+        }
         this.showOrder(el, orderId, pick.id);
       } catch (e) { UI.toast(e.message, 'err'); }
     };

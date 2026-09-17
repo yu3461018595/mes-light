@@ -88,8 +88,10 @@
   function computeOrderAgg(o) {
     const steps = T('order_steps').filter((s) => s.order_id === o.id);
     const goods = steps.map((s) => num(s.qty_good));
+    // 完成率口径：仅末道工序（seq 最大）的合格产量，而非各工序合格数最小值
+    const last = steps.slice().sort((a, b) => a.seq - b.seq).pop();
     const out = {
-      qty_done: goods.length ? Math.min(...goods) : 0,
+      qty_done: last ? num(last.qty_good) : 0,
       qty_max: goods.length ? Math.max(...goods) : 0,
       qty_bad: steps.reduce((a, s) => a + num(s.qty_bad), 0),
       work_min: steps.reduce((a, s) => a + num(s.work_min), 0),
@@ -140,6 +142,10 @@
 
     const workerId = Number(b.worker_id) || act.id;
     const results = [];
+    // 末道工序（seq 最大）合格数自动计入成品仓
+    const product = find('products', order.product_id) || {};
+    const lastStep = T('order_steps').filter((s) => s.order_id === order.id).sort((a, b) => b.seq - a.seq)[0];
+    const lastStepId = lastStep ? lastStep.id : null;
 
     items.forEach((it) => {
       const step = find('order_steps', it.order_step_id);
@@ -186,7 +192,12 @@
         const nxt = T('order_steps').filter((s) => s.order_id === order.id && s.status === 'pending').sort((a, b) => a.seq - b.seq)[0];
         if (nxt) update('order_steps', nxt.id, { status: 'running' });
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished });
+      // 末道工序报工合格数 → 自动成品入库
+      let autoIn = null;
+      if (step.id === lastStepId && good > 0) {
+        autoIn = autoFinishInStatic(order, product, good, act);
+      }
+      results.push({ order_step_id: step.id, seq: step.seq, finished, autoFinishIn: autoIn });
     });
 
     if (!T('order_steps').some((s) => s.order_id === order.id && s.status !== 'done')) {
@@ -570,7 +581,9 @@
     const workerHere = wTeam && T('order_steps').some((s) => s.order_id === o.id && s.assignee_team === wTeam);
     if (q.t && wTeam && !workerHere && !orderOpen) return fail('您暂无该工单的报工权限', 403);
     const p = find('products', o.product_id) || {};
-    const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_good), 0), qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
+    const stepsAll = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq);
+    const lastStep = stepsAll[stepsAll.length - 1];
+    const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: lastStep ? num(lastStep.qty_good) : 0, qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
     const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
@@ -714,6 +727,35 @@
       applyStock({ material_id: t.material_id, warehouse_id: t.warehouse_id, batch: t.batch, qty: -num(t.qty), tx_type: t.tx_type, order_id: t.order_id, operator: operator || t.operator, tx_date: today(), remark: '单据修改/删除冲销' });
     });
     DB.inventory_tx = T('inventory_tx').filter((t) => !(t.ref_type === refType && Number(t.ref_id) === Number(refId)));
+  }
+  // 报工自动成品入库（末道工序）：成品物料按产品编码映射，缺成品仓建 FG
+  function ensureFgWarehouseStatic() {
+    let w = T('warehouses').find((x) => x.code === 'FG');
+    if (w) return w.id;
+    w = T('warehouses').find((x) => (x.name || '').indexOf('成品') >= 0);
+    if (w) return w.id;
+    return insert('warehouses', { code: 'FG', name: '成品仓', remark: '报工自动入库默认仓库', created_at: nowISO() });
+  }
+  function ensureFgMaterialStatic(product) {
+    if (!product || !product.code) return null;
+    let m = T('materials').find((x) => x.code === product.code);
+    if (m) return m.id;
+    const wid = ensureFgWarehouseStatic();
+    return insert('materials', { code: product.code, name: product.name, spec: product.spec || null, material: null, category: '成品', unit: product.unit || '件', warehouse_id: wid, location: null, safe_min: 0, safe_max: null, active: 1, remark: '报工自动入库生成', created_at: nowISO() });
+  }
+  function autoFinishInStatic(order, product, good, act) {
+    const mid = ensureFgMaterialStatic(product);
+    if (!mid) return null;
+    const wh = ensureFgWarehouseStatic();
+    const code = 'RK' + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
+    const id = insert('finished_goods_in', {
+      code, in_date: today(), order_id: order.id, material_id: mid, warehouse_id: wh,
+      product_code: product.code || null, product_name: product.name, spec: product.spec || null,
+      qty: good, unit: product.unit || '件', batch: null, location: null, inspector: null, result: 'qualified',
+      remark: '报工自动入库（末道工序）', created_by: act.id, created_at: nowISO(),
+    });
+    applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: good, tx_type: 'in_finish', ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: order.id, operator: act.name, tx_date: today(), remark: '成品入库 ' + code });
+    return { id, code, qty: good };
   }
   // 仅传 material_id 时，从物料档案回带编码/名称/规格/单位/默认仓库
   function fillFromMaterial(b, mid) {
