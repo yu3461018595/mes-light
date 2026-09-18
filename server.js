@@ -400,6 +400,15 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE rp.order_id=? ORDER BY rp.id DESC LIMIT 100`, [m[1]]);
+  // 附带不良明细，便于前端展示多种不良
+  const rids = o.reports.map((r) => r.id);
+  if (rids.length) {
+    const rbr = all(`SELECT * FROM report_bad_reasons WHERE report_id IN (${rids.join(',')})`);
+    for (const r of o.reports) {
+      r.bad_reasons = rbr.filter((x) => x.report_id === r.id)
+        .map((x) => ({ bad_reason: x.bad_reason, bad_reason_id: x.bad_reason_id, bad_reason_detail: x.bad_reason_detail, qty: x.qty }));
+    }
+  }
   const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
   o.badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
@@ -620,14 +629,14 @@ function doReport(b, actor) {
         order_step_id: num(s.order_step_id),
         qty_good: s.qty_good, qty_bad: s.qty_bad,
         bad_reason: s.bad_reason, bad_reason_id: num(s.bad_reason_id) || 0, bad_reason_detail: s.bad_reason_detail, work_center_id: s.work_center_id,
-        work_min: s.work_min,
+        work_min: s.work_min, bad_reasons: Array.isArray(s.bad_reasons) ? s.bad_reasons : null,
         report_date: s.report_date || b.report_date, remark: s.remark || '',
       }))
     : [{
         order_step_id: num(b.order_step_id),
         qty_good: b.qty_good, qty_bad: b.qty_bad,
         bad_reason: b.bad_reason, bad_reason_id: num(b.bad_reason_id) || 0, bad_reason_detail: b.bad_reason_detail, work_center_id: b.work_center_id,
-        work_min: b.work_min,
+        work_min: b.work_min, bad_reasons: Array.isArray(b.bad_reasons) ? b.bad_reasons : null,
         report_date: b.report_date, remark: b.remark || '',
       }];
   if (!items.length) throw new Error('请至少选择一道工序');
@@ -656,36 +665,67 @@ function doReport(b, actor) {
         throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
       }
       const good = Math.max(0, Math.floor(num(it.qty_good)));
-      const bad = Math.max(0, Math.floor(num(it.qty_bad)));
-      if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
-      // 不良原因：优先按 id 关联字典；兼容旧版自由文本；工单配置子集时校验范围
-      let brId = num(it.bad_reason_id) || 0;
-      let brName = '';
-      const detail = String(it.bad_reason_detail || '').trim();
-      if (brId) {
-        const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
-        if (!br) throw new Error('不良原因不存在（#' + brId + '）');
-        const allowed = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [order_id]);
-        if (allowed.length && !allowed.some((a) => a.bad_reason_id === brId)) {
-          throw new Error('不良原因「' + br.name + '」不在该工单可选范围内');
+      // 不良明细：支持一道工序多种不良（bad_reasons 数组）；旧版单原因兜底
+      let badEntries = [];
+      let bad;
+      const rawBad = it.bad_reasons;
+      if (Array.isArray(rawBad) && rawBad.length) {
+        for (const e of rawBad) {
+          const q = Math.max(0, Math.floor(num(e.qty)));
+          if (q <= 0) continue;
+          let brId = num(e.bad_reason_id) || 0;
+          let brName = '';
+          const detail = String(e.bad_reason_detail || '').trim();
+          if (brId) {
+            const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
+            if (!br) throw new Error('不良原因不存在（#' + brId + '）');
+            const allowed = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [order_id]);
+            if (allowed.length && !allowed.some((a) => a.bad_reason_id === brId)) {
+              throw new Error('不良原因「' + br.name + '」不在该工单可选范围内');
+            }
+            // 选「其他」并填写具体说明 → 以说明作为具体原因；bad_reason_id 置空便于统计按具体原因聚合
+            if (br.name === '其他' && detail) { brName = detail; brId = 0; } else { brName = br.name; }
+          } else if (e.bad_reason) {
+            brName = String(e.bad_reason);
+          } else {
+            brName = '其他';
+          }
+          badEntries.push({ bad_reason_id: brId || null, bad_reason: brName, bad_reason_detail: detail, qty: q });
         }
-        // 选「其他」并填写具体说明 → 以说明作为具体原因；bad_reason_id 置空便于统计按具体原因聚合
-        if (br.name === '其他' && detail) {
-          brName = detail;
-          brId = 0;
-        } else {
-          brName = br.name;
+        bad = badEntries.reduce((a, e) => a + e.qty, 0);
+      } else {
+        // 旧版单原因兜底
+        bad = Math.max(0, Math.floor(num(it.qty_bad)));
+        const detail = String(it.bad_reason_detail || '').trim();
+        let brId = num(it.bad_reason_id) || 0;
+        let brName = '';
+        if (brId) {
+          const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
+          if (!br) throw new Error('不良原因不存在（#' + brId + '）');
+          const allowed = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [order_id]);
+          if (allowed.length && !allowed.some((a) => a.bad_reason_id === brId)) {
+            throw new Error('不良原因「' + br.name + '」不在该工单可选范围内');
+          }
+          if (br.name === '其他' && detail) { brName = detail; brId = 0; } else { brName = br.name; }
+        } else if (it.bad_reason) {
+          brName = String(it.bad_reason);
+        } else if (bad) {
+          brName = '其他';
         }
-      } else if (it.bad_reason) {
-        brName = String(it.bad_reason); // 旧版自由文本兜底
-      } else if (bad) {
-        brName = '其他';
+        if (bad > 0) badEntries.push({ bad_reason_id: brId || null, bad_reason: brName, bad_reason_detail: detail, qty: bad });
       }
-      insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at)
+      it._bad = bad;
+      if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
+      const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
-          good, bad, brName, brId || null, num(it.work_min),
+          good, bad, badEntries[0] ? badEntries[0].bad_reason : '', badEntries[0] ? badEntries[0].bad_reason_id : null, num(it.work_min),
           it.report_date || today(), it.remark || '', now()]);
+      // 写入不良明细
+      for (const e of badEntries) {
+        insert('INSERT INTO report_bad_reasons(report_id,bad_reason_id,bad_reason,bad_reason_detail,qty) VALUES(?,?,?,?,?)',
+          [rid, e.bad_reason_id, e.bad_reason, e.bad_reason_detail, e.qty]);
+      }
 
       const done = step.qty_good + good;
       const finished = done >= step.qty_plan;
@@ -712,7 +752,7 @@ function doReport(b, actor) {
   });
 
   const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
-  const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_bad))), 0);
+  const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
   writeLog(actor, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + totalGood + ' / 不良 ' + totalBad);
   return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
 }
@@ -743,6 +783,7 @@ route('DELETE', '/api/reports/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u)
     run('UPDATE order_steps SET qty_good=qty_good-?, qty_bad=qty_bad-?, work_min=work_min-? WHERE id=?',
       [r.qty_good, r.qty_bad, r.work_min, r.order_step_id]);
     run("UPDATE order_steps SET status=CASE WHEN qty_good+qty_bad=0 THEN 'pending' WHEN qty_good>=qty_plan THEN 'done' ELSE 'running' END, finish_time=CASE WHEN qty_good>=qty_plan THEN finish_time ELSE NULL END WHERE id=?", [r.order_step_id]);
+    run('DELETE FROM report_bad_reasons WHERE report_id=?', [m[1]]);
     run('DELETE FROM reports WHERE id=?', [m[1]]);
     const o = get('SELECT code FROM orders WHERE id=?', [r.order_id]);
     writeLog(u, '撤销报工', (o ? o.code : '') + ' 合格 ' + r.qty_good);
@@ -855,10 +896,20 @@ route('GET', '/api/stats/trend', [], (req, res, _m, _b, _u, q) => {
 
 route('GET', '/api/stats/bad', [], (req, res, _m, _b, _u, q) => {
   const days = Math.min(90, Math.max(3, num(q.days, 14)));
-  ok(res, all(`SELECT COALESCE(br.name, r.bad_reason) name, SUM(r.qty_bad) qty FROM reports r
-    LEFT JOIN bad_reasons br ON br.id=r.bad_reason_id
-    WHERE r.report_date >= date('now', ?) AND r.qty_bad>0 AND COALESCE(br.name, r.bad_reason)<>''
-    GROUP BY name ORDER BY qty DESC`, ['-' + (days - 1) + ' day']));
+  const since = '-' + (days - 1) + ' day';
+  // 新模型：按 report_bad_reasons 明细聚合；旧模型：无明细行的 reports 仍按原 bad_reason 聚合
+  ok(res, all(`SELECT name, SUM(qty) qty FROM (
+      SELECT COALESCE(br.name, rb.bad_reason) name, rb.qty qty
+      FROM report_bad_reasons rb JOIN reports r ON r.id=rb.report_id
+      LEFT JOIN bad_reasons br ON br.id=rb.bad_reason_id
+      WHERE r.report_date >= date('now', ?) AND rb.qty>0 AND COALESCE(br.name, rb.bad_reason)<>''
+      UNION ALL
+      SELECT COALESCE(br.name, r.bad_reason) name, r.qty_bad qty
+      FROM reports r LEFT JOIN bad_reasons br ON br.id=r.bad_reason_id
+      WHERE r.report_date >= date('now', ?) AND r.qty_bad>0
+        AND r.id NOT IN (SELECT report_id FROM report_bad_reasons WHERE report_id IS NOT NULL)
+        AND COALESCE(br.name, r.bad_reason)<>''
+    ) GROUP BY name ORDER BY qty DESC`, [since, since]));
 });
 
 route('GET', '/api/stats/ranking', [], (req, res, _m, _b, _u, q) => {

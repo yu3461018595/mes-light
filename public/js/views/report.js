@@ -119,27 +119,17 @@ Views.report = {
               </div>
               <div class="small muted" id="leftTip"></div>
             </div>
-            <div class="field">
-              <span>不良数量</span>
-              <div class="qty-box">
-                <button class="qbtn" id="bDec">−</button>
-                <input class="input" id="fBad" type="number" inputmode="numeric" min="0" value="0">
-                <button class="qbtn" id="bInc">+</button>
-              </div>
-            </div>
-          </div>
-          <div class="grid g2">
-            <label class="field"><span>不良原因</span>
-              <select class="input" id="fReason"><option value="">无</option>${UI.options((o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons), '', 'name')}</select></label>
             <label class="field"><span>实动工时（小时）</span>
               <input class="input" id="fMin" type="number" min="0" step="0.5" value="0"></label>
           </div>
-          <label class="field" id="reasonDetailWrap" style="display:none"><span>其他原因说明</span>
-            <input class="input" id="fReasonDetail" placeholder="请填写具体不良原因"></label>
-            <label class="field"><span>报工人</span>
-              <select class="input" id="fWorker">${UI.options(wks, App.user.id, 'name')}</select></label>
-            <label class="field"><span>报工日期</span>
-              <input class="input" id="fDate" type="date" value="${UI.today()}"></label>
+          <div class="field">
+            <span>不良明细（可多种：选原因 + 填数量；不选原因则不记录）</span>
+            <div id="badRows"></div>
+          </div>
+          <label class="field"><span>报工人</span>
+            <select class="input" id="fWorker">${UI.options(wks, App.user.id, 'name')}</select></label>
+          <label class="field"><span>报工日期</span>
+            <input class="input" id="fDate" type="date" value="${UI.today()}"></label>
           </div>
           <label class="field"><span>备注</span><input class="input" id="fRemark" placeholder="选填"></label>
           <button class="btn btn-primary btn-lg btn-block" id="submit">${UI.icon('check')}提交报工</button>
@@ -153,7 +143,13 @@ Views.report = {
           { t: '工序', f: (r) => UI.esc(r.process_name || '—') },
           { t: '报工人', f: (r) => UI.esc(r.worker_name || '—') },
           { t: '合格', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.qty_good)}</span>` },
-          { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span>` },
+          { t: '不良', f: (r) => {
+            if (r.bad_reasons && r.bad_reasons.length) {
+              const parts = r.bad_reasons.map((x) => `${UI.esc(x.bad_reason)}${x.qty ? '×' + x.qty : ''}`);
+              return `<span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span><div class="small muted" style="margin-top:2px">${parts.join('、')}</div>`;
+            }
+            return `<span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span>`;
+          } },
         ], o.reports.slice(0, 8), { emptyText: '暂无记录' })}</div>
       </div>`;
 
@@ -163,40 +159,69 @@ Views.report = {
     };
     bindQty();
 
-    const g = el.querySelector('#fGood'), b = el.querySelector('#fBad');
+    const g = el.querySelector('#fGood');
     const add = (input, n) => { input.value = Math.max(0, (Number(input.value) || 0) + n); };
     el.querySelector('#gDec').onclick = () => add(g, -10);
     el.querySelector('#gInc').onclick = () => add(g, 10);
-    el.querySelector('#bDec').onclick = () => add(b, -1);
-    el.querySelector('#bInc').onclick = () => add(b, 1);
 
-    // 选「其他」时显示具体原因备注框
+    // 不良明细：支持一道工序多种不良，填一种自动出现下一种
     const reasons = (o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons) || [];
-    const fReason = el.querySelector('#fReason');
-    const reasonDetailWrap = el.querySelector('#reasonDetailWrap');
-    const reasonIsOther = () => { const sel = reasons.find((r) => String(r.id) === String(fReason.value)); return !!(sel && sel.name === '其他'); };
-    const toggleReasonDetail = () => {
-      const isOther = reasonIsOther();
-      reasonDetailWrap.style.display = isOther ? '' : 'none';
-      if (!isOther) el.querySelector('#fReasonDetail').value = '';
+    const badRows = [{ reason: '', qty: '', detail: '' }];
+    const badRowsEl = el.querySelector('#badRows');
+    const rowOpts = (sel) => '<option value="">无</option>' + reasons.map((r) => `<option value="${r.id}"${String(sel) === String(r.id) ? ' selected' : ''}>${UI.esc(r.name)}</option>`).join('');
+    const renderBadRows = () => {
+      if (!badRows.length || badRows[badRows.length - 1].reason) badRows.push({ reason: '', qty: '', detail: '' });
+      badRowsEl.innerHTML = badRows.map((row, idx) => {
+        const isOther = reasons.find((r) => String(r.id) === String(row.reason) && r.name === '其他');
+        return `<div class="brow" data-i="${idx}" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <select class="input brow-reason" style="flex:2;min-width:0">${rowOpts(row.reason)}</select>
+          <input class="input brow-qty" type="number" min="0" inputmode="numeric" placeholder="数量" style="flex:1;min-width:0" value="${row.qty === '' ? '' : UI.esc(row.qty)}">
+          ${isOther ? `<input class="input brow-detail" type="text" placeholder="具体原因" style="flex:2;min-width:0" value="${UI.esc(row.detail || '')}">` : ''}
+          <button type="button" class="brow-del" title="删除此不良" style="flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line,#ddd);background:#fff;border-radius:6px;color:#e5484d;font-size:16px;cursor:pointer">×</button>
+        </div>`;
+      }).join('');
     };
-    fReason.addEventListener('change', toggleReasonDetail);
-    toggleReasonDetail();
+    badRowsEl.addEventListener('change', (e) => {
+      const rowEl = e.target.closest('.brow'); if (!rowEl) return;
+      const i = +rowEl.dataset.i;
+      if (e.target.classList.contains('brow-reason')) { badRows[i].reason = e.target.value; renderBadRows(); }
+    });
+    badRowsEl.addEventListener('input', (e) => {
+      const rowEl = e.target.closest('.brow'); if (!rowEl) return;
+      const i = +rowEl.dataset.i;
+      if (e.target.classList.contains('brow-qty')) badRows[i].qty = e.target.value;
+      if (e.target.classList.contains('brow-detail')) badRows[i].detail = e.target.value;
+    });
+    badRowsEl.addEventListener('click', (e) => {
+      if (e.target.classList.contains('brow-del')) {
+        const i = +e.target.closest('.brow').dataset.i;
+        if (badRows.length > 1) { badRows.splice(i, 1); renderBadRows(); }
+      }
+    });
+    renderBadRows();
 
     el.querySelectorAll('[data-s]').forEach((c) => c.onclick = () => {
       this.showOrder(el, orderId, c.dataset.s);
     });
 
     el.querySelector('#submit').onclick = async () => {
+      const badEntries = badRows.filter((r) => r.reason && Number(r.qty) > 0).map((r) => {
+        const isOther = reasons.find((x) => String(x.id) === String(r.reason) && x.name === '其他');
+        return {
+          bad_reason_id: Number(r.reason) || 0,
+          qty: Number(r.qty) || 0,
+          bad_reason_detail: isOther ? (r.detail || '').trim() : '',
+        };
+      });
+      const totalBad = badEntries.reduce((a, e) => a + e.qty, 0);
       const payload = {
         order_id: o.id,
         order_step_id: pick.id,
         worker_id: Number(el.querySelector('#fWorker').value) || App.user.id,
         work_center_id: pick.work_center_id,
         qty_good: Number(g.value) || 0,
-        qty_bad: Number(b.value) || 0,
-        bad_reason_id: Number(el.querySelector('#fReason').value) || 0,
-        bad_reason_detail: reasonIsOther() ? (el.querySelector('#fReasonDetail').value.trim() || '') : '',
+        qty_bad: totalBad,
+        bad_reasons: badEntries,
         work_min: (Number(el.querySelector('#fMin').value) || 0) * 60,
         report_date: el.querySelector('#fDate').value,
         remark: el.querySelector('#fRemark').value,

@@ -47,7 +47,7 @@
   function remove(name, id) { DB[name] = T(name).filter((r) => r.id !== Number(id)); }
 
   /* ------------------------------ 持久化 ------------------------------ */
-  function load() { try { const s = global.localStorage && global.localStorage.getItem(LS_KEY); if (s) { DB = JSON.parse(s); return true; } } catch (e) {} return false; }
+  function load() { try { const s = global.localStorage && global.localStorage.getItem(LS_KEY); if (s) { DB = JSON.parse(s); for (const k of Object.keys(EMPTY)) if (!DB[k]) DB[k] = []; return true; } } catch (e) {} return false; }
   function save() { try { global.localStorage && global.localStorage.setItem(LS_KEY, JSON.stringify(DB)); } catch (e) {} }
 
   function anchorDates() {
@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], logs: [], incoming_materials: [], finished_goods_in: [], materials: [], warehouses: [], inventory: [], inventory_tx: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], materials: [], warehouses: [], inventory: [], inventory_tx: [] };
     try {
       const res = await fetch('/data/seed.json', { cache: 'no-store' });
       DB = res.ok ? await res.json() : EMPTY;
@@ -126,7 +126,9 @@
     const s = rp.order_step_id ? find('order_steps', rp.order_step_id) : null;
     const pr = s ? find('processes', s.process_id) : null;
     const w = rp.work_center_id ? find('work_centers', rp.work_center_id) : null;
-    return Object.assign({}, rp, { worker_name: u.name, order_code: o.code, process_name: pr ? pr.name : '', wc_name: w ? w.name : '' });
+    const badReasons = T('report_bad_reasons').filter((x) => x.report_id === rp.id)
+      .map((x) => ({ bad_reason: x.bad_reason, bad_reason_id: x.bad_reason_id, bad_reason_detail: x.bad_reason_detail, qty: x.qty }));
+    return Object.assign({}, rp, { worker_name: u.name, order_code: o.code, process_name: pr ? pr.name : '', wc_name: w ? w.name : '', bad_reasons: badReasons });
   }
 
   /* ------------------------------ 报工核心 ------------------------------ */
@@ -136,8 +138,8 @@
     if (['done', 'closed'].includes(order.status)) throw new Error('工单已完成，无法继续报工');
 
     const items = Array.isArray(b.steps)
-      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, bad_reason_id: Number(s.bad_reason_id) || 0, bad_reason_detail: s.bad_reason_detail, work_min: s.work_min }))
-      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, bad_reason_id: Number(b.bad_reason_id) || 0, bad_reason_detail: b.bad_reason_detail, work_min: b.work_min }];
+      ? b.steps.map((s) => ({ order_step_id: Number(s.order_step_id), qty_good: s.qty_good, qty_bad: s.qty_bad, bad_reason: s.bad_reason, bad_reason_id: Number(s.bad_reason_id) || 0, bad_reason_detail: s.bad_reason_detail, work_min: s.work_min, bad_reasons: Array.isArray(s.bad_reasons) ? s.bad_reasons : null }))
+      : [{ order_step_id: Number(b.order_step_id), qty_good: b.qty_good, qty_bad: b.qty_bad, bad_reason: b.bad_reason, bad_reason_id: Number(b.bad_reason_id) || 0, bad_reason_detail: b.bad_reason_detail, work_min: b.work_min, bad_reasons: Array.isArray(b.bad_reasons) ? b.bad_reasons : null }];
     if (!items.length) throw new Error('请至少选择一道工序');
 
     const workerId = Number(b.worker_id) || act.id;
@@ -162,26 +164,53 @@
         throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
       }
       const good = Math.max(0, Math.floor(num(it.qty_good)));
-      const bad = Math.max(0, Math.floor(num(it.qty_bad)));
+      // 不良明细：支持一道工序多种不良（bad_reasons 数组）；旧版单原因兜底
+      let badEntries = [];
+      let bad;
+      const rawBad = it.bad_reasons;
+      if (Array.isArray(rawBad) && rawBad.length) {
+        for (const e of rawBad) {
+          const q = Math.max(0, Math.floor(num(e.qty)));
+          if (q <= 0) continue;
+          let brId = num(e.bad_reason_id) || 0;
+          let brName = '';
+          const detail = String(e.bad_reason_detail || '').trim();
+          if (brId) {
+            const br = find('bad_reasons', brId);
+            if (!br) throw new Error('不良原因不存在（#' + brId + '）');
+            // 选「其他」并填写具体说明 → 以说明作为具体原因；bad_reason_id 置空
+            if (br.name === '其他' && detail) { brName = detail; brId = 0; } else { brName = br.name; }
+          } else if (e.bad_reason) {
+            brName = String(e.bad_reason);
+          } else {
+            brName = '其他';
+          }
+          badEntries.push({ bad_reason_id: brId || null, bad_reason: brName, bad_reason_detail: detail, qty: q });
+        }
+        bad = badEntries.reduce((a, e) => a + e.qty, 0);
+      } else {
+        bad = Math.max(0, Math.floor(num(it.qty_bad)));
+        const detail = String(it.bad_reason_detail || '').trim();
+        let resolved = '';
+        if (it.bad_reason_id) {
+          const br = find('bad_reasons', it.bad_reason_id);
+          if (br) resolved = (br.name === '其他' && detail) ? detail : br.name;
+          else resolved = it.bad_reason || '';
+        } else resolved = it.bad_reason || '';
+        if (bad > 0) badEntries.push({ bad_reason_id: it.bad_reason_id ? Number(it.bad_reason_id) : null, bad_reason: resolved || '其他', bad_reason_detail: detail, qty: bad });
+      }
       if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
       const finished = (step.qty_good + good) >= step.qty_plan;
 
-      // 不良原因：选「其他」并填写说明 → 以说明作为具体原因
-      const detail = String(it.bad_reason_detail || '').trim();
-      let resolved = '';
-      if (it.bad_reason_id) {
-        const br = find('bad_reasons', it.bad_reason_id);
-        if (br) resolved = (br.name === '其他' && detail) ? detail : br.name;
-        else resolved = it.bad_reason || '';
-      } else resolved = it.bad_reason || '';
-      const badReasonVal = bad ? (resolved || '其他') : '';
-
-      insert('reports', {
+      const rid = insert('reports', {
         id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
-        bad_reason: badReasonVal, work_min: num(it.work_min),
+        bad_reason: badEntries[0] ? badEntries[0].bad_reason : '', bad_reason_id: badEntries[0] ? badEntries[0].bad_reason_id : null, work_min: num(it.work_min),
         report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
       });
+      for (const e of badEntries) {
+        insert('report_bad_reasons', { id: nextId('report_bad_reasons'), report_id: rid, bad_reason_id: e.bad_reason_id, bad_reason: e.bad_reason, bad_reason_detail: e.bad_reason_detail, qty: e.qty });
+      }
       update('order_steps', step.id, {
         qty_good: step.qty_good + good, qty_bad: step.qty_bad + bad, work_min: step.work_min + num(it.work_min),
         status: finished ? 'done' : 'running', start_time: step.start_time || nowISO(),
@@ -204,7 +233,7 @@
       update('orders', order.id, { status: 'done', finish_time: nowISO() });
     }
     const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
-    const tb = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_bad))), 0);
+    const tb = items.reduce((a, it) => a + Math.max(0, Math.floor(num((it.bad_reasons ? (it.bad_reasons.reduce((s, e) => s + Math.max(0, Math.floor(num(e.qty))), 0)) : it.qty_bad)))), 0);
     writeLog(act, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + tg + ' / 不良 ' + tb);
     return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
   }
@@ -226,6 +255,7 @@
       }
     }
     remove('reports', id);
+    DB.report_bad_reasons = T('report_bad_reasons').filter((x) => x.report_id !== id);
     const o = find('orders', r.order_id);
     writeLog(actor(), '撤销报工', (o ? o.code : '') + ' 合格 ' + r.qty_good);
     return true;
@@ -532,8 +562,17 @@
     const days = Math.min(90, Math.max(3, num(q.days, 14)));
     const from = dayOffset(-(days - 1));
     const map = {};
+    // 新模型：按 report_bad_reasons 明细聚合
+    for (const x of T('report_bad_reasons')) {
+      const r = find('reports', x.report_id);
+      if (!r || r.report_date < from || num(x.qty) <= 0) continue;
+      const name = x.bad_reason_id ? (find('bad_reasons', x.bad_reason_id) || {}).name : x.bad_reason;
+      if (name) map[name] = (map[name] || 0) + num(x.qty);
+    }
+    // 旧模型：无明细行的 reports 仍按原 bad_reason 聚合
+    const hasDetail = new Set(T('report_bad_reasons').map((x) => x.report_id));
     for (const r of T('reports')) {
-      if (r.report_date >= from && num(r.qty_bad) > 0) {
+      if (r.report_date >= from && num(r.qty_bad) > 0 && !hasDetail.has(r.id)) {
         const name = r.bad_reason_id ? (find('bad_reasons', r.bad_reason_id) || {}).name : r.bad_reason;
         if (name) map[name] = (map[name] || 0) + num(r.qty_bad);
       }

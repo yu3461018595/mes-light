@@ -62,6 +62,50 @@
 
   function badge(st) { const m = BADGE[st] || [st, 'b-released']; return `<span class="badge ${m[1]}">${m[0]}</span>`; }
 
+  /* 不良明细多行逻辑：一道工序可登记多种不良，填一种自动出现下一种 */
+  function ensureBadRows(v) {
+    if (!v.badRows) v.badRows = [{ reason: '', qty: '', detail: '' }];
+    if (!v.badRows.length || v.badRows[v.badRows.length - 1].reason) v.badRows.push({ reason: '', qty: '', detail: '' });
+  }
+  function renderBadRows(sid) {
+    const v = S.vals[sid]; if (!v) return;
+    ensureBadRows(v);
+    const box = $app.querySelector('#br' + sid);
+    if (!box) return;
+    box.innerHTML = v.badRows.map((row, i) => {
+      const isOther = (S.badReasons || []).find((x) => String(x.id) === String(row.reason) && x.name === '其他');
+      return `<div class="brow" data-i="${i}" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <select class="plain reason brow-reason" style="flex:2;min-width:0">${'<option value="">无</option>' + (S.badReasons || []).map((x) => `<option value="${x.id}"${String(row.reason) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+        <input class="plain brow-qty" type="number" min="0" inputmode="numeric" placeholder="数量" style="flex:1;min-width:0" value="${row.qty === '' ? '' : esc(row.qty)}">
+        ${isOther ? `<input class="plain brow-detail" type="text" placeholder="具体原因" style="flex:2;min-width:0" value="${esc(row.detail || '')}">` : ''}
+        <button type="button" class="brow-del" style="flex:0 0 auto;width:28px;height:28px;border:1px solid #d5dae0;background:#fff;border-radius:6px;color:#e5484d;font-size:15px;cursor:pointer">×</button>
+      </div>`;
+    }).join('');
+  }
+  function bindBadRows() {
+    if (S._badBound) return; S._badBound = true;
+    $app.addEventListener('change', (e) => {
+      const br = e.target.closest('.brow'); if (!br) return;
+      const box = br.closest('.badrows'); if (!box) return;
+      const sid = Number(box.id.slice(2)); const i = +br.dataset.i; const v = S.vals[sid]; if (!v) return;
+      if (e.target.classList.contains('brow-reason')) { v.badRows[i].reason = e.target.value; renderBadRows(sid); }
+    });
+    $app.addEventListener('input', (e) => {
+      const br = e.target.closest('.brow'); if (!br) return;
+      const box = br.closest('.badrows'); if (!box) return;
+      const sid = Number(box.id.slice(2)); const i = +br.dataset.i; const v = S.vals[sid]; if (!v) return;
+      if (e.target.classList.contains('brow-qty')) v.badRows[i].qty = e.target.value;
+      if (e.target.classList.contains('brow-detail')) v.badRows[i].detail = e.target.value;
+    });
+    $app.addEventListener('click', (e) => {
+      if (e.target.classList.contains('brow-del')) {
+        const br = e.target.closest('.brow'); const box = br.closest('.badrows'); if (!box) return;
+        const sid = Number(box.id.slice(2)); const i = +br.dataset.i; const v = S.vals[sid]; if (!v) return;
+        if (v.badRows.length > 1) { v.badRows.splice(i, 1); renderBadRows(sid); }
+      }
+    });
+  }
+
   function renderReport() {
     const o = S.order;
     const closed = ['done', 'closed'].includes(o.status);
@@ -90,13 +134,8 @@
             <button type="button" class="dec" data-dec="${s.id}" aria-label="减少合格数量"></button>
             <input id="g${s.id}" type="number" inputmode="numeric" min="0" value="${v.good}">
             <button type="button" class="inc" data-inc="${s.id}" aria-label="增加合格数量"></button></div></div>
-          <div class="field"><span>不良数量</span><div class="stepper sm">
-            <button type="button" class="dec" data-bdec="${s.id}" aria-label="减少不良数量"></button>
-            <input id="b${s.id}" type="number" inputmode="numeric" min="0" value="${v.bad}">
-            <button type="button" class="inc" data-binc="${s.id}" aria-label="增加不良数量"></button></div></div>
           <div class="field"><span>工时（小时，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 2"></div>
-          <div class="field"><span>不良原因（选填）</span><select id="r${s.id}" class="plain reason"><option value="">无</option>${(S.badReasons || []).map((x) => `<option value="${x.id}"${v.reason == String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
-          <input id="rd${s.id}" class="plain" type="text" placeholder="请填写具体原因" style="${(otherId && v.reason == String(otherId.id)) ? '' : 'display:none'}" value="${esc(v.reasonDetail || '')}">
+          <div class="field"><span>不良明细（可多种：选原因 + 数量）</span><div class="badrows" id="br${s.id}"></div></div>
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
         <div class="step-main">
@@ -153,19 +192,15 @@
     // 每个选中工序的 ± 按钮
     S.steps.forEach((s) => {
       if (!S.sel.has(s.id) || !canReport(s)) return;
-      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id);
+      const g = $app.querySelector('#g' + s.id);
       const clamp = (v) => Math.max(0, Math.floor(Number(v) || 0));
       $app.querySelector('[data-dec="' + s.id + '"]').onclick = () => g.value = Math.max(0, clamp(g.value) - 10);
       $app.querySelector('[data-inc="' + s.id + '"]').onclick = () => g.value = clamp(g.value) + 10;
-      $app.querySelector('[data-bdec="' + s.id + '"]').onclick = () => b.value = Math.max(0, clamp(b.value) - 1);
-      $app.querySelector('[data-binc="' + s.id + '"]').onclick = () => b.value = clamp(b.value) + 1;
-      const rsel = $app.querySelector('#r' + s.id), rdet = $app.querySelector('#rd' + s.id);
-      if (rsel && rdet) {
-        const sync = () => { const rid = Number(rsel.value); const o = (S.badReasons || []).find((x) => x.id === rid); const isOther = o && o.name === '其他'; rdet.style.display = isOther ? '' : 'none'; if (!isOther) rdet.value = ''; };
-        rsel.addEventListener('change', sync);
-        sync();
-      }
     });
+
+    // 不良明细多行渲染 + 事件绑定
+    bindBadRows();
+    S.steps.forEach((s) => { if (S.sel.has(s.id) && canReport(s)) renderBadRows(s.id); });
 
     $app.querySelector('#submit').onclick = submit;
   }
@@ -173,16 +208,22 @@
   // 将当前页面各工序输入框数值读回 S.vals，便于重渲染后保留
   function readVals() {
     S.steps.forEach((s) => {
-      const g = $app.querySelector('#g' + s.id), b = $app.querySelector('#b' + s.id), r = $app.querySelector('#r' + s.id), w = $app.querySelector('#w' + s.id), rd = $app.querySelector('#rd' + s.id);
-      const prev = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '', reasonDetail: '' };
-      const isOther = (() => { const o = (S.badReasons || []).find((x) => x.id === Number(r ? r.value : 0)); return !!(o && o.name === '其他'); })();
-      S.vals[s.id] = {
+      const g = $app.querySelector('#g' + s.id), w = $app.querySelector('#w' + s.id);
+      const prev = S.vals[s.id] || { good: 0, min: '', badRows: [{ reason: '', qty: '', detail: '' }] };
+      const v = {
         good: g ? Math.max(0, Math.floor(Number(g.value) || 0)) : prev.good,
-        bad: b ? Math.max(0, Math.floor(Number(b.value) || 0)) : prev.bad,
-        reason: r ? r.value.trim() : prev.reason,
-        reasonDetail: (r && isOther && rd) ? rd.value.trim() : '',
         min: w ? (w.value === '' ? '' : Math.max(0, Number(w.value) || 0)) : prev.min,
+        badRows: prev.badRows || [{ reason: '', qty: '', detail: '' }],
       };
+      const box = $app.querySelector('#br' + s.id);
+      if (box) {
+        const rows = [...box.querySelectorAll('.brow')].map((br) => {
+          const det = br.querySelector('.brow-detail');
+          return { reason: br.querySelector('.brow-reason').value, qty: br.querySelector('.brow-qty').value, detail: det ? det.value : '' };
+        });
+        v.badRows = rows.length ? rows : [{ reason: '', qty: '', detail: '' }];
+      }
+      S.vals[s.id] = v;
     });
   }
 
@@ -193,8 +234,13 @@
     const steps = S.steps
       .filter((s) => S.sel.has(s.id) && s.allow_report !== 0 && s.status !== 'done')
       .map((s) => {
-        const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '', reasonDetail: '' };
-        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, bad_reason_detail: (v.reason && v.reasonDetail) ? v.reasonDetail : '', work_min: (Number(v.min) || 0) * 60 };
+        const v = S.vals[s.id] || { good: 0, badRows: [] };
+        const badRows = (v.badRows || []).filter((r) => r.reason && Number(r.qty) > 0).map((r) => {
+          const isOther = (S.badReasons || []).find((x) => String(x.id) === String(r.reason) && x.name === '其他');
+          return { bad_reason_id: Number(r.reason) || 0, qty: Number(r.qty) || 0, bad_reason_detail: isOther ? (r.detail || '').trim() : '' };
+        });
+        const totalBad = badRows.reduce((a, e) => a + e.qty, 0);
+        return { order_step_id: s.id, qty_good: v.good, qty_bad: totalBad, bad_reasons: badRows, work_min: (Number(v.min) || 0) * 60 };
       })
       .filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }
