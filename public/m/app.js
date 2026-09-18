@@ -68,7 +68,7 @@
     const pct = o.qty_plan > 0 ? Math.round((o.qty_done / o.qty_plan) * 100) : 0;
     const workerSel = S.w
       ? `<input type="hidden" id="fWorker" value="${S.w}"><div class="pname">报工人：<b>${esc(S.worker ? S.worker.name : '本人')}</b></div>`
-      : `<select id="fWorker" class="input">${S.workers.map((x) => `<option value="${x.id}"${S.worker && x.id == S.worker.id ? ' selected' : ''}>${esc(x.name)}（${esc(x.team || '—')}）</option>`).join('')}</select>`;
+      : `<select id="fWorker" class="input"><option value="">请选择报工人</option>${S.workers.map((x) => `<option value="${x.id}">${esc(x.name)}（${esc(x.team || '—')}）</option>`).join('')}</select>`;
 
     const canReport = (s) => s.allow_report !== 0 && s.status !== 'done';
     const selCount = S.steps.filter((s) => S.sel.has(s.id) && canReport(s)).length;
@@ -94,7 +94,7 @@
             <button type="button" class="dec" data-bdec="${s.id}" aria-label="减少不良数量"></button>
             <input id="b${s.id}" type="number" inputmode="numeric" min="0" value="${v.bad}">
             <button type="button" class="inc" data-binc="${s.id}" aria-label="增加不良数量"></button></div></div>
-          <div class="field"><span>工时（分钟，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 30"></div>
+          <div class="field"><span>工时（小时，选填）</span><input id="w${s.id}" class="plain" type="number" inputmode="decimal" min="0" step="0.5" value="${v.min || ''}" placeholder="如 2"></div>
           <div class="field"><span>不良原因（选填）</span><select id="r${s.id}" class="plain reason"><option value="">无</option>${(S.badReasons || []).map((x) => `<option value="${x.id}"${v.reason == String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
           <input id="rd${s.id}" class="plain" type="text" placeholder="请填写具体原因" style="${(otherId && v.reason == String(otherId.id)) ? '' : 'display:none'}" value="${esc(v.reasonDetail || '')}">
         </div>` : '';
@@ -189,11 +189,12 @@
   async function submit() {
     readVals();
     const workerId = S.w ? S.w : Number($app.querySelector('#fWorker').value);
+    if (!S.w && !workerId) { toast('请先选择报工人'); return; }
     const steps = S.steps
       .filter((s) => S.sel.has(s.id) && s.allow_report !== 0 && s.status !== 'done')
       .map((s) => {
         const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '', reasonDetail: '' };
-        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, bad_reason_detail: (v.reason && v.reasonDetail) ? v.reasonDetail : '', work_min: Number(v.min) || 0 };
+        return { order_step_id: s.id, qty_good: v.good, qty_bad: v.bad, bad_reason_id: Number(v.reason) || 0, bad_reason_detail: (v.reason && v.reasonDetail) ? v.reasonDetail : '', work_min: (Number(v.min) || 0) * 60 };
       })
       .filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) { toast('请选择工序并填写合格/不良数量'); return; }

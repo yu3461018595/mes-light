@@ -131,8 +131,8 @@ Views.report = {
           <div class="grid g2">
             <label class="field"><span>不良原因</span>
               <select class="input" id="fReason"><option value="">无</option>${UI.options((o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons), '', 'name')}</select></label>
-            <label class="field"><span>实动工时（分钟）</span>
-              <input class="input" id="fMin" type="number" min="0" value="0"></label>
+            <label class="field"><span>实动工时（小时）</span>
+              <input class="input" id="fMin" type="number" min="0" step="0.5" value="0"></label>
           </div>
           <label class="field" id="reasonDetailWrap" style="display:none"><span>其他原因说明</span>
             <input class="input" id="fReasonDetail" placeholder="请填写具体不良原因"></label>
@@ -197,7 +197,7 @@ Views.report = {
         qty_bad: Number(b.value) || 0,
         bad_reason_id: Number(el.querySelector('#fReason').value) || 0,
         bad_reason_detail: reasonIsOther() ? (el.querySelector('#fReasonDetail').value.trim() || '') : '',
-        work_min: Number(el.querySelector('#fMin').value) || 0,
+        work_min: (Number(el.querySelector('#fMin').value) || 0) * 60,
         report_date: el.querySelector('#fDate').value,
         remark: el.querySelector('#fRemark').value,
       };
