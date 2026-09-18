@@ -224,7 +224,7 @@
       // 末道工序报工合格数 → 自动成品入库
       let autoIn = null;
       if (step.id === lastStepId && good > 0) {
-        autoIn = autoFinishInStatic(order, product, good, act);
+        autoIn = autoFinishInStatic(order, product, good, act, rid);
       }
       results.push({ order_step_id: step.id, seq: step.seq, finished, autoFinishIn: autoIn });
     });
@@ -254,10 +254,19 @@
         if (!remaining.length && o.status === 'done') update('orders', o.id, { status: 'running', finish_time: null });
       }
     }
+    // 末道工序自动入库联动回滚：按 report_id 定位并冲销对应成品入库单
+    const fins = T('finished_goods_in').filter((f) => Number(f.report_id) === Number(id));
+    let rolled = 0;
+    for (const f of fins) {
+      revertStock('finished_goods_in', f.id, (actor() && actor().name) || '系统');
+      DB.finished_goods_in = T('finished_goods_in').filter((x) => x.id !== f.id);
+      rolled += Number(f.qty) || 0;
+    }
     remove('reports', id);
     DB.report_bad_reasons = T('report_bad_reasons').filter((x) => x.report_id !== id);
     const o = find('orders', r.order_id);
-    writeLog(actor(), '撤销报工', (o ? o.code : '') + ' 合格 ' + r.qty_good);
+    const detail = (o ? o.code : '') + ' 合格 ' + r.qty_good + (rolled ? '，联动回滚成品入库 ' + rolled + ' 件' : '');
+    writeLog(actor(), '撤销报工', detail);
     return true;
   }
   function writeLog(u, action, detail) {
@@ -782,13 +791,13 @@
     const wid = ensureFgWarehouseStatic();
     return insert('materials', { code: product.code, name: product.name, spec: product.spec || null, material: null, category: '成品', unit: product.unit || '件', warehouse_id: wid, location: null, safe_min: 0, safe_max: null, active: 1, remark: '报工自动入库生成', created_at: nowISO() });
   }
-  function autoFinishInStatic(order, product, good, act) {
+  function autoFinishInStatic(order, product, good, act, reportId) {
     const mid = ensureFgMaterialStatic(product);
     if (!mid) return null;
     const wh = ensureFgWarehouseStatic();
     const code = 'RK' + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
     const id = insert('finished_goods_in', {
-      code, in_date: today(), order_id: order.id, material_id: mid, warehouse_id: wh,
+      code, in_date: today(), order_id: order.id, report_id: reportId || null, material_id: mid, warehouse_id: wh,
       product_code: product.code || null, product_name: product.name, spec: product.spec || null,
       qty: good, unit: product.unit || '件', batch: null, location: null, inspector: null, result: 'qualified',
       remark: '报工自动入库（末道工序）', created_by: act.id, created_at: nowISO(),

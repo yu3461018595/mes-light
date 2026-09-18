@@ -741,7 +741,7 @@ function doReport(b, actor) {
       // 末道工序报工合格数 → 自动成品入库
       let autoIn = null;
       if (step.id === lastStepId && good > 0) {
-        autoIn = autoFinishIn(order, product, good, actor, step.id);
+        autoIn = autoFinishIn(order, product, good, actor, step.id, rid);
       }
       results.push({ order_step_id: step.id, seq: step.seq, finished, autoFinishIn: autoIn });
     }
@@ -780,13 +780,22 @@ route('DELETE', '/api/reports/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u)
   const r = get('SELECT * FROM reports WHERE id=?', [m[1]]);
   if (!r) return fail(res, '记录不存在', 404);
   tx(() => {
+    // 末道工序自动入库联动回滚：按 report_id 定位自动生成的成品入库单并冲销库存，再删除单据
+    const fins = all('SELECT id, qty FROM finished_goods_in WHERE report_id=?', [m[1]]);
+    let rolled = 0;
+    for (const f of fins) {
+      revertStock('finished_goods_in', f.id, u.name);
+      run('DELETE FROM finished_goods_in WHERE id=?', [f.id]);
+      rolled += Number(f.qty) || 0;
+    }
     run('UPDATE order_steps SET qty_good=qty_good-?, qty_bad=qty_bad-?, work_min=work_min-? WHERE id=?',
       [r.qty_good, r.qty_bad, r.work_min, r.order_step_id]);
     run("UPDATE order_steps SET status=CASE WHEN qty_good+qty_bad=0 THEN 'pending' WHEN qty_good>=qty_plan THEN 'done' ELSE 'running' END, finish_time=CASE WHEN qty_good>=qty_plan THEN finish_time ELSE NULL END WHERE id=?", [r.order_step_id]);
     run('DELETE FROM report_bad_reasons WHERE report_id=?', [m[1]]);
     run('DELETE FROM reports WHERE id=?', [m[1]]);
     const o = get('SELECT code FROM orders WHERE id=?', [r.order_id]);
-    writeLog(u, '撤销报工', (o ? o.code : '') + ' 合格 ' + r.qty_good);
+    const detail = (o ? o.code : '') + ' 合格 ' + r.qty_good + (rolled ? '，联动回滚成品入库 ' + rolled + ' 件' : '');
+    writeLog(u, '撤销报工', detail);
   });
   ok(res, true);
 });
@@ -1162,14 +1171,14 @@ function ensureFgMaterial(product) {
     [product.code, product.name, product.spec || null, product.unit || '件', wid, '报工自动入库生成', now()]);
 }
 // 末道工序合格数自动成品入库；返回生成的单据摘要（供 doReport 回传前端提示）
-function autoFinishIn(order, product, good, actor, stepId) {
+function autoFinishIn(order, product, good, actor, stepId, reportId) {
   const mid = ensureFgMaterial(product);
   if (!mid) return null;
   const wh = ensureFgWarehouse();
   const code = genCode('RK');
-  const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [code, today(), order.id, mid, wh, product.code || null, product.name, product.spec || null,
+  const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,report_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [code, today(), order.id, reportId || null, mid, wh, product.code || null, product.name, product.spec || null,
       good, product.unit || '件', null, null, null, 'qualified', '报工自动入库（末道工序）', actor.id, now()]);
   applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: good, tx_type: 'in_finish',
     ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: order.id, operator: actor.name, tx_date: today(), remark: '成品入库 ' + code });
