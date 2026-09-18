@@ -12,6 +12,7 @@ Views.warehouse = {
     ['finished', '成品入库'],
     ['tx', '收发明细'],
     ['materials', '物料档案'],
+    ['prod', '产销报表'],
     ['warehouses', '仓库'],
   ],
 
@@ -218,6 +219,7 @@ Views.warehouse = {
   },
 
   async render(el) {
+    if (this.tab === 'prod') { await this.renderProd(el); return; }
     try { this.meta = await API.get('/meta'); } catch (e) { this.meta = {}; }
     try { this.meta.orders = await API.get('/orders'); } catch (e) { this.meta.orders = []; }
     try { this.meta.materials = await API.get('/materials'); } catch (e) { this.meta.materials = []; }
@@ -400,5 +402,154 @@ Views.warehouse = {
         Views.warehouse.render(document.getElementById('view'));
       },
     });
+  },
+
+  /* ------------------------------ 产销报表（工单 ⇄ 仓储 闭环对账） ------------------------------ */
+  async renderProd(el) {
+    el.innerHTML = `
+      <div class="tabs">
+        ${this.tabs.map(([k, t]) => `<div class="tab ${this.tab === k ? 'active' : ''}" data-tab="${k}">${t}</div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>产销库存报表</h3>
+          <div style="display:flex;gap:10px;align-items:center">
+            <span id="tbStat" class="small muted"></span>
+            <label class="small muted" style="display:flex;gap:4px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="onlyDiff"> 仅显示有差异</label>
+            <button class="btn btn-sm" id="exp">导出 CSV</button>
+          </div>
+        </div>
+        <div class="card-b" id="tb">加载中…</div>
+      </div>`;
+    el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
+    el.querySelector('#exp').onclick = () => this.exportProd();
+    el.querySelector('#onlyDiff').onchange = () => this.paintProd(el);
+    try {
+      this.prod = await API.get('/stats/production-stock');
+    } catch (e) {
+      el.querySelector('#tb').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
+      return;
+    }
+    this.paintProd(el);
+  },
+
+  prodAlert(r) {
+    const q = Number(r.stock) || 0;
+    const mn = r.safe_min == null ? null : Number(r.safe_min);
+    const mx = r.safe_max == null ? null : Number(r.safe_max);
+    if (mn !== null && q < mn) return '<span class="chip chip-danger">缺料预警</span>';
+    if (mx !== null && mx > 0 && q > mx) return '<span class="chip chip-warn">库存积压</span>';
+    return '<span class="chip chip-ok">正常</span>';
+  },
+  prodAlertText(r) {
+    const q = Number(r.stock) || 0;
+    const mn = r.safe_min == null ? null : Number(r.safe_min);
+    const mx = r.safe_max == null ? null : Number(r.safe_max);
+    if (mn !== null && q < mn) return '缺料预警';
+    if (mx !== null && mx > 0 && q > mx) return '库存积压';
+    return '正常';
+  },
+
+  paintProd(el) {
+    const data = this.prod || { summary: {}, rows: [] };
+    const s = data.summary || {};
+    const onlyDiff = el.querySelector('#onlyDiff').checked;
+    const rows = (data.rows || []).filter((r) => !onlyDiff || (Number(r.diff) || 0) !== 0);
+
+    const stat = el.querySelector('#tbStat');
+    if (stat) stat.innerHTML = `共 ${rows.length} 个产品 · 待入库合计 <b style="color:${ (Number(s.diff) || 0) !== 0 ? 'var(--danger)' : 'var(--ok)'}">${UI.n2(s.diff || 0)}</b>`;
+
+    const cards = `
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-l">产品数</div><div class="stat-v">${rows.length}</div><div class="stat-s">项</div></div>
+        <div class="stat"><div class="stat-l">工单计划合计</div><div class="stat-v">${UI.n2(s.plan || 0)}</div><div class="stat-s">件</div></div>
+        <div class="stat"><div class="stat-l">末道完工合计</div><div class="stat-v" style="color:var(--ok)">${UI.n2(s.done || 0)}</div><div class="stat-s">件</div></div>
+        <div class="stat"><div class="stat-l">工单入库合计</div><div class="stat-v" style="color:var(--primary)">${UI.n2(s.inQty || 0)}</div><div class="stat-s">件</div></div>
+        <div class="stat"><div class="stat-l">当前成品库存</div><div class="stat-v"><b>${UI.n2(s.stock || 0)}</b></div><div class="stat-s">件</div></div>
+        <div class="stat"><div class="stat-l">待入库差额</div><div class="stat-v" style="color:${ (Number(s.diff) || 0) !== 0 ? 'var(--danger)' : 'var(--ok)'}">${UI.n2(s.diff || 0)}</div><div class="stat-s">完工 − 入库</div></div>
+      </div>`;
+
+    const head = `<table class="table"><thead><tr>
+      <th style="width:28px"></th>
+      <th>产品编码</th><th>产品名称</th><th>单位</th>
+      <th class="r">工单计划</th><th class="r">末道完工</th><th class="r">工单入库</th>
+      <th class="r">当前库存</th><th class="r">待入库</th><th>库存预警</th>
+    </tr></thead><tbody>`;
+
+    const body = rows.map((r) => {
+      const d = Number(r.diff) || 0;
+      return `<tr class="prod-row" data-code="${UI.esc(r.product_code)}" style="cursor:pointer">
+        <td class="chev">▸</td>
+        <td><b>${UI.esc(r.product_code)}</b></td>
+        <td>${UI.esc(r.product_name)}${r.spec ? ` <span class="small muted">${UI.esc(r.spec)}</span>` : ''}</td>
+        <td>${UI.esc(r.unit || '')}</td>
+        <td class="r"><span class="mono">${UI.n2(r.plan)}</span></td>
+        <td class="r"><span class="mono" style="color:var(--ok)">${UI.n2(r.done)}</span></td>
+        <td class="r"><span class="mono" style="color:var(--primary)">${UI.n2(r.inQty)}</span></td>
+        <td class="r"><b class="mono">${UI.n2(r.stock)}</b></td>
+        <td class="r"><span class="mono" style="color:${d !== 0 ? 'var(--danger)' : 'var(--text3)'}">${d > 0 ? '+' : ''}${UI.n2(d)}</span></td>
+        <td>${this.prodAlert(r)}</td>
+      </tr>
+      <tr class="prod-detail" data-detail="${UI.esc(r.product_code)}" style="display:none">
+        <td colspan="10"><div style="padding:6px 4px">${this.prodOrdersHtml(r.orders)}</div></td>
+      </tr>`;
+    }).join('');
+
+    const table = head + (body || `<tr><td colspan="10" class="muted" style="text-align:center;padding:18px">暂无产品数据</td></tr>`) + '</tbody></table>';
+
+    el.querySelector('#tb').innerHTML = cards + `<div class="table-wrap">${table}</div>`;
+
+    el.querySelectorAll('.prod-row').forEach((tr) => {
+      tr.onclick = () => {
+        const code = tr.dataset.code;
+        const det = el.querySelector('.prod-detail[data-detail="' + CSS.escape(code) + '"]');
+        if (!det) return;
+        const open = det.style.display === 'none';
+        det.style.display = open ? 'table-row' : 'none';
+        tr.querySelector('.chev').textContent = open ? '▾' : '▸';
+      };
+    });
+  },
+
+  prodOrdersHtml(orders) {
+    if (!orders || !orders.length) return '<span class="muted">该产品暂无工单</span>';
+    const head = `<table class="table" style="margin:0"><thead><tr>
+      <th>工单号</th><th>状态</th><th class="r">计划</th><th class="r">末道完工</th>
+      <th class="r">工单入库</th><th class="r">差额</th></tr></thead><tbody>`;
+    const body = orders.map((o) => {
+      const d = Number(o.diff) || 0;
+      return `<tr>
+        <td><b>${UI.esc(o.code)}</b></td>
+        <td>${UI.badge(o.status)}</td>
+        <td class="r"><span class="mono">${UI.n2(o.plan)}</span></td>
+        <td class="r"><span class="mono" style="color:var(--ok)">${UI.n2(o.done)}</span></td>
+        <td class="r"><span class="mono" style="color:var(--primary)">${UI.n2(o.inQty)}</span></td>
+        <td class="r"><span class="mono" style="color:${d !== 0 ? 'var(--danger)' : 'var(--text3)'}">${d > 0 ? '+' : ''}${UI.n2(d)}</span></td>
+      </tr>`;
+    }).join('');
+    return head + body + '</tbody></table>';
+  },
+
+  exportProd() {
+    const data = this.prod || { summary: {}, rows: [] };
+    const s = data.summary || {};
+    const lines = ['【产销库存报表】 生成时间 ' + new Date().toLocaleString()];
+    lines.push('产品数,工单计划合计,末道完工合计,工单入库合计,当前成品库存,待入库差额');
+    lines.push([s.product_count || 0, s.plan || 0, s.done || 0, s.inQty || 0, s.stock || 0, s.diff || 0].join(','));
+    lines.push('', '【产品汇总】', '产品编码,产品名称,规格,单位,工单计划,末道完工,工单入库,当前库存,待入库,库存预警');
+    (data.rows || []).forEach((r) => lines.push([
+      r.product_code, r.product_name, r.spec || '', r.unit || '',
+      r.plan, r.done, r.inQty, r.stock, r.diff, this.prodAlertText(r),
+    ].join(',')));
+    lines.push('', '【工单明细】', '产品编码,工单号,状态,计划,末道完工,工单入库,差额');
+    (data.rows || []).forEach((r) => (r.orders || []).forEach((o) => lines.push([
+      r.product_code, o.code, o.status, o.plan, o.done, o.inQty, o.diff,
+    ].join(','))));
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `产销库存报表_${UI.today()}.csv`;
+    a.click();
+    UI.toast('已导出 CSV', 'ok');
   },
 };

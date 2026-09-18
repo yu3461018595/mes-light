@@ -928,6 +928,85 @@ route('GET', '/api/stats/orders', [], (req, res) => {
     WHERE o.status NOT IN ('closed') ORDER BY o.priority, o.plan_end LIMIT 200`));
 });
 
+/* ------------------------------ 工单 ⇄ 仓储 闭环对账报表（分产品） ------------------------------
+ * 把「工单完工（末道工序合格）→ 自动成品入库 → 库存」串成一张按产品的对账表：
+ *   计划  = 该产品的工单 qty_plan 合计
+ *   完工  = 该产品各工单末道工序合格数合计（与完成率口径一致，瓶颈口径已废弃）
+ *   入库  = 关联工单的成品入库单（finished_goods_in.order_id 非空）数量合计，按产品编码归集
+ *   库存  = 对应成品物料（materials.code = products.code）当前库存台账合计
+ *   待入库 = 完工 - 入库（正常情况下为 0；若出现 >0 说明有末道报工未入库，<0 说明有手工/异常入库）
+ * 同时返回每个产品的工单明细，便于下钻核对。 */
+route('GET', '/api/stats/production-stock', [], (req, res) => {
+  const products = all(`SELECT id,code,name,spec,unit FROM products ORDER BY code`);
+  const orders = all(`SELECT o.id,o.code,o.product_id,o.status,o.qty_plan,
+      (SELECT COALESCE(qty_good,0) FROM order_steps s WHERE s.order_id=o.id ORDER BY s.seq DESC LIMIT 1) qty_done
+    FROM orders o`);
+  // 成品入库：仅统计关联工单的单据，按产品编码 / 工单分别归集
+  const finByProduct = {};
+  const finByOrder = {};
+  all(`SELECT product_code, order_id, SUM(qty) qty FROM finished_goods_in WHERE order_id IS NOT NULL GROUP BY product_code, order_id`).forEach((r) => {
+    if (r.product_code) finByProduct[r.product_code] = (finByProduct[r.product_code] || 0) + Number(r.qty);
+    if (r.order_id) finByOrder[r.order_id] = (finByOrder[r.order_id] || 0) + Number(r.qty);
+  });
+  const matByCode = {};
+  all(`SELECT id,code,safe_min,safe_max FROM materials`).forEach((m) => { if (!matByCode[m.code]) matByCode[m.code] = m; });
+  const stockByMat = {};
+  all(`SELECT material_id, SUM(qty) qty FROM inventory GROUP BY material_id`).forEach((r) => {
+    stockByMat[r.material_id] = (stockByMat[r.material_id] || 0) + Number(r.qty);
+  });
+
+  // 以产品为主行；成品入库里出现但无产品档案的孤儿编码也补一行
+  const rowsMap = {};
+  products.forEach((p) => {
+    rowsMap[p.code] = {
+      product_code: p.code, product_name: p.name, spec: p.spec || '', unit: p.unit || '件',
+      plan: 0, done: 0, inQty: finByProduct[p.code] || 0, stock: 0, safe_min: null, safe_max: null, orders: [],
+    };
+  });
+  Object.keys(finByProduct).forEach((code) => {
+    if (!rowsMap[code]) rowsMap[code] = {
+      product_code: code, product_name: code, spec: '', unit: '件',
+      plan: 0, done: 0, inQty: finByProduct[code], stock: 0, safe_min: null, safe_max: null, orders: [],
+    };
+  });
+
+  orders.forEach((o) => {
+    const p = products.find((x) => x.id === o.product_id);
+    const row = p && rowsMap[p.code] ? rowsMap[p.code] : null;
+    if (!row) return;
+    const done = Number(o.qty_done || 0);
+    const inQ = finByOrder[o.id] || 0;
+    row.plan += Number(o.qty_plan || 0);
+    row.done += done;
+    row.orders.push({
+      code: o.code, status: o.status, plan: Number(o.qty_plan || 0),
+      done, inQty: inQ, diff: done - inQ,
+    });
+  });
+
+  const rows = Object.values(rowsMap).map((r) => {
+    const mat = matByCode[r.product_code];
+    if (mat) {
+      r.safe_min = mat.safe_min;
+      r.safe_max = mat.safe_max;
+      r.stock = stockByMat[mat.id] || 0;
+    }
+    r.diff = Number(r.done) - Number(r.inQty);
+    r.orders.sort((a, b) => (a.code < b.code ? -1 : 1));
+    return r;
+  }).sort((a, b) => (a.product_code < b.product_code ? -1 : 1));
+
+  const summary = {
+    product_count: rows.length,
+    plan: rows.reduce((s, r) => s + Number(r.plan), 0),
+    done: rows.reduce((s, r) => s + Number(r.done), 0),
+    inQty: rows.reduce((s, r) => s + Number(r.inQty), 0),
+    stock: rows.reduce((s, r) => s + Number(r.stock), 0),
+    diff: rows.reduce((s, r) => s + Number(r.diff), 0),
+  };
+  ok(res, { summary, rows });
+});
+
 /* ------------------------------ 扫码报工：二维码 + 免登录接口 ------------------------------ */
 // 生成工单报工二维码（管理员/班组长）
 route('GET', '/api/qr/order/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
