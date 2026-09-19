@@ -3,8 +3,24 @@ chcp 65001 >nul
 title 智工生产管理系统
 cd /d "%~dp0"
 
-where node >nul 2>nul
-if %errorlevel%==0 (set "NODE=node") else (set "NODE=C:\Users\Admin\.workbuddy\binaries\node\versions\22.22.2\node.exe")
+set "NODE="
+where node >nul 2>nul && set "NODE=node"
+
+if not defined NODE (
+  if exist "%USERPROFILE%\.workbuddy\binaries\node\versions" (
+    for /d %%d in ("%USERPROFILE%\.workbuddy\binaries\node\versions\*") do (
+      if exist "%%d\node.exe" if not defined NODE set "NODE=%%d\node.exe"
+    )
+  )
+)
+
+if not defined NODE (
+  echo.
+  echo   未检测到 Node.js，请先安装 Node 22 或更高版本：https://nodejs.org
+  echo.
+  pause
+  exit /b 1
+)
 
 echo.
 echo   正在启动智工生产管理系统...
