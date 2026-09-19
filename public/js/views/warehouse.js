@@ -417,6 +417,7 @@ Views.warehouse = {
             <label class="small muted" style="display:flex;gap:4px;align-items:center;cursor:pointer">
               <input type="checkbox" id="onlyDiff"> 仅显示有差异</label>
             <button class="btn btn-sm" id="exp">导出 CSV</button>
+            ${App.canEdit() ? `<button class="btn btn-sm btn-primary" id="syncFin">同步完工入库</button>` : ''}
           </div>
         </div>
         <div class="card-b" id="tb">加载中…</div>
@@ -424,6 +425,8 @@ Views.warehouse = {
     el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
     el.querySelector('#exp').onclick = () => this.exportProd();
     el.querySelector('#onlyDiff').onchange = () => this.paintProd(el);
+    const syncBtn = el.querySelector('#syncFin');
+    if (syncBtn) syncBtn.onclick = () => this.syncFinished(el);
     try {
       this.prod = await API.get('/stats/production-stock');
     } catch (e) {
@@ -431,6 +434,16 @@ Views.warehouse = {
       return;
     }
     this.paintProd(el);
+  },
+
+  // 同步完工入库：按各工单「末道完工量 − 自动入库量」差额补生成成品入库单（幂等，可反复执行）
+  async syncFinished(el) {
+    if (!confirm('将按各工单「末道完工量 − 已自动入库量」的差额补生成成品入库单。\n可反复执行（幂等），用于把历史报工未入库的完工量补进成品库。是否继续？')) return;
+    try {
+      const r = await API.post('/warehouse/sync_finished', {});
+      UI.toast(`已补齐 ${r.created} 张入库单 / ${r.qty} 件（重算 ${r.removed} 张）`, 'ok');
+      await this.render(el);
+    } catch (e) { UI.toast(e.message, 'err'); }
   },
 
   prodAlert(r) {

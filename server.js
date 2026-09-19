@@ -1299,6 +1299,53 @@ route('DELETE', '/api/finished_goods_in/(\\d+)', ['admin'], (req, res, m, _b, u)
   ok(res, true);
 });
 
+/* ------------------------------ 完工入库补齐（工单完工量 → 成品库） ------------------------------
+ * 把「工单末道工序完工量」与「该工单自动入库量」的差额补生成成品入库单，使工单完工多少件都能在仓储查到。
+ * 用于历史报工（自动入库功能上线前）未生成入库单的补救；可反复执行：
+ *   每次先移除该工单旧的补齐单（source='sync'）并冲销库存，再按最新差额重建 —— 幂等且双向一致。
+ * 只处理 source='sync' 的补齐单；人工手工建的入库单（source 为空且 report_id 为空）与
+ * 末道报工自动单（report_id 非空）均不受影响。 */
+route('POST', '/api/warehouse/sync_finished', ['admin', 'leader'], (req, res, _m, _b, u) => {
+  try {
+    const result = { order_count: 0, created: 0, qty: 0, removed: 0 };
+    tx(() => {
+      const orders = all(`SELECT o.id, o.code, o.product_id,
+          (SELECT COALESCE(qty_good,0) FROM order_steps s WHERE s.order_id=o.id ORDER BY s.seq DESC LIMIT 1) done
+        FROM orders o`);
+      for (const o of orders) {
+        const done = Number(o.done || 0);
+        const product = get('SELECT id,code,name,spec,unit FROM products WHERE id=?', [o.product_id]);
+        if (!product || !product.code) continue;
+        // 该工单自动入库量（末道报工自动生成的单：report_id 非空）
+        const autoIn = Number(get('SELECT COALESCE(SUM(qty),0) q FROM finished_goods_in WHERE order_id=? AND report_id IS NOT NULL', [o.id]).q || 0);
+        // 先移除旧的补齐单（source='sync'），保证幂等并支持反向调整
+        for (const f of all("SELECT id FROM finished_goods_in WHERE order_id=? AND source='sync'", [o.id])) {
+          revertStock('finished_goods_in', f.id, u.name);
+          run('DELETE FROM finished_goods_in WHERE id=?', [f.id]);
+          result.removed++;
+        }
+        const need = done - autoIn;
+        if (need > 0) {
+          const mid = ensureFgMaterial(product);
+          const wh = ensureFgWarehouse();
+          const code = genCode('RK');
+          const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,source,created_by,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [code, today(), o.id, mid, wh, product.code || null, product.name, product.spec || null,
+              need, product.unit || '件', null, null, null, 'qualified', '完工入库补齐（历史报工未自动入库）', 'sync', u.id, now()]);
+          applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: need, tx_type: 'in_finish',
+            ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: o.id, operator: u.name, tx_date: today(), remark: '完工入库补齐 ' + code });
+          result.created++;
+          result.qty += need;
+        }
+        result.order_count++;
+      }
+    });
+    writeLog(u, '同步完工入库', `补齐 ${result.created} 张 / ${result.qty} 件（重算 ${result.removed} 张补齐单）`);
+    ok(res, result);
+  } catch (e) { fail(res, e.message, 400); }
+});
+
 /* ------------------------------ 物料档案 ------------------------------ */
 route('GET', '/api/materials', [], (req, res) => {
   ok(res, all(`SELECT m.*, w.name warehouse_name FROM materials m LEFT JOIN warehouses w ON w.id=m.warehouse_id ORDER BY m.code`));

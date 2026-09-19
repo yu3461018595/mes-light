@@ -805,6 +805,43 @@
     applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: good, tx_type: 'in_finish', ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: order.id, operator: act.name, tx_date: today(), remark: '成品入库 ' + code });
     return { id, code, qty: good };
   }
+  // 完工入库补齐（静态模式镜像 server.js /api/warehouse/sync_finished）：按工单重算并重建 source='sync' 的补齐单
+  function syncFinishedStatic() {
+    const act = actor();
+    const result = { order_count: 0, created: 0, qty: 0, removed: 0 };
+    for (const o of T('orders')) {
+      const steps = T('order_steps').filter((s) => Number(s.order_id) === Number(o.id)).sort((a, b) => b.seq - a.seq);
+      const done = steps.length ? Number(steps[0].qty_good || 0) : 0;
+      const product = find('products', o.product_id);
+      if (!product || !product.code) continue;
+      // 该工单自动入库量（末道报工自动单：report_id 非空）
+      const autoIn = T('finished_goods_in').filter((f) => Number(f.order_id) === Number(o.id) && f.report_id).reduce((s, f) => s + Number(f.qty || 0), 0);
+      // 先移除旧的补齐单（source='sync'），保证幂等并支持反向调整
+      for (const f of T('finished_goods_in').filter((x) => Number(x.order_id) === Number(o.id) && x.source === 'sync')) {
+        revertStock('finished_goods_in', f.id, act.name);
+        DB.finished_goods_in = T('finished_goods_in').filter((x) => Number(x.id) !== Number(f.id));
+        result.removed++;
+      }
+      const need = done - autoIn;
+      if (need > 0) {
+        const mid = ensureFgMaterialStatic(product);
+        const wh = ensureFgWarehouseStatic();
+        const code = 'RK' + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
+        const id = insert('finished_goods_in', {
+          code, in_date: today(), order_id: o.id, report_id: null, material_id: mid, warehouse_id: wh,
+          product_code: product.code || null, product_name: product.name, spec: product.spec || null,
+          qty: need, unit: product.unit || '件', batch: null, location: null, inspector: null, result: 'qualified',
+          remark: '完工入库补齐（历史报工未自动入库）', source: 'sync', created_by: act.id, created_at: nowISO(),
+        });
+        applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: need, tx_type: 'in_finish', ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: o.id, operator: act.name, tx_date: today(), remark: '完工入库补齐 ' + code });
+        result.created++;
+        result.qty += need;
+      }
+      result.order_count++;
+    }
+    writeLog(act, '同步完工入库', `补齐 ${result.created} 张 / ${result.qty} 件（重算 ${result.removed} 张补齐单）`);
+    return result;
+  }
   // 仅传 material_id 时，从物料档案回带编码/名称/规格/单位/默认仓库
   function fillFromMaterial(b, mid) {
     if (!mid) return b;
@@ -862,6 +899,11 @@
   crud('finished_goods_in', '成品入库', { roles: ['admin', 'leader'], noWrite: true, noDelete: true });
   docWrite('incoming_materials', '来料入库', 'in_incoming', 'LM');
   docWrite('finished_goods_in', '成品入库', 'in_finish', 'RK');
+  // 完工入库补齐：把工单末道完工量与该工单自动入库量的差额补生成成品入库单（幂等，可反复执行）
+  R('POST', '/warehouse/sync_finished', () => {
+    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    try { return ok(syncFinishedStatic()); } catch (e) { return fail(e.message, 400); }
+  });
   crud('users', '用户', { admin: true, unique: 'username', onDelete: (id) => { if (Store.currentUser && id === Store.currentUser.id) return '不能删除当前登录的账号'; const rep = T('reports').filter((r) => r.worker_id === id).length; const asg = T('order_steps').filter((s) => s.assignee_id === id).length; if (rep || asg) return `该员工已有 ${rep} 条报工、${asg} 条派工记录，无法删除；如需停用，请在“编辑”中将其状态设为“停用”。`; return ''; } });
   // 工艺路线：写操作走下方专用处理器（会展开 steps → route_steps），故这里 noWrite
   crud('routes', '工艺路线', { roles: ['admin', 'leader'], unique: 'code', noWrite: true, onDelete: (id) => { if (T('orders').some((o) => o.route_id === id)) return '该工艺路线已被工单使用，无法删除'; return ''; } });
