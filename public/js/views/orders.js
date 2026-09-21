@@ -148,7 +148,13 @@ Views.orders = {
 
   /* ---------- 详情 ---------- */
   async detail(el, id) {
-    const [o, meta] = await Promise.all([API.get('/orders/' + id), API.get('/meta')]);
+    const [o, meta, issues] = await Promise.all([
+      API.get('/orders/' + id),
+      API.get('/meta'),
+      API.get('/quality_issues').catch(() => []),
+    ]);
+    const myIssues = (issues || []).filter((x) => Number(x.order_id) === Number(id));
+    const openIssues = myIssues.filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
     const p = UI.pct(o.qty_done, o.qty_plan);
     const canEdit = App.canEdit();
     // 生产中/已暂停/已下发/待下发 都允许增减工序；已完成、已关闭不允许
@@ -219,6 +225,7 @@ Views.orders = {
               } },
             { t: '工序', f: (r) => `<b>${UI.esc(r.process_name)}</b><div class="small muted">${UI.esc(r.process_code)}</div>` },
             { t: '工作中心', f: (r) => UI.esc(r.wc_name || '—') },
+            { t: '检验', f: (r) => Views.quality.inspectMark(r) },
             { t: '指派班组', f: (r) => r.assignee_team ? UI.esc(r.assignee_team) : '<span class="muted">暂无</span>' },
             { t: '员工可报工', f: (r) => r.allow_report === 0 ? '<span style="color:#d93b3b">否（仅管理）</span>' : '<span style="color:#0f9d58">是</span>' },
             { t: '合格', f: (r) => `<span class="mono">${UI.n2(r.qty_good)}</span>` },
@@ -234,6 +241,25 @@ Views.orders = {
           ], o.steps)}
         </div>
       </div>
+
+      ${myIssues.length ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>质量异常单</h3>
+          <span class="small muted">未闭环 <b style="color:${openIssues.length ? 'var(--danger)' : 'var(--ok)'}">${openIssues.length}</b> / 共 ${myIssues.length} 张</span>
+          <div class="spacer"></div>
+          ${App.canEdit() ? `<button class="btn btn-sm" id="newQI">${UI.icon('plus')}上报异常</button>` : ''}</div>
+        <div class="card-b tight">
+          ${UI.table([
+            { t: '异常单号', f: (r) => `<b class="link" data-qi="${r.id}">${UI.esc(r.code)}</b>` },
+            { t: '等级', f: (r) => Views.quality.levelChip(r.level) },
+            { t: '状态', f: (r) => Views.quality.statusChip(r.status) + (r.escalated ? ' <span class="chip chip-danger">已升级</span>' : '') },
+            { t: '工序', f: (r) => UI.esc(r.process_name || '—') },
+            { t: '影响数量', align: 'right', f: (r) => `<b class="mono" style="color:var(--danger)">${UI.n2(r.qty_affected)}</b>` },
+            { t: '不良原因', f: (r) => `<span class="small">${UI.esc(r.bad_summary || '—')}</span>` },
+            { t: '责任人', f: (r) => UI.esc(r.assignee_name || '未指派') },
+            { t: '操作', align: 'right', f: (r) => `<button class="btn btn-sm" data-qi="${r.id}">${['closed', 'cancelled'].includes(r.status) ? '查看' : '处理'}</button>` },
+          ], myIssues)}
+        </div>
+      </div>` : ''}
 
       <div class="card">
         <div class="card-h"><h3>报工流水</h3><span class="small muted">最近 100 条</span></div>
@@ -253,6 +279,9 @@ Views.orders = {
       </div>`;
 
     el.querySelector('#back').onclick = () => location.hash = '#/orders';
+    el.querySelectorAll('[data-qi]').forEach((b) => b.onclick = () => location.hash = '#/quality/issue/' + b.dataset.qi);
+    const nqi = el.querySelector('#newQI');
+    if (nqi) nqi.onclick = () => Views.quality.newIssueForm();
     const cfgBad = el.querySelector('#cfgBad');
     if (cfgBad) cfgBad.onclick = async () => {
       const d = await API.get('/orders/' + id + '/bad-reasons');

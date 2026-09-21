@@ -14,6 +14,8 @@ Views.scan = {
       API.get('/orders?status=released,running,paused'),
     ]);
     const workers = meta.workers;
+    // 质检员（角色 inspector）单列，用于生成「质检台二维码」
+    const inspectors = meta.inspectors || [];
 
     el.innerHTML = `
       <div class="card" style="margin-bottom:14px">
@@ -25,6 +27,19 @@ Views.scan = {
           <p class="small muted">工单码：谁扫都能报（适合机台公共码）；员工码：绑定本人，仅该员工可报（适合个人报工）。</p>
         </div>
       </div>
+
+      ${inspectors.length ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>质检台码</h3><span class="small muted">质检员扫码进待检队列，判定即放行/开异常单</span></div>
+        <div class="card-b tight">
+          ${inspectors.map((w) => `
+            <div class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line2)">
+              <div>
+                <b>${UI.esc(w.name)}</b> <span class="small muted">${UI.esc(w.team || '')} · 质检员</span>
+              </div>
+              <button class="btn btn-sm btn-primary" data-iq="${w.id}">${UI.icon('scan')}生成二维码</button>
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
 
       <div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>工单报工码</h3><span class="small muted">${orders.length} 张在制工单</span></div>
@@ -52,6 +67,17 @@ Views.scan = {
             </div>`).join('') : `<div class="empty">${UI.icon('empty')}<div>暂无人员</div></div>`}
         </div>
       </div>`;
+
+    el.querySelectorAll('[data-iq]').forEach((b) => b.onclick = async () => {
+      try {
+        const d = await API.get('/qr/inspector/' + b.dataset.iq);
+        UI.qrModal('质检台码 · ' + d.worker.name, {
+          svg: d.svg, url: d.url,
+          subtitle: (d.worker.team ? d.worker.team + ' · ' : '') + '微信扫一扫进入待检队列',
+          fileName: '质检台_' + d.worker.name,
+        });
+      } catch (e) { UI.toast(e.message, 'err'); }
+    });
 
     el.querySelectorAll('[data-oq]').forEach((b) => b.onclick = async () => {
       try {

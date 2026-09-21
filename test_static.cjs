@@ -26,16 +26,22 @@ function assert(cond, msg) { if (!cond) { console.error('  ✗ FAIL:', msg); pro
   assert(r.ok && r.data.token === 'static-1', 'admin 登录成功，token=' + (r.data && r.data.token));
   assert(Store.restoreFromToken(r.data.token), 'restoreFromToken 恢复会话');
 
-  // 自举最小基础数据（id 均为 1）
+  // 自举基础数据（种子数据已带整套演示数据，故 id 顺延；此处验证「新增 → 路线落工序 → 工单展开工序」链路）
   await Store.handle('POST', '/products', { code: 'P1', name: '测试产品', unit: '个' });
+  const p1 = (await Store.handle('GET', '/products')).data.find((x) => x.code === 'P1');
   await Store.handle('POST', '/processes', { code: 'PR1', name: '车削' });
+  const pr1 = (await Store.handle('GET', '/processes')).data.find((x) => x.code === 'PR1');
   await Store.handle('POST', '/work_centers', { code: 'WC1', name: '车床' });
-  await Store.handle('POST', '/routes', { code: 'RT1', name: '路线', product_id: 1, steps: [{ seq: 10, process_id: 1, work_center_id: 1 }] });
-  r = await Store.handle('POST', '/orders', { product_id: 1, route_id: 1, qty_plan: 10, priority: 1, plan_end: '2099-01-01' });
-  assert(r.ok && r.data.id === 1, '自举工单成功 id=1');
-  const rtSteps = await Store.handle('GET', '/routes/1/steps');
+  const wc1 = (await Store.handle('GET', '/work_centers')).data.find((x) => x.code === 'WC1');
+  r = await Store.handle('POST', '/routes', { code: 'RT1', name: '路线', product_id: p1.id, steps: [{ seq: 10, process_id: pr1.id, work_center_id: wc1.id }] });
+  assert(r.ok, '自举工艺路线成功 id=' + (r.data && r.data.id));
+  const rtId = r.data.id;
+  r = await Store.handle('POST', '/orders', { product_id: p1.id, route_id: rtId, qty_plan: 10, priority: 1, plan_end: '2099-01-01' });
+  assert(r.ok && r.data.id > 0, '自举工单成功 id=' + (r.data && r.data.id));
+  const newOid = r.data.id;
+  const rtSteps = await Store.handle('GET', '/routes/' + rtId + '/steps');
   assert(rtSteps.data.length === 1, '路线带 1 道工序（修复：路线须落工序）');
-  const od1 = await Store.handle('GET', '/orders/1');
+  const od1 = await Store.handle('GET', '/orders/' + newOid);
   assert(od1.data.steps.length === 1, '工单按路线展开 1 道工序（修复核心）');
 
   // /me

@@ -15,6 +15,9 @@ data/
 mes_live_export.json
 backups/
 
+# build_static.js 的一次性临时库
+.seed-tmp/
+
 # 日志
 logs/
 *.log

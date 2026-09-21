@@ -74,6 +74,16 @@
     background: #1d4ed8; color: #fff; }
   .btn:active { transform: translateY(1px); } .btn.ghost { background: #eef1f5; color: #5a6673; }
   .btn[disabled] { opacity: .5; }
+  /* 质检台：三键判定（一行放下三个动作按钮） */
+  .btn.ok { background: #0f9d58; }
+  .btn.warnbtn { background: #e08a00; }
+  .btn.dangerbtn { background: #d93b3b; }
+  .insp .btn { width: auto; flex: 1 1 0; height: 46px; font-size: 15px; border-radius: 12px; min-width: 0; padding: 0 8px; }
+  .insp .badrows { margin-top: 2px; }
+  .insp .badrows .brow { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .insp .badrows select, .insp .badrows input { height: 40px; font-size: 14px; }
+  .insp .brow-del { flex: 0 0 auto; width: 34px; height: 34px; border: 1.5px solid #e6eaf0; background: #fff;
+    border-radius: 9px; color: #d93b3b; font-size: 17px; }
   .ord { display: flex; align-items: center; justify-content: space-between; padding: 14px; border-bottom: 1px solid #f0f2f6; }
   .ord:active { background: #f5f8ff; }
   .toast2 { position: fixed; left: 50%; top: 42%; transform: translate(-50%,-50%); background: rgba(0,0,0,.82);

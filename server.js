@@ -170,6 +170,7 @@ route('GET', '/api/meta', [], (req, res) => {
     customers: all('SELECT id,code,name FROM customers ORDER BY code'),
     badReasons: all('SELECT * FROM bad_reasons ORDER BY id'),
     workers: all("SELECT id,name,team,work_center_id FROM users WHERE role='worker' AND active=1 ORDER BY name"),
+    inspectors: all("SELECT id,name,team,username FROM users WHERE role='inspector' AND active=1 ORDER BY name"),
     teams: all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team),
     routes: all('SELECT r.*, p.name product_name FROM routes r JOIN products p ON p.id=r.product_id ORDER BY r.code'),
     statuses: [
@@ -245,8 +246,8 @@ crud('products', '产品', {
   },
 });
 crud('processes', '工序', {
-  fields: ['code', 'name', 'std_time', 'std_price', 'remark'],
-  editFields: ['code', 'name', 'std_time', 'std_price', 'remark'],
+  fields: ['code', 'name', 'std_time', 'std_price', 'remark', 'inspect_type'],
+  editFields: ['code', 'name', 'std_time', 'std_price', 'remark', 'inspect_type'],
   unique: 'code', order: 'code',
   onDelete: (id) => {
     const c = get('SELECT COUNT(*) c FROM order_steps WHERE process_id=?', [id]).c;
@@ -327,8 +328,11 @@ route('GET', '/api/routes/(\\d+)/steps', [], (req, res, m) => {
 route('POST', '/api/routes', ['admin', 'leader'], (req, res, _m, b, u) => {
   const rid = insert('INSERT INTO routes(code,name,product_id,created_at) VALUES(?,?,?,?)', [b.code, b.name, b.product_id, now()]);
   (b.steps || []).forEach((s) => {
-    run('INSERT INTO route_steps(route_id,seq,process_id,work_center_id,std_time,std_price,need_report) VALUES(?,?,?,?,?,?,?)',
-      [rid, s.seq, s.process_id, s.work_center_id || null, num(s.std_time), num(s.std_price), 1]);
+    // 检验点：优先用路线步骤显式指定，缺省则继承工序档案的 inspect_type
+    const proc = s.process_id ? get('SELECT inspect_type FROM processes WHERE id=?', [num(s.process_id)]) : null;
+    const insType = s.inspect_type !== undefined ? String(s.inspect_type || '') : String((proc && proc.inspect_type) || '');
+    run('INSERT INTO route_steps(route_id,seq,process_id,work_center_id,std_time,std_price,need_report,inspect_type) VALUES(?,?,?,?,?,?,?,?)',
+      [rid, s.seq, s.process_id, s.work_center_id || null, num(s.std_time), num(s.std_price), 1, insType]);
   });
   writeLog(u, '新增工艺路线', b.code + ' ' + b.name);
   ok(res, { id: rid });
@@ -337,8 +341,10 @@ route('PUT', '/api/routes/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
   run('UPDATE routes SET code=?,name=?,product_id=? WHERE id=?', [b.code, b.name, b.product_id, m[1]]);
   run('DELETE FROM route_steps WHERE route_id=?', [m[1]]);
   (b.steps || []).forEach((s) => {
-    run('INSERT INTO route_steps(route_id,seq,process_id,work_center_id,std_time,std_price,need_report) VALUES(?,?,?,?,?,?,?)',
-      [m[1], s.seq, s.process_id, s.work_center_id || null, num(s.std_time), num(s.std_price), 1]);
+    const proc = s.process_id ? get('SELECT inspect_type FROM processes WHERE id=?', [num(s.process_id)]) : null;
+    const insType = s.inspect_type !== undefined ? String(s.inspect_type || '') : String((proc && proc.inspect_type) || '');
+    run('INSERT INTO route_steps(route_id,seq,process_id,work_center_id,std_time,std_price,need_report,inspect_type) VALUES(?,?,?,?,?,?,?,?)',
+      [m[1], s.seq, s.process_id, s.work_center_id || null, num(s.std_time), num(s.std_price), 1, insType]);
   });
   writeLog(u, '修改工艺路线', '#' + m[1] + ' ' + b.code);
   ok(res, true);
@@ -449,8 +455,8 @@ route('POST', '/api/orders', ['admin', 'leader'], (req, res, _m, b, u) => {
       [code, b.product_id, b.route_id, b.customer_id || null, qty, num(b.priority, 2),
         b.plan_start || today(), b.plan_end || today(), 'created', b.remark || '', u.id, now()]);
     all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [b.route_id]).forEach((s) => {
-      insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status) VALUES(?,?,?,?,?,?)',
-        [oid, s.seq, s.process_id, s.work_center_id, qty, 'pending']);
+      insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
+        [oid, s.seq, s.process_id, s.work_center_id, qty, 'pending', String(s.inspect_type || '')]);
     });
     return oid;
   });
@@ -496,11 +502,12 @@ route('POST', '/api/orders/(\\d+)/steps', ['admin', 'leader'], (req, res, m, b, 
   if (!o) return fail(res, '工单不存在', 404);
   if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
   const pid = num(b.process_id);
-  const proc = pid ? get('SELECT id,name FROM processes WHERE id=?', [pid]) : null;
+  const proc = pid ? get('SELECT id,name,inspect_type FROM processes WHERE id=?', [pid]) : null;
   if (!proc) return fail(res, '请选择要增加的工序');
   const qty = num(b.qty_plan) > 0 ? num(b.qty_plan) : num(o.qty_plan);
   const steps = all('SELECT id,seq FROM order_steps WHERE order_id=? ORDER BY seq', [m[1]]);
   const atPos = num(b.at_pos);                       // 插入位置（第几道，1 起）；留空=追加到最后
+  const insType = b.inspect_type !== undefined ? String(b.inspect_type || '') : (proc.inspect_type || '');
   let seq = 0;
   tx(() => {
     if (atPos > 0 && atPos <= steps.length) {
@@ -509,11 +516,11 @@ route('POST', '/api/orders/(\\d+)/steps', ['admin', 'leader'], (req, res, m, b, 
     } else {
       seq = (steps.length ? Math.max.apply(null, steps.map((s) => num(s.seq))) : 0) + 10;
     }
-    insert(`INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,assignee_team,allow_report,status) VALUES(?,?,?,?,?,?,?,?)`,
+    insert(`INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,assignee_team,allow_report,status,inspect_type) VALUES(?,?,?,?,?,?,?,?,?)`,
       [num(m[1]), seq, pid, b.work_center_id ? num(b.work_center_id) : null, qty, b.assignee_team || null,
-        (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1, 'pending']);
+        (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1, 'pending', insType]);
   });
-  writeLog(u, '工单增加工序', o.code + ' 增加「' + proc.name + '」×' + qty + (atPos > 0 ? '（第' + atPos + '道）' : '（末尾）'));
+  writeLog(u, '工单增加工序', o.code + ' 增加「' + proc.name + '」×' + qty + (atPos > 0 ? '（第' + atPos + '道）' : '（末尾）') + (insType ? ' [检验点]' : ''));
   ok(res, { seq });
 });
 
@@ -729,24 +736,31 @@ function doReport(b, actor) {
 
       const done = step.qty_good + good;
       const finished = done >= step.qty_plan;
-      run('UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, status=?, start_time=IFNULL(start_time,?), finish_time=?, assignee_id=IFNULL(assignee_id,?) WHERE id=?',
-        [good, bad, num(it.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
+      // 检验点（inspect_type 非空）：报工后不直接完工，先落「待检」，检验合格才放行完工
+      const needInspect = !!String(step.inspect_type || '').trim();
+      if (needInspect) {
+        run("UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, inspect_status='waiting', start_time=IFNULL(start_time,?), assignee_id=IFNULL(assignee_id,?) WHERE id=?",
+          [good, bad, num(it.work_min), now(), workerId, step.id]);
+      } else {
+        run('UPDATE order_steps SET qty_good=qty_good+?, qty_bad=qty_bad+?, work_min=work_min+?, status=?, start_time=IFNULL(start_time,?), finish_time=?, assignee_id=IFNULL(assignee_id,?) WHERE id=?',
+          [good, bad, num(it.work_min), finished ? 'done' : 'running', now(), finished ? now() : null, workerId, step.id]);
+      }
 
       if (order.status === 'created' || order.status === 'released') {
         run("UPDATE orders SET status='running', start_time=IFNULL(start_time,?) WHERE id=?", [now(), order_id]);
       }
-      if (finished) {
+      if (finished && !needInspect) {
         run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [order_id]);
       }
-      // 末道工序报工合格数 → 自动成品入库
+      // 末道工序报工合格数 → 自动成品入库（检验点须待检验合格后才入库，此处只做非检验点）
       let autoIn = null;
-      if (step.id === lastStepId && good > 0) {
+      if (step.id === lastStepId && good > 0 && !needInspect) {
         autoIn = autoFinishIn(order, product, good, actor, step.id, rid);
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished, autoFinishIn: autoIn });
+      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn });
     }
 
-    // 全部工序完成 → 工单完工
+    // 全部工序完成 → 工单完工（检验点未放行的工序状态仍为 running，天然阻止误判完工）
     const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [order_id]);
     if (left.c === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), order_id]);
   });
@@ -1051,7 +1065,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
   const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
@@ -1074,6 +1088,30 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
             OR o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_team IS NULL))
      ORDER BY o.priority,o.plan_end`, [w.team]);
   ok(res, { worker: w, orders });
+});
+
+// 生成质检员待检队列二维码（管理员/班组长）——质检员扫码进入待检队列直接判定
+route('GET', '/api/qr/inspector/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+  const w = get("SELECT id,name,team FROM users WHERE id=? AND role='inspector'", [m[1]]);
+  if (!w) return fail(res, '质检员不存在', 404);
+  const token = qrToken('worker', w.id);
+  const url = baseUrl(req) + '/m/index.html?q=' + w.id + '&t=' + token;
+  ok(res, { worker: w, token, url, svg: makeQr(url) });
+});
+
+// 免登录：质检员待检队列（扫码即判）
+route('GET', '/api/public/inspector/(\\d+)', [], (req, res, m, _b, _u, q) => {
+  if (!checkQrToken(q.t, 'worker', m[1])) return fail(res, '二维码已失效或无权限', 403);
+  const w = get("SELECT id,name,team,role FROM users WHERE id=?", [m[1]]);
+  if (!w) return fail(res, '用户不存在', 404);
+  const steps = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
+      p.name process_name, p.code process_code, o.code order_code, o.status order_status, od.name product_name,
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+    FROM order_steps s JOIN orders o ON o.id=s.order_id
+    LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
+    WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed') ORDER BY s.id DESC LIMIT 200`);
+  const badReasons = all('SELECT id,name FROM bad_reasons ORDER BY id');
+  ok(res, { worker: w, steps, badReasons });
 });
 
 route('GET', '/api/logs', [], (req, res, _m, _b, _u, q) => {
@@ -1171,18 +1209,416 @@ function ensureFgMaterial(product) {
     [product.code, product.name, product.spec || null, product.unit || '件', wid, '报工自动入库生成', now()]);
 }
 // 末道工序合格数自动成品入库；返回生成的单据摘要（供 doReport 回传前端提示）
-function autoFinishIn(order, product, good, actor, stepId, reportId) {
+function autoFinishIn(order, product, good, actor, stepId, reportId, remarkTag) {
   const mid = ensureFgMaterial(product);
   if (!mid) return null;
   const wh = ensureFgWarehouse();
   const code = genCode('RK');
+  const remark = '报工自动入库（末道工序）' + (remarkTag || '');
   const id = insert(`INSERT INTO finished_goods_in(code,in_date,order_id,report_id,material_id,warehouse_id,product_code,product_name,spec,qty,unit,batch,location,inspector,result,remark,created_by,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [code, today(), order.id, reportId || null, mid, wh, product.code || null, product.name, product.spec || null,
-      good, product.unit || '件', null, null, null, 'qualified', '报工自动入库（末道工序）', actor.id, now()]);
+      good, product.unit || '件', null, null, null, 'qualified', remark, actor.id, now()]);
   applyStock({ material_id: mid, warehouse_id: wh, batch: null, location: null, qty: good, tx_type: 'in_finish',
     ref_type: 'finished_goods_in', ref_id: id, ref_code: code, order_id: order.id, operator: actor.name, tx_date: today(), remark: '成品入库 ' + code });
   return { id, code, qty: good, material_id: mid, warehouse_id: wh };
+}
+
+/* ==================== 检验与质量异常（一期：初版检验模式） ====================
+ * 设计：检验点是「工序属性」（processes/route_steps/order_steps 的 inspect_type），
+ * 报工后该工序落 inspect_status='waiting'（待检），由质检员判定：
+ *   pass 合格 → 放行完工（末道触发成品自动入库）
+ *   concession 让步接收 → 放行完工，入库单备注「特采」
+ *   fail 不合格 → 工序置 inspect_status='failed'，自动生成质量异常单并推送责任管理人员
+ * 异常单按「工序指派班组 → 该班组 leader」定责，超时未处理自动抄送/升级。
+ * 严重异常（critical）暂停工单后续工序流转并禁止成品入库，需管理员确认后放行。
+ */
+const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
+const ISSUE_LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
+const DISPOSITION_LABEL = { rework: '返工', repair: '返修', concession: '让步接收', scrap: '报废' };
+
+// 通知配置（可在 settings 表覆盖）：站内待办必发，webhook 留空则跳过外部推送
+function getSetting(key, def) {
+  try {
+    const r = get('SELECT value FROM settings WHERE key=?', [key]);
+    return r && r.value !== null && r.value !== undefined ? r.value : def;
+  } catch (e) { return def; }
+}
+
+// 定责：优先该工序指派班组 → 班组 leader；再退工单创建人；最后 admin
+function resolveIssueAssignee(step, order) {
+  const team = step && step.assignee_team;
+  if (team) {
+    const l = get("SELECT id,name FROM users WHERE role='leader' AND team=? AND active=1 ORDER BY id LIMIT 1", [team]);
+    if (l) return l;
+  }
+  if (order && order.created_by) {
+    const c = get('SELECT id,name FROM users WHERE id=? AND active=1', [order.created_by]);
+    if (c && c.role !== 'worker') return c;
+  }
+  const a = get("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
+  return a || { id: null, name: '未指派' };
+}
+
+// 投递站内待办 + 记录通知痕迹（外部 webhook 见 pushExternal）
+function notifyIssue(issue, toUser, kind, title, body) {
+  const ts = now();
+  insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,NULL,?,1)',
+    [issue.id, toUser && toUser.id ? toUser.id : null, toUser ? toUser.name : '', 'inbox', kind, title, body, ts]);
+  // 抄送超级管理员（升级时）
+  if (kind === 'escalate') {
+    const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1");
+    for (const a of admins) {
+      if (toUser && a.id === toUser.id) continue;
+      insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,NULL,?,1)',
+        [issue.id, a.id, a.name, 'inbox', kind, title, body, ts]);
+    }
+  }
+  pushExternal(issue, kind, title, body);
+}
+
+// 外部推送（企业微信/钉钉群机器人）。webhook 未配置时静默跳过，不影响主流程。
+function pushExternal(issue, kind, title, body) {
+  const url = getSetting('webhook_url', '');
+  if (!url || !/^https:\/\//.test(url)) return;
+  const text = `【质量异常·${ISSUE_LEVEL_LABEL[issue.level] || issue.level}】${title}\n${body || ''}\n单号：${issue.code}　状态：${issue.status}`;
+  try {
+    // 同时兼容企业微信({msgtype:text}) 与 钉钉({msgtype:markdown}) 的报文
+    const payload = /dingtalk/i.test(url)
+      ? { msgtype: 'markdown', markdown: { title: title, text: text } }
+      : { msgtype: 'text', text: { content: text } };
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      .catch(() => { /* 推送失败不阻塞业务 */ });
+  } catch (e) { /* 忽略 */ }
+}
+
+// 生成质量异常单（不合格 / 报工上报共用）
+function createQualityIssue(opt) {
+  const ts = now();
+  const code = genCode('QA');
+  const step = opt.order_step_id ? get('SELECT * FROM order_steps WHERE id=?', [opt.order_step_id]) : null;
+  const order = opt.order_id ? get('SELECT * FROM orders WHERE id=?', [opt.order_id]) : null;
+  const assignee = resolveIssueAssignee(step, order);
+  const id = insert(`INSERT INTO quality_issues(code,level,source,order_id,order_step_id,inspection_id,product_id,product_name,order_code,process_name,
+      qty_affected,bad_summary,status,assignee_user_id,assignee_name,claimed_at,due_at,escalated,cause,action,disposition,verifier,closed_at,created_by,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,NULL,?,0,NULL,NULL,NULL,NULL,NULL,?,?)`,
+    [code, opt.level || 'major', opt.source || 'inspect', opt.order_id || null, opt.order_step_id || null, opt.inspection_id || null,
+      opt.product_id || null, opt.product_name || null, order ? order.code : null, opt.process_name || null,
+      num(opt.qty_affected), opt.bad_summary || null,
+      assignee.id, assignee.name,
+      ts.slice(0, 19), // due_at 由扫描器按等级计算；此处占位
+      opt.created_by || null, ts]);
+  const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
+  const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
+  const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
+  notifyIssue(issue, assignee, 'created', title, body);
+  return issue;
+}
+
+// 检验判定 → 写检验记录；不合格自动开异常单
+function doInspection(b, actor) {
+  const stepId = num(b.order_step_id);
+  const step = get('SELECT * FROM order_steps WHERE id=?', [stepId]);
+  if (!step) throw new Error('工序不存在');
+  const order = get('SELECT * FROM orders WHERE id=?', [step.order_id]);
+  if (!order) throw new Error('工单不存在');
+  if (String(step.inspect_status || '') !== 'waiting') throw new Error('该工序当前不在待检状态，无需检验');
+
+  const qtyPass = Math.max(0, Math.floor(num(b.qty_pass)));
+  const qtyFail = Math.max(0, Math.floor(num(b.qty_fail)));
+  let conclusion = String(b.conclusion || '').trim();
+  if (!['pass', 'fail', 'concession'].includes(conclusion)) {
+    conclusion = qtyFail > 0 ? 'fail' : 'pass';
+  }
+  if (conclusion === 'pass' && qtyFail > 0) throw new Error('判定合格时不合格数必须为 0');
+  if (conclusion !== 'pass' && qtyFail <= 0) throw new Error('判定不合格/让步接收时须填写不合格数');
+
+  const insCode = genCode('QC');
+  const inspId = insert(`INSERT INTO inspections(code,order_id,order_step_id,report_id,process_name,inspector_id,inspector,qty_check,qty_pass,qty_fail,conclusion,remark,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [insCode, order.id, step.id, num(b.report_id) || null, step.process_name || null, actor.id, actor.name,
+      qtyPass + qtyFail, qtyPass, qtyFail, conclusion, b.remark || '', now()]);
+
+  // 不良明细（可多种）
+  const defects = Array.isArray(b.defects) ? b.defects : [];
+  const summary = [];
+  for (const d of defects) {
+    const q = Math.max(0, Math.floor(num(d.qty)));
+    if (q <= 0) continue;
+    let brId = num(d.bad_reason_id) || 0;
+    let name = '';
+    const detail = String(d.bad_reason_detail || '').trim();
+    if (brId) {
+      const br = get('SELECT name FROM bad_reasons WHERE id=?', [brId]);
+      if (!br) throw new Error('不良原因不存在（#' + brId + '）');
+      if (br.name === '其他' && detail) { name = detail; brId = 0; } else { name = br.name; }
+    } else { name = String(d.bad_reason || detail || '其他'); }
+    insert('INSERT INTO inspection_defects(inspection_id,bad_reason_id,bad_reason,bad_reason_detail,qty) VALUES(?,?,?,?,?)',
+      [inspId, brId || null, name, detail, q]);
+    summary.push(name + '×' + q);
+  }
+  if (conclusion !== 'pass' && !summary.length) summary.push((b.bad_summary || '未分类不良') + '×' + qtyFail);
+
+  // 定级：终检不合格或不合格占比高 → critical；占比低 → minor；其余 major
+  const ratio = (qtyPass + qtyFail) > 0 ? qtyFail / (qtyPass + qtyFail) : 0;
+  const isFinal = String(step.inspect_type) === 'fqc';
+  let level = 'major';
+  if (conclusion === 'fail' && (isFinal || ratio >= 0.2)) level = 'critical';
+  else if (ratio > 0 && ratio <= 0.05) level = 'minor';
+
+  const result = { inspection_id: inspId, code: insCode, conclusion, qty_pass: qtyPass, qty_fail: qtyFail, issue: null, autoFinishIn: null };
+  const product = get('SELECT * FROM products WHERE id=?', [order.product_id]);
+  const lastStepId = (get('SELECT id FROM order_steps WHERE order_id=? ORDER BY seq DESC LIMIT 1', [order.id]) || {}).id;
+  const finished = (step.qty_good + qtyPass) >= step.qty_plan;
+
+  if (conclusion === 'pass' || conclusion === 'concession') {
+    // 合格/让步接收 → 放行完工
+    run("UPDATE order_steps SET inspect_status='passed', status=?, finish_time=? WHERE id=?",
+      [finished ? 'done' : 'running', finished ? now() : null, step.id]);
+    if (finished) {
+      run("UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')", [order.id]);
+    }
+    // 末道检验放行 → 成品自动入库（末道合格数取本次放行的合格数）
+    if (step.id === lastStepId && qtyPass > 0) {
+      const tag = conclusion === 'concession' ? '（特采放行）' : '';
+      result.autoFinishIn = autoFinishIn(order, product, qtyPass, actor, step.id, null, tag);
+    }
+    const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [order.id]);
+    if (left.c === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), order.id]);
+  } else {
+    // 不合格 → 工序挂起 + 开异常单
+    run("UPDATE order_steps SET inspect_status='failed' WHERE id=?", [step.id]);
+    result.issue = createQualityIssue({
+      level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
+      product_id: order.product_id, product_name: product ? product.name : null,
+      process_name: (step.process_name || ('工序' + step.seq)) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+      qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: actor.id,
+    });
+    // 严重异常：暂停工单，阻塞后续流转
+    if (level === 'critical') {
+      run("UPDATE orders SET status='paused' WHERE id=? AND status IN ('running','released')", [order.id]);
+    }
+  }
+  writeLog(actor, '检验判定', `${order.code} ${step.process_name || ''} ${insCode} ${conclusion} 合格${qtyPass}/不合格${qtyFail}`);
+  return result;
+}
+
+/* ---- 检验接口 ---- */
+// 待检队列（质检台）
+route('GET', '/api/inspections/pending', ['admin', 'leader', 'inspector'], (req, res) => {
+  ok(res, all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
+      p.name process_name, o.code order_code, o.status order_status, od.name product_name, s.start_time,
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+    FROM order_steps s JOIN orders o ON o.id=s.order_id
+    LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
+    WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed')
+    ORDER BY s.id DESC LIMIT 200`));
+});
+// 检验记录列表
+route('GET', '/api/inspections', [], (req, res, _m, _b, _u, query) => {
+  const w = []; const p = [];
+  if (query.order_id) { w.push('i.order_id=?'); p.push(query.order_id); }
+  ok(res, all(`SELECT i.*, o.code order_code FROM inspections i LEFT JOIN orders o ON o.id=i.order_id
+    ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY i.id DESC LIMIT 200`, p));
+});
+// 检验单明细（含不良项）
+route('GET', '/api/inspections/(\\d+)', [], (req, res, m) => {
+  const i = get('SELECT * FROM inspections WHERE id=?', [m[1]]);
+  if (!i) return fail(res, '检验记录不存在', 404);
+  i.defects = all('SELECT * FROM inspection_defects WHERE inspection_id=? ORDER BY id', [m[1]]);
+  ok(res, i);
+});
+// 提交检验判定
+route('POST', '/api/inspections', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
+  let r;
+  tx(() => { r = doInspection(b, u); });
+  ok(res, r);
+});
+
+/* ---- 质量异常单接口 ---- */
+route('GET', '/api/quality_issues', [], (req, res, _m, _b, u, query) => {
+  const w = []; const p = [];
+  if (query.status) { w.push('status=?'); p.push(query.status); }
+  if (query.mine === '1' && u) { w.push('assignee_user_id=?'); p.push(u.id); }
+  if (query.open === '1') { w.push("status IN ('open','processing','verifying')"); }
+  ok(res, all(`SELECT * FROM quality_issues ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY
+    CASE level WHEN 'critical' THEN 0 WHEN 'major' THEN 1 ELSE 2 END, id DESC LIMIT 200`, p));
+});
+route('GET', '/api/quality_issues/(\\d+)', [], (req, res, m) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  it.inspection = it.inspection_id ? get('SELECT * FROM inspections WHERE id=?', [it.inspection_id]) : null;
+  if (it.inspection) it.inspection.defects = all('SELECT * FROM inspection_defects WHERE inspection_id=?', [it.inspection.id]);
+  it.timeline = all('SELECT * FROM issue_notifications WHERE issue_id=? ORDER BY id', [m[1]]);
+  ok(res, it);
+});
+// 认领
+route('POST', '/api/quality_issues/(\\d+)/claim', ['admin', 'leader', 'inspector'], (req, res, m, _b, u) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  if (it.status !== 'open') return fail(res, '该异常单已被认领或已关闭');
+  tx(() => {
+    run("UPDATE quality_issues SET status='processing', assignee_user_id=?, assignee_name=?, claimed_at=? WHERE id=?", [u.id, u.name, now(), it.id]);
+    writeLog(u, '认领质量异常', it.code);
+  });
+  ok(res, true);
+});
+// 提交处理（原因/措施/处置方式）→ 待验证
+route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'leader', 'inspector'], (req, res, m, b, u) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  if (['closed', 'cancelled'].includes(it.status)) return fail(res, '该异常单已关闭');
+  tx(() => {
+    run("UPDATE quality_issues SET status='verifying', cause=?, action=?, disposition=?, claimed_at=IFNULL(claimed_at,?) WHERE id=?",
+      [b.cause || null, b.action || null, b.disposition || null, now(), it.id]);
+    writeLog(u, '处理质量异常', it.code + ' ' + (DISPOSITION_LABEL[b.disposition] || ''));
+  });
+  ok(res, true);
+});
+// 验证关闭 → 闭环；若是 critical 且选择让步/返工完成，恢复工单流转
+route('POST', '/api/quality_issues/(\\d+)/close', ['admin', 'leader'], (req, res, m, b, u) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  if (it.status === 'closed') return fail(res, '该异常单已关闭');
+  tx(() => {
+    run("UPDATE quality_issues SET status='closed', verifier=?, closed_at=? WHERE id=?", [u.name, now(), it.id]);
+    // 工序放行：合格→done；让步接收→放行但标记
+    if (it.order_step_id) {
+      const step = get('SELECT * FROM order_steps WHERE id=?', [it.order_step_id]);
+      if (step && String(step.inspect_status) === 'failed') {
+        const pass = b.release !== false; // 默认放行
+        if (pass) {
+          const fin = step.qty_good >= step.qty_plan;
+          run("UPDATE order_steps SET inspect_status='passed', status=?, finish_time=? WHERE id=?",
+            [fin ? 'done' : 'running', fin ? now() : null, step.id]);
+        }
+      }
+    }
+    // 恢复工单（critical 时曾被暂停）
+    if (it.order_id) {
+      const o = get('SELECT * FROM orders WHERE id=?', [it.order_id]);
+      if (o && o.status === 'paused') {
+        const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [o.id]);
+        run("UPDATE orders SET status=? WHERE id=?", [left.c === 0 ? 'done' : 'running', o.id]);
+      }
+    }
+    const closer = { id: it.assignee_user_id, name: it.assignee_name };
+    notifyIssue(it, closer, 'closed', `质量异常已闭环：${it.code}`, `验证人 ${u.name}，处置：${DISPOSITION_LABEL[it.disposition] || '未填'}`);
+    writeLog(u, '关闭质量异常', it.code);
+  });
+  ok(res, true);
+});
+// 作废（误报）
+route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  tx(() => {
+    run("UPDATE quality_issues SET status='cancelled', cause=?, closed_at=? WHERE id=?", [b.reason || '作废', now(), it.id]);
+    writeLog(u, '作废质量异常', it.code);
+  });
+  ok(res, true);
+});
+// 报工环节自主上报异常（操作工/质检员均可）
+route('POST', '/api/quality_issues', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
+  let it;
+  tx(() => {
+    it = createQualityIssue({
+      level: b.level || 'major', source: b.source || 'report',
+      order_id: num(b.order_id) || null, order_step_id: num(b.order_step_id) || null,
+      product_name: b.product_name || null, process_name: b.process_name || null,
+      qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: u.id,
+    });
+    writeLog(u, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
+  });
+  ok(res, it);
+});
+
+/* ---- 通知中心 ---- */
+route('GET', '/api/notifications', [], (req, res, _m, _b, u) => {
+  if (!u) return ok(res, []);
+  ok(res, all(`SELECT n.*, q.code issue_code, q.level, q.status issue_status FROM issue_notifications n
+    LEFT JOIN quality_issues q ON q.id=n.issue_id
+    WHERE n.to_user_id=? AND n.channel='inbox' ORDER BY n.id DESC LIMIT 100`, [u.id]));
+});
+route('GET', '/api/notifications/unread_count', [], (req, res, _m, _b, u) => {
+  if (!u) return ok(res, { count: 0 });
+  const r = get("SELECT COUNT(*) c FROM issue_notifications WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL", [u.id]);
+  ok(res, { count: r ? r.c : 0 });
+});
+route('POST', '/api/notifications/read', [], (req, res, _m, b, u) => {
+  if (!u) return ok(res, true);
+  if (b.id) run('UPDATE issue_notifications SET read_at=? WHERE id=? AND to_user_id=?', [now(), num(b.id), u.id]);
+  else run("UPDATE issue_notifications SET read_at=? WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL", [now(), u.id]);
+  ok(res, true);
+});
+// 通知设置（webhook 地址）
+route('GET', '/api/quality/settings', ['admin', 'leader'], (req, res) => {
+  ok(res, {
+    webhook_url: getSetting('webhook_url', ''),
+    escalate_minutes: num(getSetting('escalate_minutes', 240)),
+    remind_minutes: num(getSetting('remind_minutes', 30)),
+  });
+});
+route('POST', '/api/quality/settings', ['admin'], (req, res, _m, b, u) => {
+  const setKV = (k, v) => {
+    const ex = get('SELECT key FROM settings WHERE key=?', [k]);
+    if (ex) run('UPDATE settings SET value=? WHERE key=?', [String(v), k]);
+    else insert('INSERT INTO settings(key,value) VALUES(?,?)', [k, String(v)]);
+  };
+  if (b.webhook_url !== undefined) setKV('webhook_url', b.webhook_url || '');
+  if (b.escalate_minutes !== undefined) setKV('escalate_minutes', num(b.escalate_minutes, 240));
+  if (b.remind_minutes !== undefined) setKV('remind_minutes', num(b.remind_minutes, 30));
+  writeLog(u, '修改质量设置', JSON.stringify(b));
+  ok(res, true);
+});
+
+/* ---- 质量统计 ---- */
+route('GET', '/api/stats/quality', [], (req, res) => {
+  const openByLevel = all(`SELECT level, COUNT(*) c FROM quality_issues WHERE status IN ('open','processing','verifying') GROUP BY level`);
+  const totalOpen = get("SELECT COUNT(*) c FROM quality_issues WHERE status IN ('open','processing','verifying')").c;
+  const totalClosed = get("SELECT COUNT(*) c FROM quality_issues WHERE status='closed'").c;
+  // 不良帕累托（检验明细聚合）
+  const pareto = all(`SELECT bad_reason name, SUM(qty) qty, COUNT(*) times FROM inspection_defects
+    WHERE IFNULL(bad_reason,'')<>'' GROUP BY bad_reason ORDER BY qty DESC LIMIT 10`);
+  // 检验不良率（按工序）
+  const byProcess = all(`SELECT process_name, SUM(qty_check) chk, SUM(qty_fail) fail
+    FROM inspections GROUP BY process_name ORDER BY fail DESC LIMIT 10`);
+  // 超期未闭环
+  const overdue = all(`SELECT * FROM quality_issues WHERE status IN ('open','processing','verifying')
+    AND IFNULL(due_at,'')<>'' AND due_at < ? ORDER BY due_at LIMIT 20`, [now()]);
+  // 平均响应时长（创建→认领，单位分钟）
+  const resp = get(`SELECT AVG((julianday(claimed_at)-julianday(created_at))*24*60) m FROM quality_issues WHERE claimed_at IS NOT NULL`);
+  ok(res, {
+    total_open: totalOpen, total_closed: totalClosed,
+    open_by_level: openByLevel, pareto, by_process: byProcess,
+    overdue: overdue, avg_claim_minutes: resp && resp.m ? Math.round(resp.m) : null,
+  });
+});
+
+// 超时扫描：未认领 → 抄送；长时间未处理 → 升级。每分钟执行。
+function scanOverdueIssues() {
+  try {
+    const remindMin = num(getSetting('remind_minutes', 30), 30);
+    const escMin = num(getSetting('escalate_minutes', 240), 240);
+    const list = all("SELECT * FROM quality_issues WHERE status IN ('open','processing')");
+    for (const it of list) {
+      const born = new Date(String(it.created_at).replace(' ', 'T'));
+      const mins = (Date.now() - born.getTime()) / 60000;
+      if (it.status === 'open' && mins >= remindMin) {
+        const already = get("SELECT id FROM issue_notifications WHERE issue_id=? AND kind='remind'", [it.id]);
+        if (!already) {
+          const supervisor = get("SELECT id,name FROM users WHERE role='leader' AND team=(SELECT team FROM users WHERE id=?) AND active=1 LIMIT 1", [it.assignee_user_id])
+            || get("SELECT id,name FROM users WHERE role='admin' AND active=1 LIMIT 1");
+          notifyIssue(it, supervisor, 'remind', `质量异常待认领超 ${remindMin} 分钟：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，请尽快认领处理`);
+        }
+      }
+      if (!it.escalated && mins >= escMin) {
+        const admin = get("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
+        notifyIssue(it, admin, 'escalate', `质量异常超 ${Math.round(escMin / 60)} 小时未处理：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，责任人 ${it.assignee_name || '未指派'}`);
+        run('UPDATE quality_issues SET escalated=1 WHERE id=?', [it.id]);
+      }
+    }
+  } catch (e) { /* 扫描失败不影响服务 */ }
 }
 
 /* ------------------------------ 来料记录 / 成品入库 ------------------------------
@@ -1504,6 +1940,10 @@ const server = http.createServer(async (req, res) => {
 // 兜底：任何未预料到的异常都只记录日志，不让服务进程退出
 process.on('uncaughtException', (e) => console.error('[未捕获异常]', e.message));
 process.on('unhandledRejection', (e) => console.error('[未处理 Promise 拒绝]', e && e.message));
+
+// 质量异常超时扫描（未认领抄送 / 超时升级），每分钟一次
+setInterval(scanOverdueIssues, 60 * 1000);
+setTimeout(scanOverdueIssues, 5 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('');

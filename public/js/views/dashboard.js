@@ -11,15 +11,22 @@ Views.dashboard = {
 
     const draw = async () => {
       if (gen !== this._gen) return;   // 已切到别的页面，放弃本次渲染
-      const [ov, trend, bad, rank, running, wcs] = await Promise.all([
+      const [ov, trend, bad, rank, running, wcs, qc, pend, issues] = await Promise.all([
         API.get('/stats/overview'),
         API.get('/stats/trend?days=14'),
         API.get('/stats/bad?days=14'),
         API.get('/stats/ranking?days=7'),
         API.get('/orders?status=running,paused'),
         API.get('/work_centers'),
+        API.get('/stats/quality').catch(() => null),
+        (App.isQC() || App.canEdit()) ? API.get('/inspections/pending').catch(() => []) : Promise.resolve([]),
+        API.get('/quality_issues').catch(() => []),
       ]);
       if (gen !== this._gen) return;
+
+      const openQc = (issues || []).filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
+      const myQc = openQc.filter((x) => App.user && x.assignee_user_id === App.user.id);
+      const pendingN = (pend || []).length;
 
       const yieldCls = ov.yield >= 98 ? 'ok' : ov.yield >= 95 ? '' : 'danger';
       const d = new Date();
@@ -107,6 +114,29 @@ Views.dashboard = {
         </div>
         <div class="grid" style="gap:14px;align-content:start">
           <div class="card">
+            <div class="card-h"><h3>质量异常待办</h3>
+              <button class="btn btn-sm btn-ghost" id="toQuality">质量中心 ${UI.icon('back')}</button></div>
+            <div class="card-b">
+              <div class="grid g2 keep2" style="gap:10px;margin-bottom:12px">
+                <div class="stat" style="box-shadow:none">
+                  <div class="stat-l small"><i class="dot" style="background:${pendingN ? 'var(--warn)' : 'var(--ok)'}"></i>待检工序</div>
+                  <div class="stat-v" style="font-size:22px;color:${pendingN ? 'var(--warn)' : 'inherit'}">${pendingN}</div></div>
+                <div class="stat" style="box-shadow:none">
+                  <div class="stat-l small"><i class="dot" style="background:${openQc.length ? 'var(--danger)' : 'var(--ok)'}"></i>未闭环异常</div>
+                  <div class="stat-v" style="font-size:22px;color:${openQc.length ? 'var(--danger)' : 'inherit'}">${openQc.length}</div></div>
+              </div>
+              ${myQc.length ? `<div class="small muted" style="margin-bottom:6px">指派给我 <b style="color:var(--warn)">${myQc.length}</b> 张，需尽快处理：</div>
+                ${UI.table([
+                  { t: '异常单号', f: (r) => `<b class="link" data-qi="${r.id}">${UI.esc(r.code)}</b>` },
+                  { t: '等级', f: (r) => Views.quality.levelChip(r.level) },
+                  { t: '工序', f: (r) => `<span class="small">${UI.esc(r.process_name || '—')}</span>` },
+                  { t: '状态', f: (r) => Views.quality.statusChip(r.status) },
+                ], myQc.slice(0, 5))}`
+                : `<div class="small muted">${openQc.length ? `当前 ${openQc.length} 张异常单未闭环，暂无指派给我的待办。` : '暂无质量异常待办，质量稳定 👍'}</div>`}
+              ${qc && qc.avg_claim_minutes != null ? `<div class="small muted" style="margin-top:10px">平均响应时长 <b>${qc.avg_claim_minutes}</b> 分钟 · 已闭环 <b>${qc.total_closed || 0}</b> 张</div>` : ''}
+            </div>
+          </div>
+          <div class="card">
             <div class="card-h"><h3>不良原因 TOP（14天）</h3></div>
             <div class="card-b">
               ${UI.barChart(bad.slice(0, 6), { color: '#d93b3b', labelW: 76, title: '不良原因 TOP（14天）' })}
@@ -125,7 +155,10 @@ Views.dashboard = {
 
       el.querySelector('#quickReport').onclick = () => location.hash = '#/report';
       el.querySelector('#allOrders').onclick = () => location.hash = '#/orders';
+      const tq = el.querySelector('#toQuality');
+      if (tq) tq.onclick = () => location.hash = '#/quality';
       el.querySelectorAll('[data-order]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.order);
+      el.querySelectorAll('[data-qi]').forEach((a) => a.onclick = () => location.hash = '#/quality/issue/' + a.dataset.qi);
     };
 
     await draw();

@@ -38,6 +38,86 @@
     renderWorker(data.orders);
   }
 
+  /* ==================== 质检台（扫码即判） ==================== */
+  const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
+
+  async function loadInspector(w, t) {
+    const data = await api('/api/public/inspector/' + w + '?t=' + encodeURIComponent(t));
+    S.inspector = data.worker; S.q = w; S.t = t; S.mode = 'inspector';
+    S.qSteps = data.steps || [];
+    S.badReasons = data.badReasons || [];
+    renderInspector();
+  }
+
+  function renderInspector() {
+    $back.style.display = 'none';
+    const w = S.inspector;
+    const list = S.qSteps || [];
+    $app.innerHTML = `
+      <div class="card"><div class="card-b">
+        <div class="ocode">质检台</div>
+        <div class="pname">${esc(w.name)} · ${esc(w.team || '')} · 待检 <b>${list.length}</b> 道工序</div>
+      </div></div>
+      ${list.length ? list.map((s) => {
+        const isFinal = String(s.inspect_type) === 'fqc';
+        return `<div class="card insp" data-s="${s.order_step_id}">
+          <div class="card-b">
+            <div class="ocode" style="font-size:15px">${esc(s.order_code)} · 第 ${s.seq} 道 ${esc(s.process_name)}
+              <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${INSPECT_LABEL[s.inspect_type] || '检验'}</span></div>
+            <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
+            <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+              <div class="field"><span>本次受检数</span>
+                <input class="plain qi-pass" type="number" min="0" inputmode="numeric" value="${s.qty_good}"></div>
+              <div class="field"><span>不合格数</span>
+                <input class="plain qi-fail" type="number" min="0" inputmode="numeric" placeholder="0" value="0"></div>
+              <div class="badrows" data-rows="${s.order_step_id}"></div>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+              <button type="button" class="btn ok" data-judge="${s.order_step_id}" data-cc="pass">合格放行</button>
+              <button type="button" class="btn warnbtn" data-judge="${s.order_step_id}" data-cc="concession">让步接收</button>
+              <button type="button" class="btn dangerbtn" data-judge="${s.order_step_id}" data-cc="fail">不合格</button>
+            </div>
+            <div class="pname" style="margin-top:8px">${isFinal ? '终检放行将自动成品入库；' : ''}不合格会自动开质量异常单并通知责任管理人员。</div>
+          </div>
+        </div>`;
+      }).join('') : `<div class="card center" style="padding:34px 20px;color:#6b7682">当前没有待检工序 👍</div>`}
+      <div style="height:20px"></div>`;
+
+    bindBadRows();
+    list.forEach((s) => { S.vals[s.order_step_id] = { badRows: [{ reason: '', qty: '', detail: '' }] }; renderBadRows(s.order_step_id); });
+    $app.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => judgeMobile(b.dataset.judge, b.dataset.cc));
+  }
+
+  async function judgeMobile(stepId, conclusion) {
+    const card = $app.querySelector('.insp[data-s="' + stepId + '"]');
+    if (!card) return;
+    const qtyPass = Math.max(0, Math.floor(Number(card.querySelector('.qi-pass').value) || 0));
+    const qtyFail = Math.max(0, Math.floor(Number(card.querySelector('.qi-fail').value) || 0));
+    if (conclusion === 'pass' && qtyFail > 0) { toast('合格放行时不合格数须为 0'); return; }
+    if (conclusion !== 'pass' && qtyFail <= 0) { toast('请填写不合格数'); return; }
+    if (!confirm(`判定「${conclusion === 'pass' ? '合格放行' : conclusion === 'concession' ? '让步接收' : '不合格'}」：受检 ${qtyPass} 件 / 不合格 ${qtyFail} 件。确定提交？`)) return;
+    const defects = [...card.querySelectorAll('.badrows .brow')].map((br) => {
+      const det = br.querySelector('.brow-detail');
+      return { bad_reason_id: Number(br.querySelector('.brow-reason').value) || 0, qty: Number(br.querySelector('.brow-qty').value) || 0, bad_reason_detail: det ? det.value.trim() : '' };
+    }).filter((x) => x.qty > 0);
+    try {
+      const r = await post('/api/inspections', { order_step_id: stepId, qty_pass: qtyPass, qty_fail: qtyFail, conclusion, defects, remark: '' });
+      showInspOk(conclusion, r && r.autoFinishIn, r && r.issue);
+    } catch (e) { toast(e.message); }
+  }
+
+  function showInspOk(conclusion, auto, issue) {
+    const mask = document.createElement('div'); mask.className = 'ok-mask';
+    mask.innerHTML = `<div class="ok-circle"><svg viewBox="0 0 52 52"><path d="M14 27l8 8 16-18"/></svg></div>
+      <div style="font-size:18px;font-weight:700">判定已提交</div>
+      ${auto ? `<div style="color:#2bb673;margin-top:6px">末道工序已自动入库 ${auto.qty} 件</div>` : ''}
+      ${issue ? `<div style="color:#d93b3b;margin-top:6px">已生成质量异常单 ${esc(issue.code)}<br>责任人 ${esc(issue.assignee_name || '—')} 已收到待办</div>` : ''}
+      <button class="btn" style="max-width:220px" id="again">继续判定</button>`;
+    document.body.appendChild(mask);
+    mask.querySelector('#again').onclick = () => { mask.remove(); loadInspector(S.q, S.t).catch((e) => showError(e.message)); };
+  }
+
   function renderWorker(orders) {
     $back.style.display = 'none';
     const w = S.worker;
@@ -275,8 +355,9 @@
 
   function init() {
     const p = new URLSearchParams(location.search);
-    const o = p.get('o'), w = p.get('w'), t = p.get('t');
-    if (o && t) loadOrder(o, t, null).catch((e) => showError(e.message));
+    const o = p.get('o'), w = p.get('w'), q = p.get('q'), t = p.get('t');
+    if (q && t) loadInspector(q, t).catch((e) => showError(e.message));
+    else if (o && t) loadOrder(o, t, null).catch((e) => showError(e.message));
     else if (w && t) loadWorker(w, t).catch((e) => showError(e.message));
     else showError('无效的报工链接，请用微信扫描「报工二维码」进入。');
   }

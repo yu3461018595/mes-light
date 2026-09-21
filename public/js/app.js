@@ -5,6 +5,7 @@ window.App = {
     { k: 'dashboard', v: 'dashboard', t: '看板', roles: ['admin', 'leader', 'worker'] },
     { k: 'orders', v: 'orders', t: '工单', roles: ['admin', 'leader', 'worker'] },
     { k: 'report', v: 'report', t: '报工', roles: ['admin', 'leader', 'worker'] },
+    { k: 'quality', v: 'quality', t: '质量', roles: ['admin', 'leader', 'inspector'] },
     { k: 'basic', v: 'basic', t: '基础数据', roles: ['admin', 'leader', 'worker'] },
     { k: 'warehouse', v: 'warehouse', t: '物料仓储', roles: ['admin', 'leader'] },
     { k: 'scan', v: 'scan', t: '扫码报单', roles: ['admin', 'leader'] },
@@ -14,6 +15,8 @@ window.App = {
 
   isAdmin: () => App.user && App.user.role === 'admin',
   canEdit: () => App.user && ['admin', 'leader'].includes(App.user.role),
+  // 质检员：可判定与处理异常单，但不能改工单/基础数据
+  isQC: () => App.user && App.user.role === 'inspector',
 
   /* ---------- 渲染 ---------- */
   render() {
@@ -77,7 +80,8 @@ window.App = {
   enter() {
     document.getElementById('login').classList.add('hidden');
     document.getElementById('shell').classList.remove('hidden');
-    document.getElementById('topUser').textContent = `${App.user.name} · ${{ admin: '管理员', leader: '班组长', worker: '操作工' }[App.user.role]}`;
+    const ROLE_LABEL = { admin: '管理员', leader: '班组长', worker: '操作工', inspector: '质检员' };
+    document.getElementById('topUser').textContent = `${App.user.name} · ${ROLE_LABEL[App.user.role] || App.user.role}`;
     document.getElementById('sideUser').innerHTML =
       `<span class="avatar">${UI.esc(App.user.name.slice(0, 1))}</span><span>${UI.esc(App.user.name)}</span>`;
     document.getElementById('btnLogout').onclick = () => App.logout();
@@ -89,9 +93,13 @@ window.App = {
     };
     document.getElementById('btnBack').onclick = () => location.hash = '#/dashboard';
     App.buildMenu();
+    if (window.Notify) Notify.mount();
 
-    // 操作工默认直接进报工页
-    if (!location.hash && App.user.role === 'worker') location.hash = '#/report';
+    // 操作工默认直接进报工页；质检员默认直接进质检台
+    if (!location.hash) {
+      if (App.user.role === 'worker') location.hash = '#/report';
+      else if (App.user.role === 'inspector') location.hash = '#/quality';
+    }
     window.addEventListener('hashchange', App.render);
     App.render();
   },
