@@ -129,7 +129,9 @@ async function api(method, url, body, token) {
     const a3 = sb3.data.find((x) => x.name === A.name);
     const b3 = sb3.data.find((x) => x.name === B.name);
     chk('删除多不良后原因A 增量=2（仅剩旧版单原因）', a3 && Number(a3.qty) === baseA + 2, a3 ? 'A=' + a3.qty + ' base=' + baseA : 'A缺失');
-    chk('删除后原因B 回到基线（明细已随删）', b3 && Number(b3.qty) === baseB, b3 ? 'B=' + b3.qty + ' base=' + baseB : 'B已消失');
+    // 注：原因B 原本无记录（baseB=0），删除后统计里「不出现」即等价于回到基线 0，不能要求有行
+    const b3q = b3 ? Number(b3.qty) : 0;
+    chk('删除后原因B 回到基线（明细已随删）', b3q === baseB, b3 ? 'B=' + b3.qty + ' base=' + baseB : 'B已消失(=基线0)');
   } catch (e) {
     fail++;
     console.log('  EXCEPTION  ' + e.message);

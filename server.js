@@ -161,6 +161,47 @@ route('GET', '/api/me', [], (req, res) => {
   ok(res, u);
 });
 
+/* ---- 账号：改密码 / 重置密码（APP 员工自助）---- */
+// 本人修改密码：需校验原密码；改成功后吊销本人**其他**会话（当前设备保持登录）
+route('POST', '/api/password', [], (req, res, _m, b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  const oldPwd = String(b.old_password || '');
+  const newPwd = String(b.new_password || '');
+  if (!oldPwd || !newPwd) return fail(res, '原密码与新密码不能为空');
+  if (newPwd.length < 6) return fail(res, '新密码至少 6 位');
+  if (newPwd === oldPwd) return fail(res, '新密码不能与原密码相同');
+  const row = get('SELECT * FROM users WHERE id=?', [u.id]);
+  if (!row || row.password !== hashPassword(oldPwd)) return fail(res, '原密码不正确', 400);
+  run('UPDATE users SET password=? WHERE id=?', [hashPassword(newPwd), u.id]);
+  const auth = req.headers.authorization || '';
+  const cur = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  run('DELETE FROM sessions WHERE user_id=? AND token<>?', [u.id, cur]);
+  writeLog(u, '修改密码', u.name + ' 修改了自己的登录密码');
+  ok(res, true);
+});
+
+// 管理员重置他人密码（无需原密码，用于员工忘记密码）
+route('POST', '/api/users/(\\d+)/reset_password', ['admin'], (req, res, m, b, u) => {
+  const target = get('SELECT * FROM users WHERE id=?', [m[1]]);
+  if (!target) return fail(res, '用户不存在', 404);
+  const newPwd = String(b.new_password || '');
+  if (newPwd.length < 6) return fail(res, '新密码至少 6 位');
+  run('UPDATE users SET password=? WHERE id=?', [hashPassword(newPwd), target.id]);
+  run('DELETE FROM sessions WHERE user_id=?', [target.id]);
+  writeLog(u, '重置密码', u.name + ' 重置了「' + target.name + '」的登录密码');
+  ok(res, true);
+});
+
+// 修改自己的显示名（APP「我的」页可改昵称）
+route('POST', '/api/profile', [], (req, res, _m, b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  const name = String(b.name || '').trim();
+  if (!name) return fail(res, '姓名不能为空');
+  run('UPDATE users SET name=? WHERE id=?', [name, u.id]);
+  writeLog(u, '修改资料', '姓名改为 ' + name);
+  ok(res, get('SELECT id,username,name,role,team,work_center_id FROM users WHERE id=?', [u.id]));
+});
+
 /* ------------------------------ 元数据 ------------------------------ */
 route('GET', '/api/meta', [], (req, res) => {
   ok(res, {
@@ -479,6 +520,10 @@ route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'leader'], (req, res, m, b
     run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [m[1]]);
   }
   writeLog(u, '工单状态变更', o.code + ' → ' + label);
+  // 下发时通知已指派班组的成员（派工待办）
+  if (to === 'released') {
+    try { notifyAssign(o, m[1]); } catch (e) { /* 通知失败不影响下发 */ }
+  }
   ok(res, true);
 });
 
@@ -486,8 +531,15 @@ route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res
   const allowReport = (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1;
   run('UPDATE order_steps SET assignee_team=?, work_center_id=?, allow_report=? WHERE id=? AND order_id=?',
     [b.assignee_team || null, b.work_center_id || null, allowReport, m[2], m[1]]);
-  const o = get('SELECT code FROM orders WHERE id=?', [m[1]]);
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   writeLog(u, '工序派工', (o ? o.code : m[1]) + ' 工序#' + m[2] + (b.assignee_team ? ' → ' + b.assignee_team : '') + (allowReport ? '' : '（员工不可申报）'));
+  // 单独指派某工序班组时，也通知该班组（工单已在制/已下发才有意义）
+  if (b.assignee_team && o && ['released', 'running', 'paused'].includes(o.status)) {
+    try {
+      const step = get('SELECT * FROM order_steps WHERE id=? AND order_id=?', [m[2], m[1]]);
+      notifyAssign(o, o.id, step ? [step] : null);
+    } catch (e) { /* 忽略 */ }
+  }
   ok(res, true);
 });
 
@@ -768,7 +820,49 @@ function doReport(b, actor) {
   const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
   const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
   writeLog(actor, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + totalGood + ' / 不良 ' + totalBad);
+  // 通知对应负责人：① 报工环节出现不良 → 质量异常待跟进；② 报工后工序需检验 → 质检员待检
+  try { notifyAfterReport(order, actor, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
   return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
+}
+
+// 报工后的负责人通知（操作工 → 班组长/质检员）
+function notifyAfterReport(order, actor, items, results, product) {
+  const workers = [actor];
+  // ① 有不良 → 通知该工单涉及班组的管理者（leader），提醒质量异常跟进
+  const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
+  if (totalBad > 0) {
+    const teams = [...new Set(items.map((it) => {
+      const s = get('SELECT assignee_team FROM order_steps WHERE id=?', [it.order_step_id]);
+      return s ? s.assignee_team : null;
+    }).filter(Boolean))];
+    const ph = teams.map(() => '?').join(',');
+    const leaders = teams.length
+      ? all(`SELECT id,name FROM users WHERE active=1 AND role IN ('leader','admin') AND (team IN (${ph}) OR role='admin')`, teams)
+      : usersByRole('admin', 'leader');
+    pushMessage({
+      source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
+      title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
+      body: `${actor.name} 报工登记不良 ${totalBad} 件（${product ? product.name : '-'}）。请核实是否开异常单并跟进处置。`,
+    });
+  }
+  // ② 报工后落入待检 → 通知质检员
+  const waiting = results.filter((r) => r.needInspect);
+  if (waiting.length) {
+    const inspectors = usersByRole('inspector');
+    // 排除报工人自己（质检员也可能自己报工）
+    const tos = inspectors.filter((x) => x.id !== actor.id);
+    if (tos.length) {
+      const names = waiting.map((r) => {
+        const s = get('SELECT p.name process_name FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?', [r.order_step_id]);
+        return s && s.process_name ? s.process_name + '（第' + r.seq + '道）' : '第' + r.seq + '道';
+      });
+      pushMessage({
+        source: 'quality', toUsers: tos, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/inspect',
+        title: `待检任务：${order.code} 有 ${waiting.length} 道工序待检验`,
+        body: `${actor.name} 已报工提交：${names.join('、')}。请到「质检台」判定。`,
+      });
+    }
+  }
 }
 
 route('POST', '/api/reports', [], (req, res, _m, b, u) => {
@@ -1031,6 +1125,59 @@ route('GET', '/api/stats/production-stock', [], (req, res) => {
 });
 
 /* ------------------------------ 扫码报工：二维码 + 免登录接口 ------------------------------ */
+/* ---- APP 登录态复用（与扫码免登录同口径，但身份来自会话）---- */
+// 我的在制工单（按本人班组可见性过滤）
+function appMyOrders(u) {
+  return all(`SELECT o.id,o.code,o.status,o.qty_plan,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
+      (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
+      p.name product_name, p.spec
+     FROM orders o JOIN products p ON p.id=o.product_id
+     WHERE o.status IN ('released','running','paused')
+       AND (o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_team=?)
+            OR o.id IN (SELECT DISTINCT s.order_id FROM order_steps s WHERE s.assignee_team IS NULL))
+     ORDER BY o.priority,o.plan_end`, [u.team]);
+}
+route('GET', '/api/app/my_orders', [], (req, res, _m, _b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  ok(res, { worker: { id: u.id, name: u.name, team: u.team, role: u.role }, orders: appMyOrders(u) });
+});
+// 工单详情 + 可报工序（登录态；班组不匹配的工序标记为不可报）
+route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
+      (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
+      p.name product_name,p.spec
+    FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  const canManage = ['admin', 'leader'].includes(u.role);
+  const steps = all(`SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,
+      s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code
+    FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
+  for (const s of steps) {
+    // 班组不符 → 不可报（管理员/班组长兜底可越权，与 doReport 一致）
+    if (s.assignee_team && s.assignee_team !== u.team && !canManage) s.allow_report = 0;
+  }
+  const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
+  const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
+  const badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
+  ok(res, { order: o, steps, workers: [{ id: u.id, name: u.name, team: u.team }], badReasons });
+});
+// APP 提交报工（登录态代填 worker_id=本人；doReport 内部自带事务）
+route('POST', '/api/app/reports', [], (req, res, _m, b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  try { ok(res, doReport(Object.assign({}, b, { worker_id: u.id }), u)); }
+  catch (e) { fail(res, e.message, 400); }
+});
+// APP 提交检验判定（登录态质检员/管理员；doInspection 内部无事务，由外层包裹）
+route('POST', '/api/app/inspections', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
+  let r;
+  tx(() => { r = doInspection(b, u); });
+  ok(res, r);
+});
+
+/* ---- 扫码免登录（微信扫码入口）---- */
 // 生成工单报工二维码（管理员/班组长）
 route('GET', '/api/qr/order/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
   const o = get('SELECT o.id,o.code,p.name product_name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?', [m[1]]);
@@ -1261,17 +1408,51 @@ function resolveIssueAssignee(step, order) {
 }
 
 // 投递站内待办 + 记录通知痕迹（外部 webhook 见 pushExternal）
+/* ---- 通用消息中心（APP 通知）----
+ * 场景 source：quality 质量异常 | stock 库存预警 | assign 派工待办 | system 系统公告
+ * 全部消息落在 issue_notifications（channel='inbox'），issue_id 可空，用 ref_type/ref_id/link 记录跳转目标。
+ */
+const MSG_SOURCE_LABEL = { quality: '质量异常', stock: '库存预警', assign: '派工待办', system: '系统消息' };
+// 消息小类（kind）→ 中文动词，APP 消息列表按此显示
+const MSG_KIND_LABEL = {
+  created: '新消息', remind: '催办', escalate: '升级', handled: '已处理', closed: '已闭环', cancelled: '已作废',
+};
+
+// 统一投递：给一个或多个用户发站内消息（自动去重收件人）
+function pushMessage(opt) {
+  const ts = now();
+  const src = opt.source || 'system';
+  const users = (Array.isArray(opt.toUsers) ? opt.toUsers : [opt.toUsers]).filter((u) => u && u.id);
+  const seen = new Set();
+  for (const u of users) {
+    if (seen.has(u.id)) continue;
+    seen.add(u.id);
+    insert(`INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,source,ref_type,ref_id,link,read_at,sent_at,ok)
+      VALUES(?,?,?,'inbox',?,?,?,?,?,?,?,NULL,?,1)`,
+      [opt.issue_id || null, u.id, u.name || '', opt.kind || 'created', opt.title || '', opt.body || '',
+        src, opt.ref_type || null, opt.ref_id || null, opt.link || null, ts]);
+  }
+  return seen.size;
+}
+
+// 给指定角色的全部在职用户发消息
+function usersByRole(...roles) {
+  const ph = roles.map(() => '?').join(',');
+  return all(`SELECT id,name,role,team FROM users WHERE role IN (${ph}) AND active=1`, roles);
+}
+
 function notifyIssue(issue, toUser, kind, title, body) {
   const ts = now();
-  insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,NULL,?,1)',
-    [issue.id, toUser && toUser.id ? toUser.id : null, toUser ? toUser.name : '', 'inbox', kind, title, body, ts]);
+  insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,source,ref_type,ref_id,link,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,1)',
+    [issue.id, toUser && toUser.id ? toUser.id : null, toUser ? toUser.name : '', 'inbox', kind, title, body,
+      'quality', 'issue', issue.id, '#/quality/issue/' + issue.id, ts]);
   // 抄送超级管理员（升级时）
   if (kind === 'escalate') {
     const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1");
     for (const a of admins) {
       if (toUser && a.id === toUser.id) continue;
-      insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,NULL,?,1)',
-        [issue.id, a.id, a.name, 'inbox', kind, title, body, ts]);
+      insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,source,ref_type,ref_id,link,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,1)',
+        [issue.id, a.id, a.name, 'inbox', kind, title, body, 'quality', 'issue', issue.id, '#/quality/issue/' + issue.id, ts]);
     }
   }
   pushExternal(issue, kind, title, body);
@@ -1292,9 +1473,76 @@ function pushExternal(issue, kind, title, body) {
   } catch (e) { /* 忽略 */ }
 }
 
+/* ---- 派工待办通知：工单下发 / 工序指派班组 → 通知该班组成员 ---- */
+function notifyAssign(order, orderId, onlySteps) {
+  const steps = onlySteps && onlySteps.length
+    ? onlySteps.filter((s) => s.assignee_team)
+    : all("SELECT * FROM order_steps WHERE order_id=? AND IFNULL(assignee_team,'')<>'' ORDER BY seq", [orderId]);
+  if (!steps.length) return 0;
+  // 按班组聚合，一个班组只发一条汇总消息
+  const byTeam = {};
+  for (const s of steps) {
+    const t = s.assignee_team;
+    if (!byTeam[t]) byTeam[t] = [];
+    byTeam[t].push(s);
+  }
+  let sent = 0;
+  for (const team of Object.keys(byTeam)) {
+    const members = all("SELECT id,name FROM users WHERE team=? AND active=1 AND role<>'admin'", [team]);
+    if (!members.length) continue;
+    const names = byTeam[team].map((s) => s.process_name || ('工序' + s.seq));
+    const plan = byTeam[team][0].qty_plan;
+    sent += pushMessage({
+      source: 'assign',
+      toUsers: members,
+      kind: 'created',
+      title: `新任务：${order.code} 待报工`,
+      body: `产品 ${order.product_name || '-'}　计划 ${plan} 件\n工序：${names.join('、')}\n请到「报工」扫码或选择工单开始生产。`,
+      ref_type: 'order', ref_id: Number(orderId), link: '#/orders',
+    });
+  }
+  return sent;
+}
+
+/* ---- 库存预警：低于安全下限 → 通知仓管/管理员；同一物料同一天只提醒一次 ---- */
+function scanStockAlerts(actor) {
+  const stocks = all(`SELECT m.id, m.code, m.name, m.unit, m.safe_min, m.safe_max,
+      IFNULL(SUM(i.qty),0) qty
+    FROM materials m LEFT JOIN inventory i ON i.material_id=m.id
+    WHERE m.active=1 AND IFNULL(m.safe_min,0) > 0
+    GROUP BY m.id`);
+  const todayStr = today();
+  const receivers = usersByRole('admin');
+  const keepers = all("SELECT id,name FROM users WHERE active=1 AND (role='leader' OR IFNULL(team,'') LIKE '%仓%')");
+  const targets = receivers.concat(keepers);
+  let fired = 0;
+  for (const s of stocks) {
+    const short = Number(s.qty) < Number(s.safe_min);
+    if (!short) continue;
+    // 去重：同日已提醒过则跳过
+    const dup = get('SELECT 1 FROM stock_alerts WHERE material_id=? AND alert_date=?', [s.id, todayStr]);
+    if (dup) continue;
+    run('INSERT INTO stock_alerts(material_id,alert_date,level,qty,safe_min,created_at) VALUES(?,?,?,?,?,?)',
+      [s.id, todayStr, 'short', s.qty, s.safe_min, now()]);
+    fired += pushMessage({
+      source: 'stock',
+      toUsers: targets,
+      kind: 'created',
+      title: `库存预警：${s.name} 低于安全库存`,
+      body: `物料 ${s.code} ${s.name}\n当前库存 ${s.qty} ${s.unit}　安全下限 ${s.safe_min} ${s.unit}\n缺口 ${Math.max(0, Number(s.safe_min) - Number(s.qty))} ${s.unit}，请及时补货。`,
+      ref_type: 'material', ref_id: s.id, link: '#/warehouse',
+    });
+    }
+  return fired;
+}
+
+// 定时扫描库存预警（每 10 分钟）
+function scanStockAlertsTick() {
+  try { scanStockAlerts(null); } catch (e) { /* 忽略 */ }
+}
+
 // 生成质量异常单（不合格 / 报工上报共用）
-function createQualityIssue(opt) {
-  const ts = now();
+function createQualityIssue(opt) {  const ts = now();
   const code = genCode('QA');
   const step = opt.order_step_id ? get('SELECT * FROM order_steps WHERE id=?', [opt.order_step_id]) : null;
   const order = opt.order_id ? get('SELECT * FROM orders WHERE id=?', [opt.order_id]) : null;
@@ -1400,6 +1648,27 @@ function doInspection(b, actor) {
     }
   }
   writeLog(actor, '检验判定', `${order.code} ${step.process_name || ''} ${insCode} ${conclusion} 合格${qtyPass}/不合格${qtyFail}`);
+  // 通知报工人/该班组：检验结果（放行→可继续流转；不合格→已开异常单/工单可能暂停）
+  try {
+    const pass = conclusion === 'pass' || conclusion === 'concession';
+    const teamMembers = step.assignee_team
+      ? all('SELECT id,name FROM users WHERE team=? AND active=1 AND role<>? ', [step.assignee_team, 'admin'])
+      : [];
+    const reporter = step.assignee_id ? get('SELECT id,name FROM users WHERE id=? AND active=1', [step.assignee_id]) : null;
+    const tos = teamMembers.concat(reporter ? [reporter] : []).filter((x) => x.id !== actor.id);
+    if (tos.length) {
+      const head = `${INSPECT_LABEL[step.inspect_type] || '检验'}${pass ? '合格放行' : '不合格'}：${order.code}`;
+      const tail = pass
+        ? `合格 ${qtyPass} 件${conclusion === 'concession' ? '（让步接收）' : ''}${result.autoFinishIn ? '，已自动成品入库 ' + result.autoFinishIn.qty + ' 件' : ''}。`
+        : `不合格 ${qtyFail} 件，已生成质量异常单 ${result.issue ? result.issue.code : ''}${level === 'critical' ? '，工单已暂停待处理' : ''}。`;
+      pushMessage({
+        source: 'quality', toUsers: tos, kind: pass ? 'closed' : 'created',
+        issue_id: result.issue ? result.issue.id : null, ref_type: 'order', ref_id: order.id,
+        link: result.issue ? '#/quality/issue/' + result.issue.id : '#/inspect',
+        title: head, body: `${actor.name} 判定：合格 ${qtyPass} / 不合格 ${qtyFail}。${tail}`,
+      });
+    }
+  } catch (e) { /* 通知失败不阻塞检验 */ }
   return result;
 }
 
@@ -1434,6 +1703,17 @@ route('POST', '/api/inspections', ['admin', 'leader', 'inspector'], (req, res, _
   tx(() => { r = doInspection(b, u); });
   ok(res, r);
 });
+// 质检台队列（APP 质检员扫码登录后进入）——与公开扫码入口同口径，但走登录态
+route('GET', '/api/inspections/queue', ['admin', 'leader', 'inspector'], (req, res, _m, _b, u) => {
+  const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
+      s.assignee_team, p.name process_name, o.code order_code, od.name product_name,
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+    FROM order_steps s JOIN orders o ON o.id=s.order_id
+    LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
+    WHERE s.inspect_status='waiting' AND o.status<>'closed'
+    ORDER BY s.id DESC LIMIT 200`);
+  ok(res, { worker: { id: u.id, name: u.name, team: u.team, role: u.role }, steps: rows, badReasons: all('SELECT id,name FROM bad_reasons ORDER BY id') });
+});
 
 /* ---- 质量异常单接口 ---- */
 route('GET', '/api/quality_issues', [], (req, res, _m, _b, u, query) => {
@@ -1450,6 +1730,15 @@ route('GET', '/api/quality_issues/(\\d+)', [], (req, res, m) => {
   it.inspection = it.inspection_id ? get('SELECT * FROM inspections WHERE id=?', [it.inspection_id]) : null;
   if (it.inspection) it.inspection.defects = all('SELECT * FROM inspection_defects WHERE inspection_id=?', [it.inspection.id]);
   it.timeline = all('SELECT * FROM issue_notifications WHERE issue_id=? ORDER BY id', [m[1]]);
+  if (it.order_step_id) {
+    it.step = get(`SELECT s.id, s.seq, s.status, s.inspect_status, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
+        p.name process_name FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?`, [it.order_step_id]);
+  } else it.step = null;
+  it.order = it.order_id ? get(`SELECT o.id, o.code, o.status, o.qty_plan,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done
+    FROM orders o WHERE o.id=?`, [it.order_id]) : null;
+  // 处置方式字典（APP 处理弹窗渲染用）
+  it.dispositions = DISPOSITION_LABEL;
   ok(res, it);
 });
 // 认领
@@ -1471,6 +1760,15 @@ route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'leader', 'inspecto
   tx(() => {
     run("UPDATE quality_issues SET status='verifying', cause=?, action=?, disposition=?, claimed_at=IFNULL(claimed_at,?) WHERE id=?",
       [b.cause || null, b.action || null, b.disposition || null, now(), it.id]);
+    // 抄送原上报人：他关心自己报的异常处理到哪一步了
+    const reporter = it.created_by ? get('SELECT id,name FROM users WHERE id=? AND active=1', [it.created_by]) : null;
+    const owners = it.assignee_user_id ? [{ id: it.assignee_user_id, name: it.assignee_name }] : [];
+    pushMessage({
+      source: 'quality', toUsers: owners.concat(reporter ? [reporter] : []), kind: 'handled',
+      issue_id: it.id, ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+      title: `质量异常处理中：${it.code}`,
+      body: `${u.name} 已提交处理：处置 ${DISPOSITION_LABEL[b.disposition] || '未填'}${b.action ? '，措施：' + b.action : ''}。待验证关闭。`,
+    });
     writeLog(u, '处理质量异常', it.code + ' ' + (DISPOSITION_LABEL[b.disposition] || ''));
   });
   ok(res, true);
@@ -1504,6 +1802,16 @@ route('POST', '/api/quality_issues/(\\d+)/close', ['admin', 'leader'], (req, res
     }
     const closer = { id: it.assignee_user_id, name: it.assignee_name };
     notifyIssue(it, closer, 'closed', `质量异常已闭环：${it.code}`, `验证人 ${u.name}，处置：${DISPOSITION_LABEL[it.disposition] || '未填'}`);
+    // 上报人也收到闭环消息
+    const reporter = it.created_by ? get('SELECT id,name FROM users WHERE id=? AND active=1', [it.created_by]) : null;
+    if (reporter && reporter.id !== (closer && closer.id)) {
+      pushMessage({
+        source: 'quality', toUsers: [reporter], kind: 'closed', issue_id: it.id,
+        ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+        title: `质量异常已闭环：${it.code}`,
+        body: `验证人 ${u.name}；处置 ${DISPOSITION_LABEL[it.disposition] || '未填'}。工单已恢复流转。`,
+      });
+    }
     writeLog(u, '关闭质量异常', it.code);
   });
   ok(res, true);
@@ -1519,8 +1827,7 @@ route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u
   ok(res, true);
 });
 // 报工环节自主上报异常（操作工/质检员均可）
-route('POST', '/api/quality_issues', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
-  let it;
+route('POST', '/api/quality_issues', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {  let it;
   tx(() => {
     it = createQualityIssue({
       level: b.level || 'major', source: b.source || 'report',
@@ -1533,23 +1840,61 @@ route('POST', '/api/quality_issues', ['admin', 'leader', 'inspector'], (req, res
   ok(res, it);
 });
 
-/* ---- 通知中心 ---- */
-route('GET', '/api/notifications', [], (req, res, _m, _b, u) => {
+/* ---- 消息中心（APP 通知）---- */
+route('GET', '/api/notifications', [], (req, res, _m, _b, u, query) => {
   if (!u) return ok(res, []);
-  ok(res, all(`SELECT n.*, q.code issue_code, q.level, q.status issue_status FROM issue_notifications n
+  const w = ["n.to_user_id=?", "n.channel='inbox'"];
+  const p = [u.id];
+  if (query && query.source) { w.push('n.source=?'); p.push(String(query.source)); }
+  if (query && query.unread === '1') w.push('n.read_at IS NULL');
+  const limit = Math.min(200, Math.max(1, num((query && query.limit) || 100, 100)));
+  const rows = all(`SELECT n.*, q.code issue_code, q.level, q.status issue_status, q.assignee_name, q.process_name, q.bad_summary
+    FROM issue_notifications n
     LEFT JOIN quality_issues q ON q.id=n.issue_id
-    WHERE n.to_user_id=? AND n.channel='inbox' ORDER BY n.id DESC LIMIT 100`, [u.id]));
+    WHERE ${w.join(' AND ')} ORDER BY n.id DESC LIMIT ${limit}`, p);
+  for (const r of rows) {
+    r.source_label = MSG_SOURCE_LABEL[r.source || 'system'] || '消息';
+    r.kind_label = MSG_KIND_LABEL[r.kind] || r.kind || '';
+  }
+  ok(res, rows);
 });
 route('GET', '/api/notifications/unread_count', [], (req, res, _m, _b, u) => {
-  if (!u) return ok(res, { count: 0 });
-  const r = get("SELECT COUNT(*) c FROM issue_notifications WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL", [u.id]);
-  ok(res, { count: r ? r.c : 0 });
+  if (!u) return ok(res, { count: 0, by_source: {} });
+  const c = get("SELECT COUNT(*) c FROM issue_notifications WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL", [u.id]);
+  const bySource = {};
+  for (const r of all("SELECT source, COUNT(*) c FROM issue_notifications WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL GROUP BY source", [u.id])) {
+    bySource[r.source || 'system'] = r.c;
+  }
+  ok(res, { count: c ? c.c : 0, by_source: bySource });
 });
 route('POST', '/api/notifications/read', [], (req, res, _m, b, u) => {
   if (!u) return ok(res, true);
   if (b.id) run('UPDATE issue_notifications SET read_at=? WHERE id=? AND to_user_id=?', [now(), num(b.id), u.id]);
+  else if (b.source) run("UPDATE issue_notifications SET read_at=? WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL AND source=?", [now(), u.id, String(b.source)]);
   else run("UPDATE issue_notifications SET read_at=? WHERE to_user_id=? AND channel='inbox' AND read_at IS NULL", [now(), u.id]);
   ok(res, true);
+});
+// 消息场景字典（前端渲染筛选用）
+route('GET', '/api/message_sources', [], (req, res) => {
+  ok(res, Object.keys(MSG_SOURCE_LABEL).map((k) => ({ key: k, label: MSG_SOURCE_LABEL[k] })));
+});
+// 手动触发库存预警扫描（admin/leader，APP 下拉刷新或管理员手动催）
+route('POST', '/api/stock_alerts/scan', ['admin', 'leader'], (req, res, _m, _b, u) => {
+  const n = scanStockAlerts(u);
+  ok(res, { sent: n });
+});
+// 库存预警总览（哪些物料缺料 / 积压）
+route('GET', '/api/stock_alerts', ['admin', 'leader'], (req, res) => {
+  const rows = all(`SELECT m.id, m.code, m.name, m.unit, m.safe_min, m.safe_max, IFNULL(SUM(i.qty),0) qty
+    FROM materials m LEFT JOIN inventory i ON i.material_id=m.id
+    WHERE m.active=1 GROUP BY m.id ORDER BY m.code`);
+  const out = rows.map((r) => {
+    let lv = 'ok';
+    if (Number(r.safe_min) > 0 && Number(r.qty) < Number(r.safe_min)) lv = 'short';
+    else if (r.safe_max != null && Number(r.safe_max) > 0 && Number(r.qty) > Number(r.safe_max)) lv = 'over';
+    return { ...r, level: lv };
+  }).filter((r) => r.level !== 'ok');
+  ok(res, out);
 });
 // 通知设置（webhook 地址）
 route('GET', '/api/quality/settings', ['admin', 'leader'], (req, res) => {
@@ -1918,12 +2263,25 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // 移动端扫码报工页（免登录 H5）
+  // 移动端入口：/m/ 直接进 APP 工作台（登录态），扫码报工走 /m/index.html
   if (pathname === '/m' || pathname === '/m/') {
+    const appFile = path.join(PUBLIC_DIR, 'm', 'app', 'index.html');
+    if (fs.existsSync(appFile)) {
+      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
+      return fs.createReadStream(appFile).pipe(res);
+    }
     const mfile = path.join(PUBLIC_DIR, 'm', 'index.html');
     if (fs.existsSync(mfile)) {
       res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
       return fs.createReadStream(mfile).pipe(res);
+    }
+  }
+  // /app 与 /m/app 都作为 APP 工作台别名（便于宣传口径「打开 /app」）
+  if (pathname === '/app' || pathname === '/app/' || pathname === '/m/app' || pathname === '/m/app/') {
+    const appFile = path.join(PUBLIC_DIR, 'm', 'app', 'index.html');
+    if (fs.existsSync(appFile)) {
+      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
+      return fs.createReadStream(appFile).pipe(res);
     }
   }
 
@@ -1942,8 +2300,12 @@ process.on('uncaughtException', (e) => console.error('[未捕获异常]', e.mess
 process.on('unhandledRejection', (e) => console.error('[未处理 Promise 拒绝]', e && e.message));
 
 // 质量异常超时扫描（未认领抄送 / 超时升级），每分钟一次
-setInterval(scanOverdueIssues, 60 * 1000);
-setTimeout(scanOverdueIssues, 5 * 1000);
+// unref()：不作为进程存活的理由——被测试/脚本 require 时可正常退出
+setInterval(scanOverdueIssues, 60 * 1000).unref();
+setTimeout(scanOverdueIssues, 5 * 1000).unref();
+// 库存预警：启动 15 秒后首扫，之后每 10 分钟一次
+setInterval(scanStockAlertsTick, 10 * 60 * 1000).unref();
+setTimeout(scanStockAlertsTick, 15 * 1000).unref();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('');

@@ -1,0 +1,16 @@
+{
+  "appId": "cn.meslight.app",
+  "appName": "智工MES",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "server": {
+    "url": "http://114.117.233.47:8080/m/app/",
+    "cleartext": true,
+    "androidScheme": "http"
+  }
+}

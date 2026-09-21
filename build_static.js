@@ -34,7 +34,7 @@ const TABLES = [
   'warehouses', 'materials', 'inventory', 'inventory_tx',
   'incoming_materials', 'finished_goods_in',
   // 检验与质量异常（一期）
-  'inspections', 'inspection_defects', 'quality_issues', 'issue_notifications', 'settings',
+  'inspections', 'inspection_defects', 'quality_issues', 'issue_notifications', 'settings', 'stock_alerts',
 ];
 
 const out = {};

@@ -65,13 +65,20 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], issue_notifications: [], settings: [] };
-    try {
-      const res = await fetch('/data/seed.json', { cache: 'no-store' });
-      DB = res.ok ? await res.json() : EMPTY;
-    } catch (e) {
-      DB = EMPTY;
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], issue_notifications: [], settings: [], stock_alerts: [] };
+    // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
+    // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
+    const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
+    for (const url of CANDIDATES) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (res && res.ok) {
+          const j = await res.json();
+          if (j && Array.isArray(j.users) && j.users.length) { DB = j; break; }
+        }
+      } catch (e) { /* 换下一个候选 */ }
     }
+    if (!DB) DB = EMPTY;
     anchorDates();
     save();
   };
@@ -239,7 +246,40 @@
     const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
     const tb = items.reduce((a, it) => a + Math.max(0, Math.floor(num((it.bad_reasons ? (it.bad_reasons.reduce((s, e) => s + Math.max(0, Math.floor(num(e.qty))), 0)) : it.qty_bad)))), 0);
     writeLog(act, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + tg + ' / 不良 ' + tb);
+    try { notifyAfterReport(order, act, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
     return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
+  }
+  // 报工后的负责人通知（操作工 → 班组长/质检员）
+  function notifyAfterReport(order, act, items, results, product) {
+    const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0); void tg;
+    const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad || it.qty_bad || 0))), 0);
+    if (totalBad > 0) {
+      const teams = [];
+      items.forEach((it) => { const s = find('order_steps', it.order_step_id); if (s && s.assignee_team && teams.indexOf(s.assignee_team) < 0) teams.push(s.assignee_team); });
+      const leaders = T('users').filter((u) => u.active && (u.role === 'admin' || (u.role === 'leader' && (!teams.length || teams.indexOf(u.team) >= 0))));
+      pushMessage({
+        source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
+        title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
+        body: `${act.name} 报工登记不良 ${totalBad} 件（${product ? product.name : '-'}）。请核实是否开异常单并跟进处置。`,
+      });
+    }
+    const waiting = results.filter((r) => r.needInspect);
+    if (waiting.length) {
+      const tos = T('users').filter((u) => u.active && u.role === 'inspector' && u.id !== act.id);
+      if (tos.length) {
+        const names = waiting.map((r) => {
+          const s = find('order_steps', r.order_step_id);
+          const p = s ? find('processes', s.process_id) : null;
+          const nm = s ? (s.process_name || (p ? p.name : '')) : '';
+          return nm ? nm + '（第' + r.seq + '道）' : '第' + r.seq + '道';
+        });
+        pushMessage({
+          source: 'quality', toUsers: tos, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/inspect',
+          title: `待检任务：${order.code} 有 ${waiting.length} 道工序待检验`,
+          body: `${act.name} 已报工提交：${names.join('、')}。请到「质检台」判定。`,
+        });
+      }
+    }
   }
   function undoReport(id) {
     const r = find('reports', id);
@@ -300,6 +340,43 @@
     return ok(Store.currentUser);
   });
   R('POST', '/logout', () => { Store.currentUser = null; return ok(true); });
+
+  /* 账号：改密码 / 重置密码 / 改资料（APP 员工自助） */
+  R('POST', '/password', async (_p, b) => {
+    if (!Store.currentUser) return fail('未登录', 401);
+    const me = find('users', Store.currentUser.id);
+    if (!me) return fail('用户不存在', 404);
+    const oldPwd = String(b.old_password || '');
+    const newPwd = String(b.new_password || '');
+    if (!oldPwd || !newPwd) return fail('原密码与新密码不能为空');
+    if (newPwd.length < 6) return fail('新密码至少 6 位');
+    if (newPwd === oldPwd) return fail('新密码不能与原密码相同');
+    if (me.password !== (await sha256hex('mes:' + oldPwd))) return fail('原密码不正确');
+    me.password = await sha256hex('mes:' + newPwd);
+    save();
+    return ok(true);
+  });
+  R('POST', '/users/(\\d+)/reset_password', async (m, b) => {
+    if (requireRole('admin')) return fail('无权限', 403);
+    const target = find('users', m[0]);
+    if (!target) return fail('用户不存在', 404);
+    const newPwd = String(b.new_password || '');
+    if (newPwd.length < 6) return fail('新密码至少 6 位');
+    target.password = await sha256hex('mes:' + newPwd);
+    save();
+    return ok(true);
+  });
+  R('POST', '/profile', (_p, b) => {
+    if (!Store.currentUser) return fail('未登录', 401);
+    const name = String(b.name || '').trim();
+    if (!name) return fail('姓名不能为空');
+    const me = find('users', Store.currentUser.id);
+    if (!me) return fail('用户不存在', 404);
+    me.name = name;
+    Store.currentUser.name = name;
+    save();
+    return ok({ id: me.id, username: me.username, name: me.name, role: me.role, team: me.team, work_center_id: me.work_center_id });
+  });
 
   /* meta */
   R('GET', '/meta', () => ok({
@@ -382,6 +459,8 @@
     else update('orders', o.id, { status: to });
     if (to === 'running') { const nxt = T('order_steps').filter((s) => s.order_id === o.id && s.status === 'pending').sort((a, b) => a.seq - b.seq)[0]; if (nxt) update('order_steps', nxt.id, { status: 'running' }); }
     writeLog(actor(), '工单状态变更', o.code + ' → ' + label);
+    // 下发时通知已指派班组（派工待办）
+    if (to === 'released') { try { notifyAssign(o, o.id); } catch (e) { /* 忽略 */ } }
     return ok(true);
   });
   R('PATCH', '/orders/(\\d+)/steps/(\\d+)', (m, b) => {
@@ -389,6 +468,13 @@
     update('order_steps', m[1], { assignee_team: b.assignee_team || null, work_center_id: b.work_center_id ? num(b.work_center_id) : null, allow_report: (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1 });
     const o = find('orders', m[0]);
     writeLog(actor(), '工序派工', (o ? o.code : m[0]) + ' 工序#' + m[1] + (b.assignee_team ? ' → ' + b.assignee_team : ''));
+    // 单独指派工序班组时也通知（工单须已在制/已下发）
+    if (b.assignee_team && o && ['released', 'running', 'paused'].indexOf(o.status) >= 0) {
+      try {
+        const step = T('order_steps').filter((s) => s.id === Number(m[1]) && s.order_id === o.id)[0];
+        notifyAssign(o, o.id, step ? [step] : null);
+      } catch (e) { /* 忽略 */ }
+    }
     return ok(true);
   });
   /* 工单工序增减：待下发/已下发/生产中/已暂停 可调整；已完成、已关闭禁止；已报工工序不可删 */
@@ -673,6 +759,65 @@
     return ok({ worker: { id: w.id, name: w.name, team: w.team }, orders });
   });
   R('POST', '/public/reports', (_p, b) => { try { return ok(doReport({ ...b, order_id: num(b.order_id), worker_id: num(b.worker_id) }, find('users', num(b.worker_id)) || actor())); } catch (e) { return fail(e.message, 400); } });
+
+  /* ---- APP 登录态接口（与后端 /api/app/* 同口径）---- */
+  const myOrdersOf = (u) => T('orders').filter((o) => ['released', 'running', 'paused'].includes(o.status)
+    && (T('order_steps').some((s) => s.order_id === o.id && s.assignee_team === u.team)
+      || T('order_steps').some((s) => s.order_id === o.id && !s.assignee_team)))
+    .map(orderRow).map((o) => ({ id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: o.qty_done, qty_bad: o.qty_bad, product_name: o.product_name, spec: o.spec }));
+  R('GET', '/app/my_orders', () => {
+    if (!Store.currentUser) return fail('未登录', 401);
+    const u = Store.currentUser;
+    return ok({ worker: { id: u.id, name: u.name, team: u.team, role: u.role }, orders: myOrdersOf(u) });
+  });
+  R('GET', '/app/order/(\\d+)', (m) => {
+    if (!Store.currentUser) return fail('未登录', 401);
+    const u = Store.currentUser;
+    const o = find('orders', m[0]); if (!o) return fail('工单不存在', 404);
+    const p = find('products', o.product_id) || {};
+    const stepsAll = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq);
+    const lastStep = stepsAll[stepsAll.length - 1];
+    const canManage = ['admin', 'leader'].includes(u.role);
+    const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan,
+      qty_done: lastStep ? num(lastStep.qty_good) : 0,
+      qty_bad: stepsAll.reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
+    const steps = stepsAll.map((s) => {
+      const pr = find('processes', s.process_id) || {};
+      let allow = s.allow_report === 0 ? 0 : 1;
+      if (s.assignee_team && s.assignee_team !== u.team && !canManage) allow = 0;
+      return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad,
+        status: s.status, assignee_team: s.assignee_team || '', allow_report: allow,
+        inspect_type: s.inspect_type || '', inspect_status: s.inspect_status || '',
+        process_name: pr.name, process_code: pr.code };
+    });
+    const allR = T('bad_reasons') || [];
+    const sel = (T('order_bad_reasons') || []).filter((x) => Number(x.order_id) === o.id).map((x) => Number(x.bad_reason_id));
+    const badReasons = (sel.length ? allR.filter((r) => sel.indexOf(r.id) >= 0) : allR).map((r) => ({ id: r.id, name: r.name }));
+    return ok({ order, steps, workers: [{ id: u.id, name: u.name, team: u.team }], badReasons });
+  });
+  R('POST', '/app/reports', (_p, b) => {
+    if (!Store.currentUser) return fail('未登录', 401);
+    try { return ok(doReport({ ...b, worker_id: Store.currentUser.id }, Store.currentUser)); } catch (e) { return fail(e.message, 400); }
+  });
+  R('POST', '/app/inspections', (_p, b) => {
+    if (canInspect()) return fail('无权限', 403);
+    try { return ok(doInspection(b, actor())); } catch (e) { return fail(e.message, 400); }
+  });
+  R('GET', '/inspections/queue', () => {
+    if (canInspect()) return fail('无权限', 403);
+    const u = actor();
+    const steps = T('order_steps').filter((s) => String(s.inspect_status || '') === 'waiting')
+      .map((s) => {
+        const o = find('orders', s.order_id); if (!o || o.status === 'closed') return null;
+        const p = find('processes', s.process_id) || {};
+        const od = find('products', o.product_id) || {};
+        const lw = s.assignee_id ? find('users', s.assignee_id) : null;
+        return { order_step_id: s.id, order_id: s.order_id, seq: s.seq, inspect_type: s.inspect_type,
+          qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, assignee_team: s.assignee_team,
+          process_name: p.name, order_code: o.code, product_name: od.name, last_worker: lw ? lw.name : '' };
+      }).filter(Boolean).sort((a, b) => b.order_step_id - a.order_step_id);
+    return ok({ worker: { id: u.id, name: u.name, team: u.team, role: u.role }, steps, badReasons: T('bad_reasons') || [] });
+  });
 
   // 免登录：质检员待检队列（扫码即判）
   R('GET', '/public/inspector/(\\d+)', (m, _b, q) => {
@@ -989,18 +1134,84 @@
     const a = T('users').find((u) => u.role === 'admin' && u.active);
     return a ? { id: a.id, name: a.name } : { id: null, name: '未指派' };
   }
+  /* ---- 通用消息中心（APP 通知）：场景 quality 质量异常 | stock 库存预警 | assign 派工待办 | system 系统消息 ---- */
+  const MSG_SOURCE_LABEL = { quality: '质量异常', stock: '库存预警', assign: '派工待办', system: '系统消息' };
+  const MSG_KIND_LABEL = { created: '新消息', remind: '催办', escalate: '升级', handled: '已处理', closed: '已闭环', cancelled: '已作废' };
+  function pushMessage(opt) {
+    const ts = nowISO();
+    const src = opt.source || 'system';
+    const users = (Array.isArray(opt.toUsers) ? opt.toUsers : [opt.toUsers]).filter((u) => u && u.id);
+    const seen = {};
+    let n = 0;
+    users.forEach((u) => {
+      if (seen[u.id]) return;
+      seen[u.id] = 1; n++;
+      insert('issue_notifications', {
+        id: nextId('issue_notifications'), issue_id: opt.issue_id || null, to_user_id: u.id, to_name: u.name || '',
+        channel: 'inbox', kind: opt.kind || 'created', title: opt.title || '', body: opt.body || '',
+        source: src, ref_type: opt.ref_type || null, ref_id: opt.ref_id || null, link: opt.link || null,
+        read_at: null, sent_at: ts, ok: 1,
+      });
+    });
+    return n;
+  }
+  function notifyAssign(order, orderId, onlySteps) {
+    const steps = onlySteps && onlySteps.length
+      ? onlySteps.filter((s) => s.assignee_team)
+      : T('order_steps').filter((s) => s.order_id === Number(orderId) && s.assignee_team);
+    if (!steps.length) return 0;
+    const byTeam = {};
+    steps.forEach((s) => { (byTeam[s.assignee_team] = byTeam[s.assignee_team] || []).push(s); });
+    let sent = 0;
+    Object.keys(byTeam).forEach((team) => {
+      const members = T('users').filter((u) => u.team === team && u.active && u.role !== 'admin');
+      if (!members.length) return;
+      const names = byTeam[team].map((s) => s.process_name || ('工序' + s.seq));
+      const plan = byTeam[team][0].qty_plan;
+      sent += pushMessage({
+        source: 'assign', toUsers: members, kind: 'created',
+        title: `新任务：${order.code} 待报工`,
+        body: `产品 ${order.product_name || '-'}　计划 ${plan} 件\n工序：${names.join('、')}\n请到「报工」扫码或选择工单开始生产。`,
+        ref_type: 'order', ref_id: Number(orderId), link: '#/orders',
+      });
+    });
+    return sent;
+  }
+  function scanStockAlerts() {
+    const todayStr = today();
+    const targets = T('users').filter((u) => u.active && (u.role === 'admin' || u.role === 'leader' || String(u.team || '').indexOf('仓') >= 0));
+    let fired = 0;
+    T('materials').filter((m) => m.active !== 0 && Number(m.safe_min) > 0).forEach((m) => {
+      const qty = T('inventory').filter((i) => i.material_id === m.id).reduce((s, i) => s + Number(i.qty || 0), 0);
+      if (!(qty < Number(m.safe_min))) return;
+      const dup = T('stock_alerts').some((a) => a.material_id === m.id && a.alert_date === todayStr);
+      if (dup) return;
+      insert('stock_alerts', { id: nextId('stock_alerts'), material_id: m.id, alert_date: todayStr, level: 'short', qty, safe_min: m.safe_min, created_at: nowISO() });
+      fired += pushMessage({
+        source: 'stock', toUsers: targets, kind: 'created',
+        title: `库存预警：${m.name} 低于安全库存`,
+        body: `物料 ${m.code} ${m.name}\n当前库存 ${qty} ${m.unit}　安全下限 ${m.safe_min} ${m.unit}\n缺口 ${Math.max(0, Number(m.safe_min) - qty)} ${m.unit}，请及时补货。`,
+        ref_type: 'material', ref_id: m.id, link: '#/warehouse',
+      });
+    });
+    return fired;
+  }
   function notifyIssue(issue, toUser, kind, title, body) {
     const ts = nowISO();
     insert('issue_notifications', {
       id: nextId('issue_notifications'), issue_id: issue.id, to_user_id: toUser && toUser.id ? toUser.id : null,
-      to_name: toUser ? toUser.name : '', channel: 'inbox', kind, title, body, read_at: null, sent_at: ts, ok: 1,
+      to_name: toUser ? toUser.name : '', channel: 'inbox', kind, title, body,
+      source: 'quality', ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
+      read_at: null, sent_at: ts, ok: 1,
     });
     if (kind === 'escalate') {
       T('users').filter((u) => u.role === 'admin' && u.active).forEach((a) => {
         if (toUser && a.id === toUser.id) return;
         insert('issue_notifications', {
           id: nextId('issue_notifications'), issue_id: issue.id, to_user_id: a.id, to_name: a.name,
-          channel: 'inbox', kind, title, body, read_at: null, sent_at: ts, ok: 1,
+          channel: 'inbox', kind, title, body,
+          source: 'quality', ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
+          read_at: null, sent_at: ts, ok: 1,
         });
       });
     }
@@ -1103,6 +1314,25 @@
       if (level === 'critical' && ['running', 'released'].includes(order.status)) update('orders', order.id, { status: 'paused' });
     }
     writeLog(act, '提交检验判定', insCode + ' ' + (INSPECT_LABEL[step.inspect_type] || '') + ' ' + conclusion + ' 合格' + qtyPass + '/不合格' + qtyFail);
+    // 通知责任班组：放行 → 可继续流转；不合格 → 已开异常单/工单可能暂停
+    try {
+      const pass = conclusion === 'pass' || conclusion === 'concession';
+      const tos = T('users').filter((u) => u.active && u.role !== 'admin' && (
+        (step.assignee_team && u.team === step.assignee_team) || (step.assignee_id && u.id === step.assignee_id)
+      ) && u.id !== act.id);
+      if (tos.length) {
+        const tail = pass
+          ? `合格 ${qtyPass} 件${conclusion === 'concession' ? '（让步接收）' : ''}${result.autoFinishIn ? '，已自动成品入库 ' + result.autoFinishIn.qty + ' 件' : ''}。`
+          : `不合格 ${qtyFail} 件，已生成质量异常单 ${result.issue ? result.issue.code : ''}${level === 'critical' ? '，工单已暂停待处理' : ''}。`;
+        pushMessage({
+          source: 'quality', toUsers: tos, kind: pass ? 'closed' : 'created',
+          issue_id: result.issue ? result.issue.id : null, ref_type: 'order', ref_id: order.id,
+          link: result.issue ? '#/quality/issue/' + result.issue.id : '#/inspect',
+          title: `${INSPECT_LABEL[step.inspect_type] || '检验'}${pass ? '合格放行' : '不合格'}：${order.code}`,
+          body: `${act.name} 判定：合格 ${qtyPass} / 不合格 ${qtyFail}。${tail}`,
+        });
+      }
+    } catch (e) { /* 通知失败不阻塞检验 */ }
     return result;
   }
 
@@ -1150,9 +1380,20 @@
     if (!it) return fail('异常单不存在', 404);
     const insp = it.inspection_id ? find('inspections', it.inspection_id) : null;
     if (insp) insp.defects = T('inspection_defects').filter((d) => Number(d.inspection_id) === Number(insp.id));
+    const step = it.order_step_id ? find('order_steps', it.order_step_id) : null;
+    const pr = step ? find('processes', step.process_id) : null;
+    const ord = it.order_id ? find('orders', it.order_id) : null;
+    const lastStep = ord ? T('order_steps').filter((s) => s.order_id === ord.id).sort((a, b) => b.seq - a.seq)[0] : null;
     return ok(Object.assign({}, it, {
       inspection: insp,
-      timeline: T('issue_notifications').filter((n) => Number(n.issue_id) === Number(it.id)).sort((a, b) => a.id - b.id),
+      timeline: T('issue_notifications').filter((n) => Number(n.issue_id) === Number(it.id)).sort((a, b) => a.id - b.id)
+        .map((n) => Object.assign({}, n, { source_label: MSG_SOURCE_LABEL[n.source || 'system'] || '消息', kind_label: MSG_KIND_LABEL[n.kind] || n.kind || '' })),
+      step: step ? { id: step.id, seq: step.seq, status: step.status, inspect_status: step.inspect_status,
+        qty_plan: step.qty_plan, qty_good: step.qty_good, qty_bad: step.qty_bad, assignee_team: step.assignee_team,
+        process_name: (step.process_name || (pr ? pr.name : '')) || '' } : null,
+      order: ord ? { id: ord.id, code: ord.code, status: ord.status, qty_plan: ord.qty_plan,
+        qty_done: lastStep ? num(lastStep.qty_good) : 0 } : null,
+      dispositions: DISPOSITION_LABEL,
     }));
   });
   R('POST', '/quality_issues/(\\d+)/claim', (m) => {
@@ -1171,6 +1412,15 @@
     if (!it) return fail('异常单不存在', 404);
     if (['closed', 'cancelled'].includes(it.status)) return fail('该异常单已关闭');
     update('quality_issues', it.id, { status: 'verifying', cause: b.cause || null, action: b.action || null, disposition: b.disposition || null, claimed_at: it.claimed_at || nowISO() });
+    // 抄送原上报人：他关心自己报的异常处理到哪一步了
+    const owners = it.assignee_user_id ? [{ id: it.assignee_user_id, name: it.assignee_name }] : [];
+    const reporter = it.created_by ? T('users').filter((u) => u.id === it.created_by && u.active) : [];
+    pushMessage({
+      source: 'quality', toUsers: owners.concat(reporter), kind: 'handled',
+      issue_id: it.id, ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+      title: `质量异常处理中：${it.code}`,
+      body: `${actor().name} 已提交处理：处置 ${DISPOSITION_LABEL[b.disposition] || '未填'}${b.action ? '，措施：' + b.action : ''}。待验证关闭。`,
+    });
     writeLog(actor(), '处理质量异常', it.code + ' ' + (DISPOSITION_LABEL[b.disposition] || ''));
     return ok(true);
   });
@@ -1196,6 +1446,18 @@
       }
     }
     notifyIssue(it, { id: it.assignee_user_id, name: it.assignee_name }, 'closed', `质量异常已闭环：${it.code}`, `验证人 ${act.name}，处置：${DISPOSITION_LABEL[it.disposition] || '未填'}`);
+    // 上报人也收到闭环消息
+    if (it.created_by && Number(it.created_by) !== Number(it.assignee_user_id)) {
+      const rep = T('users').filter((u) => u.id === it.created_by && u.active);
+      if (rep.length) {
+        pushMessage({
+          source: 'quality', toUsers: rep, kind: 'closed', issue_id: it.id,
+          ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+          title: `质量异常已闭环：${it.code}`,
+          body: `验证人 ${act.name}；处置 ${DISPOSITION_LABEL[it.disposition] || '未填'}。工单已恢复流转。`,
+        });
+      }
+    }
     writeLog(act, '关闭质量异常', it.code);
     return ok(true);
   });
@@ -1220,15 +1482,29 @@
     return ok(it);
   });
 
-  R('GET', '/notifications', () => {
+  R('GET', '/notifications', (_p, _b, q) => {
     if (!Store.currentUser) return ok([]);
-    return ok(T('issue_notifications').filter((n) => Number(n.to_user_id) === Number(Store.currentUser.id) && n.channel === 'inbox')
-      .sort((a, b) => b.id - a.id).slice(0, 100)
-      .map((n) => { const q = find('quality_issues', n.issue_id); return Object.assign({}, n, { issue_code: q ? q.code : '', level: q ? q.level : '', issue_status: q ? q.status : '' }); }));
+    const query = q || {};
+    let rows = T('issue_notifications').filter((n) => Number(n.to_user_id) === Number(Store.currentUser.id) && n.channel === 'inbox');
+    if (query.source) rows = rows.filter((n) => (n.source || 'system') === String(query.source));
+    if (query.unread === '1') rows = rows.filter((n) => !n.read_at);
+    const limit = Math.min(200, Math.max(1, num(query.limit, 100)));
+    return ok(rows.sort((a, b) => b.id - a.id).slice(0, limit)
+      .map((n) => {
+        const q2 = find('quality_issues', n.issue_id);
+        return Object.assign({}, n, {
+          issue_code: q2 ? q2.code : '', level: q2 ? q2.level : '', issue_status: q2 ? q2.status : '',
+          source_label: MSG_SOURCE_LABEL[n.source || 'system'] || '消息',
+          kind_label: MSG_KIND_LABEL[n.kind] || n.kind || '',
+        });
+      }));
   });
   R('GET', '/notifications/unread_count', () => {
-    if (!Store.currentUser) return ok({ count: 0 });
-    return ok({ count: T('issue_notifications').filter((n) => Number(n.to_user_id) === Number(Store.currentUser.id) && n.channel === 'inbox' && !n.read_at).length });
+    if (!Store.currentUser) return ok({ count: 0, by_source: {} });
+    const rows = T('issue_notifications').filter((n) => Number(n.to_user_id) === Number(Store.currentUser.id) && n.channel === 'inbox' && !n.read_at);
+    const bySource = {};
+    rows.forEach((n) => { const s = n.source || 'system'; bySource[s] = (bySource[s] || 0) + 1; });
+    return ok({ count: rows.length, by_source: bySource });
   });
   R('POST', '/notifications/read', (_p, b) => {
     if (!Store.currentUser) return ok(true);
@@ -1236,10 +1512,26 @@
     T('issue_notifications').forEach((n) => {
       if (Number(n.to_user_id) !== uid || n.channel !== 'inbox' || n.read_at) return;
       if (b.id && Number(b.id) !== Number(n.id)) return;
+      if (b.source && String(b.source) !== String(n.source || 'system')) return;
       n.read_at = nowISO();
     });
     save();
     return ok(true);
+  });
+  R('GET', '/message_sources', () => ok(Object.keys(MSG_SOURCE_LABEL).map((k) => ({ key: k, label: MSG_SOURCE_LABEL[k] }))));
+  R('POST', '/stock_alerts/scan', () => {
+    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    return ok({ sent: scanStockAlerts() });
+  });
+  R('GET', '/stock_alerts', () => {
+    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    return ok(T('materials').filter((m) => m.active !== 0).map((m) => {
+      const qty = T('inventory').filter((i) => i.material_id === m.id).reduce((s, i) => s + Number(i.qty || 0), 0);
+      let lv = 'ok';
+      if (Number(m.safe_min) > 0 && qty < Number(m.safe_min)) lv = 'short';
+      else if (m.safe_max != null && Number(m.safe_max) > 0 && qty > Number(m.safe_max)) lv = 'over';
+      return { id: m.id, code: m.code, name: m.name, unit: m.unit, safe_min: m.safe_min, safe_max: m.safe_max, qty, level: lv };
+    }).filter((r) => r.level !== 'ok'));
   });
 
   R('GET', '/quality/settings', () => {

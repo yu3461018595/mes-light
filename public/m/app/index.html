@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#1d4ed8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="智工">
+<title>智工 · 移动工作台</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-512.png">
+<link rel="stylesheet" href="/m/app/app.css">
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <div class="tb-left">
+      <button class="tb-icon" id="tbBack" aria-label="返回" hidden>&#8249;</button>
+      <span class="tb-title" id="tbTitle">智工</span>
+    </div>
+    <div class="tb-right">
+      <button class="tb-icon" id="tbBell" aria-label="消息">
+        <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+          <path d="M12 3a5.5 5.5 0 0 0-5.5 5.5v3.2L5 15h14l-1.5-3.3V8.5A5.5 5.5 0 0 0 12 3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <path d="M9.6 18a2.5 2.5 0 0 0 4.8 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <i class="dot-badge" id="tbBadge" hidden></i>
+      </button>
+    </div>
+  </header>
+
+  <main id="view"><div class="loading">加载中…</div></main>
+
+  <nav class="tabbar" id="tabbar" hidden>
+    <a class="tab" data-tab="home">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20H4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      <span>工作台</span>
+    </a>
+    <a class="tab" data-tab="messages">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m4 6.6 8 5.4 8-5.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      <span>消息</span>
+      <i class="tab-badge" data-badge="messages" hidden></i>
+    </a>
+    <a class="tab" data-tab="mine">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.8 20c.9-3.6 3.7-5.4 7.2-5.4S18.3 16.4 19.2 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <span>我的</span>
+    </a>
+  </nav>
+
+  <div id="toastBox"></div>
+  <div id="sheetBox"></div>
+
+  <script src="/lib/qrcode.js"></script>
+  <script src="/js/store.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/m/app/app.js"></script>
+</body>
+</html>

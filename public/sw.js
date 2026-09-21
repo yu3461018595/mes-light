@@ -4,10 +4,11 @@
  * 注意：PWA 安装提示仅在「安全上下文」(HTTPS 或 localhost) 下出现，
  *       当前阶段一为 HTTP+IP 时不弹安装框，部署 HTTPS 后自动生效。
  */
-const CACHE = 'mes-light-v6';
+const CACHE = 'mes-light-v7';
 const SHELL = [
   '/', '/index.html',
   '/m/', '/m/index.html',
+  '/m/app/', '/m/app/index.html', '/m/app/app.css', '/m/app/app.js',
   '/css/app.css',
   '/lib/qrcode.js',
   '/js/store.js', '/js/api.js', '/js/ui.js',

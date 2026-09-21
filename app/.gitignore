@@ -1,0 +1,8 @@
+node_modules/
+android/
+www/
+.gradle/
+build/
+*.keystore
+package-lock.json
+dist/
