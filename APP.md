@@ -135,7 +135,7 @@ adb install -r app\android\app\build\outputs\apk\debug\app-debug.apk
 
 ---
 
-## 六、当前状态
+## 六、当前状态（已上线）
 
 - [x] H5 移动工作台全部页面完成，渲染冒烟 42/42 通过
 - [x] PWA（manifest 图标尺寸已校正、sw 缓存升 v7 并纳入 APP shell）
@@ -145,6 +145,20 @@ adb install -r app\android\app\build\outputs\apk\debug\app-debug.apk
 - [x] **platform-36 离线安装完成**（长路径手工解包）
 - [x] **`cap add android` + 编译出 APK** —— `BUILD SUCCESSFUL in 5m 36s`
 - [x] 全量回归 **18 个测试文件 / 226 项断言全绿**（约 21 秒）
+- [x] **已推送 GitHub main（`9882d0b7`）并部署上线**
+
+### 线上地址
+
+| 入口 | 地址 |
+|---|---|
+| PC 后台 | `http://114.117.233.47:8080/` |
+| 移动端 / PWA | `http://114.117.233.47:8080/m/app/` |
+| APK 内置入口 | 同上（`capacitor.config.json` 的 `server.url`） |
+
+**登录**：用户名为中文姓名（如 `管理员`、`丁桢`），初始密码 `123456`。
+
+> ⚠️ **线上目前没有「质检员」角色的账号**。一期检验模式虽已上线，
+> 但要真正走「报工 → 待检 → 质检台判定」流程，需先在 PC 后台把某人的角色改成质检员。
 
 ### 产物
 
@@ -157,7 +171,6 @@ adb install -r app\android\app\build\outputs\apk\debug\app-debug.apk
 | 应用名 | 智工MES |
 | versionCode / Name | 1 / 1.0 |
 | compileSdk / targetSdk / minSdk | 36 / 36 / 24（Android 7.0+） |
-| 入口 | `http://114.117.233.47:8080/m/app/`（方案 A，实时加载服务器页面） |
 
 APK 内部含 `assets/public/`（11 个条目：`index.html`、`app.js`、`app.css`、
 `js/store.js`、`js/api.js`、`lib/qrcode.js`、`data/seed.json`、图标等），
@@ -165,6 +178,18 @@ APK 内部含 `assets/public/`（11 个条目：`index.html`、`app.js`、`app.c
 
 > 这是 **debug 包**（无签名），可直接 `adb install` 侧载安装；
 > 正式分发需按第三节做 `assembleRelease` 签名。
+
+### 仓库里不包含 android 原生工程
+
+`push_main.cjs` 的 `EXCLUDE_PATHS` 会跳过 `app/android` 与 `app/www`（构建产物，
+体积大且可重建）。换台电脑后重新生成：
+
+```bat
+cd app && npm install && node build_www.js && npx cap add android
+```
+
+然后按第五节补 `local.properties`、`gradle.properties`（`android.overridePathCheck=true`）、
+`build.gradle`（阿里云仓库）、`gradle-wrapper.properties`（华为云）四处配置。
 
 ---
 
