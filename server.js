@@ -227,7 +227,7 @@ function crud(table, name, opts = {}) {
   route('GET', '/api/' + table, [], (req, res) => {
     ok(res, all(`SELECT * FROM ${table} ORDER BY ${order}`));
   });
-  route('POST', '/api/' + table, ['admin', 'leader'], (req, res, _m, b, u) => {
+  route('POST', '/api/' + table, ['admin', 'technician'], (req, res, _m, b, u) => {
     if (opts.unique) {
       const ex = get(`SELECT id FROM ${table} WHERE ${opts.unique}=?`, [b[opts.unique]]);
       if (ex) return fail(res, '该编码已存在');
@@ -247,7 +247,7 @@ function crud(table, name, opts = {}) {
     writeLog(u, '新增' + name, JSON.stringify(b));
     ok(res, { id });
   });
-  route('PUT', '/api/' + table + '/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+  route('PUT', '/api/' + table + '/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
     const sets = opts.editFields || opts.fields.filter((f) => f !== 'created_at');
     const cv = (f) => {
       const raw = b[f];
@@ -366,7 +366,7 @@ route('GET', '/api/routes/(\\d+)/steps', [], (req, res, m) => {
     FROM route_steps s JOIN processes p ON p.id=s.process_id LEFT JOIN work_centers w ON w.id=s.work_center_id
     WHERE s.route_id=? ORDER BY s.seq`, [m[1]]));
 });
-route('POST', '/api/routes', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/routes', ['admin', 'technician'], (req, res, _m, b, u) => {
   const rid = insert('INSERT INTO routes(code,name,product_id,created_at) VALUES(?,?,?,?)', [b.code, b.name, b.product_id, now()]);
   (b.steps || []).forEach((s) => {
     // 检验点：优先用路线步骤显式指定，缺省则继承工序档案的 inspect_type
@@ -378,7 +378,7 @@ route('POST', '/api/routes', ['admin', 'leader'], (req, res, _m, b, u) => {
   writeLog(u, '新增工艺路线', b.code + ' ' + b.name);
   ok(res, { id: rid });
 });
-route('PUT', '/api/routes/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/routes/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   run('UPDATE routes SET code=?,name=?,product_id=? WHERE id=?', [b.code, b.name, b.product_id, m[1]]);
   run('DELETE FROM route_steps WHERE route_id=?', [m[1]]);
   (b.steps || []).forEach((s) => {
@@ -471,7 +471,7 @@ route('GET', '/api/orders/(\\d+)/bad-reasons', [], (req, res, m) => {
   ok(res, { configured, reasons, selected });
 });
 
-route('PUT', '/api/orders/(\\d+)/bad-reasons', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/orders/(\\d+)/bad-reasons', ['admin', 'technician'], (req, res, m, b, u) => {
   const oid = num(m[1]);
   if (!get('SELECT id FROM orders WHERE id=?', [oid])) return fail(res, '工单不存在', 404);
   const ids = Array.isArray(b.ids) ? b.ids.map((x) => num(x)).filter((x) => x > 0) : [];
@@ -485,7 +485,7 @@ route('PUT', '/api/orders/(\\d+)/bad-reasons', ['admin', 'leader'], (req, res, m
   ok(res, { count: clean.length });
 });
 
-route('POST', '/api/orders', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
   const qty = Math.max(1, Math.floor(num(b.qty_plan, 1)));
   const code = b.code && b.code.trim() ? b.code.trim()
     : 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
@@ -505,7 +505,7 @@ route('POST', '/api/orders', ['admin', 'leader'], (req, res, _m, b, u) => {
   ok(res, { id, code });
 });
 
-route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   if (b.status === 'released' && !get('SELECT 1 FROM order_steps WHERE order_id=? LIMIT 1', [m[1]])) return fail(res, '该工单还没有工序，无法下发（请检查工艺路线是否包含工序）', 400);
@@ -527,7 +527,7 @@ route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'leader'], (req, res, m, b
   ok(res, true);
 });
 
-route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const allowReport = (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1;
   run('UPDATE order_steps SET assignee_team=?, work_center_id=?, allow_report=? WHERE id=? AND order_id=?',
     [b.assignee_team || null, b.work_center_id || null, allowReport, m[2], m[1]]);
@@ -549,7 +549,7 @@ const STEP_EDIT_STATUS = { created: 1, released: 1, running: 1, paused: 1 };
 const ORDER_STATUS_LABEL = { created: '待下发', released: '已下发', running: '生产中', paused: '已暂停', done: '已完成', closed: '已关闭' };
 
 // 增加工序
-route('POST', '/api/orders/(\\d+)/steps', ['admin', 'leader'], (req, res, m, b, u) => {
+route('POST', '/api/orders/(\\d+)/steps', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
@@ -577,7 +577,7 @@ route('POST', '/api/orders/(\\d+)/steps', ['admin', 'leader'], (req, res, m, b, 
 });
 
 // 删除工序
-route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
@@ -593,7 +593,7 @@ route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'leader'], (req, re
 });
 
 // 调整工序顺序：传入完整有序的工序 id 列表，按 10 递增重排 seq（上移/下移/拖拽统一走此接口）
-route('PUT', '/api/orders/(\\d+)/steps/order', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/orders/(\\d+)/steps/order', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整工序');
@@ -610,7 +610,7 @@ route('PUT', '/api/orders/(\\d+)/steps/order', ['admin', 'leader'], (req, res, m
   ok(res, true);
 });
 
-route('PUT', '/api/orders/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/orders/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const before = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!before) return fail(res, '工单不存在', 404);
   if (before.status !== 'created') return fail(res, '只有「待下发」状态的工单可以修改');
@@ -711,17 +711,17 @@ function doReport(b, actor) {
       const step = get('SELECT * FROM order_steps WHERE id=? AND order_id=?', [it.order_step_id, order_id]);
       if (!step) throw new Error('工序不存在（#' + it.order_step_id + '）');
       // 班组权限：工序已指派班组时，仅该班组的员工可报工；未指派则全员可报工。
-      // 管理员/班组长可越权报工（管理兜底），普通员工严格按班组限制。
-      if (step.assignee_team && actor.role !== 'admin' && actor.role !== 'leader') {
+      // 管理员/技术员可越权报工（管理兜底），普通员工严格按班组限制。
+      if (step.assignee_team && actor.role !== 'admin' && actor.role !== 'technician') {
         const wid = num(b.worker_id) || actor.id;
         const wteam = actor.team || (get('SELECT team FROM users WHERE id=?', [wid]) || {}).team;
         if (wteam !== step.assignee_team) {
           throw new Error('工序「' + step.seq + '」限「' + step.assignee_team + '」班组报工（您为「' + (wteam || '未分组') + '」）');
         }
       }
-      // 员工可申报开关：关闭时仅管理员/班组长可报此工序
-      if (step.allow_report === 0 && actor.role !== 'admin' && actor.role !== 'leader') {
-        throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
+      // 员工可申报开关：关闭时仅管理员/技术员可报此工序
+      if (step.allow_report === 0 && actor.role !== 'admin' && actor.role !== 'technician') {
+        throw new Error('工序「' + step.seq + '」需由管理员/技术员报工，员工不可申报');
       }
       const good = Math.max(0, Math.floor(num(it.qty_good)));
       // 不良明细：支持一道工序多种不良（bad_reasons 数组）；旧版单原因兜底
@@ -825,10 +825,10 @@ function doReport(b, actor) {
   return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
 }
 
-// 报工后的负责人通知（操作工 → 班组长/质检员）
+// 报工后的负责人通知（操作工 → 技术员/质检员）
 function notifyAfterReport(order, actor, items, results, product) {
   const workers = [actor];
-  // ① 有不良 → 通知该工单涉及班组的管理者（leader），提醒质量异常跟进
+  // ① 有不良 → 通知该工单涉及班组的管理者（technician），提醒质量异常跟进
   const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
   if (totalBad > 0) {
     const teams = [...new Set(items.map((it) => {
@@ -837,8 +837,8 @@ function notifyAfterReport(order, actor, items, results, product) {
     }).filter(Boolean))];
     const ph = teams.map(() => '?').join(',');
     const leaders = teams.length
-      ? all(`SELECT id,name FROM users WHERE active=1 AND role IN ('leader','admin') AND (team IN (${ph}) OR role='admin')`, teams)
-      : usersByRole('admin', 'leader');
+      ? all(`SELECT id,name FROM users WHERE active=1 AND role IN ('technician','admin') AND (team IN (${ph}) OR role='admin')`, teams)
+      : usersByRole('admin', 'technician');
     pushMessage({
       source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
       title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
@@ -884,7 +884,7 @@ route('POST', '/api/public/reports', [], (req, res, _m, b) => {
   } catch (e) { fail(res, e.message, 400); }
 });
 
-route('DELETE', '/api/reports/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+route('DELETE', '/api/reports/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
   const r = get('SELECT * FROM reports WHERE id=?', [m[1]]);
   if (!r) return fail(res, '记录不存在', 404);
   tx(() => {
@@ -1151,12 +1151,12 @@ route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const canManage = ['admin', 'leader'].includes(u.role);
+  const canManage = ['admin', 'technician'].includes(u.role);
   const steps = all(`SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,
       s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code
     FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
   for (const s of steps) {
-    // 班组不符 → 不可报（管理员/班组长兜底可越权，与 doReport 一致）
+    // 班组不符 → 不可报（管理员/技术员兜底可越权，与 doReport 一致）
     if (s.assignee_team && s.assignee_team !== u.team && !canManage) s.allow_report = 0;
   }
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
@@ -1171,15 +1171,15 @@ route('POST', '/api/app/reports', [], (req, res, _m, b, u) => {
   catch (e) { fail(res, e.message, 400); }
 });
 // APP 提交检验判定（登录态质检员/管理员；doInspection 内部无事务，由外层包裹）
-route('POST', '/api/app/inspections', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
+route('POST', '/api/app/inspections', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {
   let r;
   tx(() => { r = doInspection(b, u); });
   ok(res, r);
 });
 
 /* ---- 扫码免登录（微信扫码入口）---- */
-// 生成工单报工二维码（管理员/班组长）
-route('GET', '/api/qr/order/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+// 生成工单报工二维码（管理员/技术员）
+route('GET', '/api/qr/order/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
   const o = get('SELECT o.id,o.code,p.name product_name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   const token = qrToken('order', o.id);
@@ -1187,8 +1187,8 @@ route('GET', '/api/qr/order/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) =
   ok(res, { order: { id: o.id, code: o.code, product_name: o.product_name }, token, url, svg: makeQr(url) });
 });
 
-// 生成员工报工二维码（管理员/班组长）
-route('GET', '/api/qr/worker/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+// 生成员工报工二维码（管理员/技术员）
+route('GET', '/api/qr/worker/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
   const w = get('SELECT id,name,team FROM users WHERE id=?', [m[1]]);
   if (!w) return fail(res, '员工不存在', 404);
   const token = qrToken('worker', w.id);
@@ -1213,7 +1213,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
-  const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','leader') AND active=1 ORDER BY team,name");
+  const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','technician') AND active=1 ORDER BY team,name");
   const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
   const badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
@@ -1237,8 +1237,8 @@ route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
   ok(res, { worker: w, orders });
 });
 
-// 生成质检员待检队列二维码（管理员/班组长）——质检员扫码进入待检队列直接判定
-route('GET', '/api/qr/inspector/(\\d+)', ['admin', 'leader'], (req, res, m, _b, u) => {
+// 生成质检员待检队列二维码（管理员/技术员）——质检员扫码进入待检队列直接判定
+route('GET', '/api/qr/inspector/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
   const w = get("SELECT id,name,team FROM users WHERE id=? AND role='inspector'", [m[1]]);
   if (!w) return fail(res, '质检员不存在', 404);
   const token = qrToken('worker', w.id);
@@ -1377,7 +1377,7 @@ function autoFinishIn(order, product, good, actor, stepId, reportId, remarkTag) 
  *   pass 合格 → 放行完工（末道触发成品自动入库）
  *   concession 让步接收 → 放行完工，入库单备注「特采」
  *   fail 不合格 → 工序置 inspect_status='failed'，自动生成质量异常单并推送责任管理人员
- * 异常单按「工序指派班组 → 该班组 leader」定责，超时未处理自动抄送/升级。
+ * 异常单按「工序指派班组 → 该班组 technician」定责，超时未处理自动抄送/升级。
  * 严重异常（critical）暂停工单后续工序流转并禁止成品入库，需管理员确认后放行。
  */
 const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
@@ -1392,11 +1392,11 @@ function getSetting(key, def) {
   } catch (e) { return def; }
 }
 
-// 定责：优先该工序指派班组 → 班组 leader；再退工单创建人；最后 admin
+// 定责：优先该工序指派班组 → 班组 technician；再退工单创建人；最后 admin
 function resolveIssueAssignee(step, order) {
   const team = step && step.assignee_team;
   if (team) {
-    const l = get("SELECT id,name FROM users WHERE role='leader' AND team=? AND active=1 ORDER BY id LIMIT 1", [team]);
+    const l = get("SELECT id,name FROM users WHERE role='technician' AND team=? AND active=1 ORDER BY id LIMIT 1", [team]);
     if (l) return l;
   }
   if (order && order.created_by) {
@@ -1513,7 +1513,7 @@ function scanStockAlerts(actor) {
     GROUP BY m.id`);
   const todayStr = today();
   const receivers = usersByRole('admin');
-  const keepers = all("SELECT id,name FROM users WHERE active=1 AND (role='leader' OR IFNULL(team,'') LIKE '%仓%')");
+  const keepers = all("SELECT id,name FROM users WHERE active=1 AND (role='technician' OR IFNULL(team,'') LIKE '%仓%')");
   const targets = receivers.concat(keepers);
   let fired = 0;
   for (const s of stocks) {
@@ -1674,7 +1674,7 @@ function doInspection(b, actor) {
 
 /* ---- 检验接口 ---- */
 // 待检队列（质检台）
-route('GET', '/api/inspections/pending', ['admin', 'leader', 'inspector'], (req, res) => {
+route('GET', '/api/inspections/pending', ['admin', 'technician', 'inspector'], (req, res) => {
   ok(res, all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
       p.name process_name, o.code order_code, o.status order_status, od.name product_name, s.start_time,
       (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
@@ -1698,13 +1698,13 @@ route('GET', '/api/inspections/(\\d+)', [], (req, res, m) => {
   ok(res, i);
 });
 // 提交检验判定
-route('POST', '/api/inspections', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {
+route('POST', '/api/inspections', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {
   let r;
   tx(() => { r = doInspection(b, u); });
   ok(res, r);
 });
 // 质检台队列（APP 质检员扫码登录后进入）——与公开扫码入口同口径，但走登录态
-route('GET', '/api/inspections/queue', ['admin', 'leader', 'inspector'], (req, res, _m, _b, u) => {
+route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (req, res, _m, _b, u) => {
   const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
       s.assignee_team, p.name process_name, o.code order_code, od.name product_name,
       (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
@@ -1742,7 +1742,7 @@ route('GET', '/api/quality_issues/(\\d+)', [], (req, res, m) => {
   ok(res, it);
 });
 // 认领
-route('POST', '/api/quality_issues/(\\d+)/claim', ['admin', 'leader', 'inspector'], (req, res, m, _b, u) => {
+route('POST', '/api/quality_issues/(\\d+)/claim', ['admin', 'technician', 'inspector'], (req, res, m, _b, u) => {
   const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
   if (!it) return fail(res, '异常单不存在', 404);
   if (it.status !== 'open') return fail(res, '该异常单已被认领或已关闭');
@@ -1753,7 +1753,7 @@ route('POST', '/api/quality_issues/(\\d+)/claim', ['admin', 'leader', 'inspector
   ok(res, true);
 });
 // 提交处理（原因/措施/处置方式）→ 待验证
-route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'leader', 'inspector'], (req, res, m, b, u) => {
+route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'technician', 'inspector'], (req, res, m, b, u) => {
   const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
   if (!it) return fail(res, '异常单不存在', 404);
   if (['closed', 'cancelled'].includes(it.status)) return fail(res, '该异常单已关闭');
@@ -1774,7 +1774,7 @@ route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'leader', 'inspecto
   ok(res, true);
 });
 // 验证关闭 → 闭环；若是 critical 且选择让步/返工完成，恢复工单流转
-route('POST', '/api/quality_issues/(\\d+)/close', ['admin', 'leader'], (req, res, m, b, u) => {
+route('POST', '/api/quality_issues/(\\d+)/close', ['admin', 'technician'], (req, res, m, b, u) => {
   const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
   if (!it) return fail(res, '异常单不存在', 404);
   if (it.status === 'closed') return fail(res, '该异常单已关闭');
@@ -1827,7 +1827,7 @@ route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u
   ok(res, true);
 });
 // 报工环节自主上报异常（操作工/质检员均可）
-route('POST', '/api/quality_issues', ['admin', 'leader', 'inspector'], (req, res, _m, b, u) => {  let it;
+route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {  let it;
   tx(() => {
     it = createQualityIssue({
       level: b.level || 'major', source: b.source || 'report',
@@ -1878,13 +1878,13 @@ route('POST', '/api/notifications/read', [], (req, res, _m, b, u) => {
 route('GET', '/api/message_sources', [], (req, res) => {
   ok(res, Object.keys(MSG_SOURCE_LABEL).map((k) => ({ key: k, label: MSG_SOURCE_LABEL[k] })));
 });
-// 手动触发库存预警扫描（admin/leader，APP 下拉刷新或管理员手动催）
-route('POST', '/api/stock_alerts/scan', ['admin', 'leader'], (req, res, _m, _b, u) => {
+// 手动触发库存预警扫描（admin/technician，APP 下拉刷新或管理员手动催）
+route('POST', '/api/stock_alerts/scan', ['admin', 'technician'], (req, res, _m, _b, u) => {
   const n = scanStockAlerts(u);
   ok(res, { sent: n });
 });
 // 库存预警总览（哪些物料缺料 / 积压）
-route('GET', '/api/stock_alerts', ['admin', 'leader'], (req, res) => {
+route('GET', '/api/stock_alerts', ['admin', 'technician'], (req, res) => {
   const rows = all(`SELECT m.id, m.code, m.name, m.unit, m.safe_min, m.safe_max, IFNULL(SUM(i.qty),0) qty
     FROM materials m LEFT JOIN inventory i ON i.material_id=m.id
     WHERE m.active=1 GROUP BY m.id ORDER BY m.code`);
@@ -1897,7 +1897,7 @@ route('GET', '/api/stock_alerts', ['admin', 'leader'], (req, res) => {
   ok(res, out);
 });
 // 通知设置（webhook 地址）
-route('GET', '/api/quality/settings', ['admin', 'leader'], (req, res) => {
+route('GET', '/api/quality/settings', ['admin', 'technician'], (req, res) => {
   ok(res, {
     webhook_url: getSetting('webhook_url', ''),
     escalate_minutes: num(getSetting('escalate_minutes', 240)),
@@ -1952,7 +1952,7 @@ function scanOverdueIssues() {
       if (it.status === 'open' && mins >= remindMin) {
         const already = get("SELECT id FROM issue_notifications WHERE issue_id=? AND kind='remind'", [it.id]);
         if (!already) {
-          const supervisor = get("SELECT id,name FROM users WHERE role='leader' AND team=(SELECT team FROM users WHERE id=?) AND active=1 LIMIT 1", [it.assignee_user_id])
+          const supervisor = get("SELECT id,name FROM users WHERE role='technician' AND team=(SELECT team FROM users WHERE id=?) AND active=1 LIMIT 1", [it.assignee_user_id])
             || get("SELECT id,name FROM users WHERE role='admin' AND active=1 LIMIT 1");
           notifyIssue(it, supervisor, 'remind', `质量异常待认领超 ${remindMin} 分钟：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，请尽快认领处理`);
         }
@@ -1981,7 +1981,7 @@ route('GET', '/api/incoming_materials', [], (req, res) => {
     LEFT JOIN materials m ON m.id=i.material_id LEFT JOIN warehouses w ON w.id=i.warehouse_id
     ORDER BY i.id DESC`));
 });
-route('POST', '/api/incoming_materials', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/incoming_materials', ['admin', 'technician'], (req, res, _m, b, u) => {
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('LM');
   if (get('SELECT id FROM incoming_materials WHERE code=?', [code])) return fail(res, '该来料单号已存在');
   const mid = resolveMaterialId(b);
@@ -2001,7 +2001,7 @@ route('POST', '/api/incoming_materials', ['admin', 'leader'], (req, res, _m, b, 
   writeLog(u, '新增来料记录', code + ' ' + (b.material_name || ''));
   ok(res, { id, code });
 });
-route('PUT', '/api/incoming_materials/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/incoming_materials/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const mid = resolveMaterialId(b);
   fillFromMaterial(b, mid);
   tx(() => {
@@ -2034,7 +2034,7 @@ route('GET', '/api/finished_goods_in', [], (req, res) => {
     LEFT JOIN materials m ON m.id=f.material_id LEFT JOIN warehouses w ON w.id=f.warehouse_id
     ORDER BY f.id DESC`));
 });
-route('POST', '/api/finished_goods_in', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/finished_goods_in', ['admin', 'technician'], (req, res, _m, b, u) => {
   const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('RK');
   if (get('SELECT id FROM finished_goods_in WHERE code=?', [code])) return fail(res, '该入库单号已存在');
   const mid = resolveMaterialId(b);
@@ -2054,7 +2054,7 @@ route('POST', '/api/finished_goods_in', ['admin', 'leader'], (req, res, _m, b, u
   writeLog(u, '新增成品入库', code + ' ' + (b.product_name || ''));
   ok(res, { id, code });
 });
-route('PUT', '/api/finished_goods_in/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/finished_goods_in/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const mid = resolveMaterialId(b);
   fillFromMaterial(b, mid);
   tx(() => {
@@ -2086,7 +2086,7 @@ route('DELETE', '/api/finished_goods_in/(\\d+)', ['admin'], (req, res, m, _b, u)
  *   每次先移除该工单旧的补齐单（source='sync'）并冲销库存，再按最新差额重建 —— 幂等且双向一致。
  * 只处理 source='sync' 的补齐单；人工手工建的入库单（source 为空且 report_id 为空）与
  * 末道报工自动单（report_id 非空）均不受影响。 */
-route('POST', '/api/warehouse/sync_finished', ['admin', 'leader'], (req, res, _m, _b, u) => {
+route('POST', '/api/warehouse/sync_finished', ['admin', 'technician'], (req, res, _m, _b, u) => {
   try {
     const result = { order_count: 0, created: 0, qty: 0, removed: 0 };
     tx(() => {
@@ -2131,7 +2131,7 @@ route('POST', '/api/warehouse/sync_finished', ['admin', 'leader'], (req, res, _m
 route('GET', '/api/materials', [], (req, res) => {
   ok(res, all(`SELECT m.*, w.name warehouse_name FROM materials m LEFT JOIN warehouses w ON w.id=m.warehouse_id ORDER BY m.code`));
 });
-route('POST', '/api/materials', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/materials', ['admin', 'technician'], (req, res, _m, b, u) => {
   const code = String(b.code || '').trim();
   if (!code) return fail(res, '物料编码不能为空');
   if (!b.name || !String(b.name).trim()) return fail(res, '物料名称不能为空');
@@ -2144,7 +2144,7 @@ route('POST', '/api/materials', ['admin', 'leader'], (req, res, _m, b, u) => {
   writeLog(u, '新增物料', code + ' ' + b.name);
   ok(res, { id });
 });
-route('PUT', '/api/materials/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/materials/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const code = String(b.code || '').trim();
   if (!code) return fail(res, '物料编码不能为空');
   const dup = get('SELECT id FROM materials WHERE code=? AND id<>?', [code, m[1]]);
@@ -2164,7 +2164,7 @@ route('DELETE', '/api/materials/(\\d+)', ['admin'], (req, res, m, _b, u) => {
 });
 
 // 一键从产品档案导入成品类物料（已有相同编码的跳过）
-route('POST', '/api/materials/import_products', ['admin', 'leader'], (req, res, _m, _b, u) => {
+route('POST', '/api/materials/import_products', ['admin', 'technician'], (req, res, _m, _b, u) => {
   let n = 0;
   for (const p of all('SELECT code,name,spec,unit FROM products')) {
     if (!p.code) continue;
@@ -2182,7 +2182,7 @@ route('POST', '/api/materials/import_products', ['admin', 'leader'], (req, res, 
 route('GET', '/api/warehouses', [], (req, res) => {
   ok(res, all('SELECT * FROM warehouses ORDER BY code'));
 });
-route('POST', '/api/warehouses', ['admin', 'leader'], (req, res, _m, b, u) => {
+route('POST', '/api/warehouses', ['admin', 'technician'], (req, res, _m, b, u) => {
   const code = String(b.code || '').trim();
   if (!code) return fail(res, '仓库编号不能为空');
   if (get('SELECT id FROM warehouses WHERE code=?', [code])) return fail(res, '该仓库编号已存在');
@@ -2191,7 +2191,7 @@ route('POST', '/api/warehouses', ['admin', 'leader'], (req, res, _m, b, u) => {
   writeLog(u, '新增仓库', code);
   ok(res, { id });
 });
-route('PUT', '/api/warehouses/(\\d+)', ['admin', 'leader'], (req, res, m, b, u) => {
+route('PUT', '/api/warehouses/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const code = String(b.code || '').trim();
   if (get('SELECT id FROM warehouses WHERE code=? AND id<>?', [code, m[1]])) return fail(res, '该仓库编号已存在');
   run('UPDATE warehouses SET code=?,name=?,remark=? WHERE id=?', [code, String(b.name || '').trim() || code, b.remark || null, m[1]]);
@@ -2313,7 +2313,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  ------------------------------------------');
   console.log('  本机访问:  http://localhost:' + PORT);
   console.log('  演示账号:  admin / 123456   (管理员)');
-  console.log('            leader1 / 123456 (班组长)');
+  console.log('            tech1 / 123456 (技术员)');
   console.log('            worker1 / 123456 (操作工)');
   console.log('  数据文件:  ' + path.join(__dirname, 'data', 'mes.db'));
   console.log('  ------------------------------------------');

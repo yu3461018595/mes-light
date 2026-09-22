@@ -73,7 +73,7 @@ Views.basic = {
         api: '/users', name: '人员',
         cols: [
           { t: '账号', f: (r) => `<b>${UI.esc(r.username)}</b>` }, { t: '姓名', k: 'name' },
-          { t: '角色', f: (r) => ({ admin: '<span class="chip chip-blue">管理员</span>', leader: '<span class="chip chip-info">班组长</span>', worker: '<span class="chip chip-gray">操作工</span>' }[r.role] || r.role) },
+          { t: '角色', f: (r) => ({ admin: '<span class="chip chip-blue">管理员</span>', technician: '<span class="chip chip-info">技术员</span>', inspector: '<span class="chip chip-purple">质检员</span>', worker: '<span class="chip chip-gray">操作工</span>' }[r.role] || r.role) },
           { t: '班组', f: (r) => UI.esc(r.team || '—') },
           { t: '默认设备', f: (r) => UI.esc(r.wc_name || '—') },
           { t: '状态', f: (r) => r.active ? '<span class="chip chip-ok">启用</span>' : '<span class="chip chip-gray">停用</span>' },
@@ -81,7 +81,7 @@ Views.basic = {
         fields: [
           { k: 'username', t: '登录账号', req: 1 }, { k: 'name', t: '姓名', req: 1 },
           { k: 'password', t: '密码', type: 'password', hint: '新增时留空默认 123456；编辑时留空表示不修改' },
-          { k: 'role', t: '角色', type: 'select', opts: [['admin', '管理员'], ['leader', '班组长'], ['worker', '操作工']] },
+          { k: 'role', t: '角色', type: 'select', opts: [['admin', '管理员'], ['technician', '技术员'], ['inspector', '质检员'], ['worker', '操作工']] },
           { k: 'team', t: '班组' },
           { k: 'work_center_id', t: '默认工作中心', type: 'select', opts: () => [[null, '不设置']].concat(M.workCenters.map((w) => [w.id, w.code + ' ' + w.name])) },
           { k: 'active', t: '状态', type: 'select', opts: [[1, '启用'], [0, '停用']] },
@@ -145,9 +145,9 @@ Views.basic = {
 
   /* 人员：先角色分组、再班组分组 */
   renderUsersGrouped(rows, canEdit, c) {
-    const roleOrder = ['admin', 'leader', 'worker'];
-    const roleLabel = { admin: '管理员', leader: '班组长', worker: '操作工' };
-    const roleChip = { admin: 'chip-blue', leader: 'chip-info', worker: 'chip-gray' };
+    const roleOrder = ['admin', 'technician', 'worker', 'inspector'];
+    const roleLabel = { admin: '管理员', technician: '技术员', worker: '操作工', inspector: '质检员' };
+    const roleChip = { admin: 'chip-blue', technician: 'chip-info', worker: 'chip-gray', inspector: 'chip-purple' };
     const opCol = canEdit ? [{
       t: '操作', align: 'right', w: '130px',
       f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`

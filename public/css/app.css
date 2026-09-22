@@ -127,6 +127,7 @@ textarea.input{min-height:64px;resize:vertical}
 .chip-warn{background:var(--warn-l);color:var(--warn)}
 .chip-danger{background:var(--danger-l);color:var(--danger)}
 .chip-info{background:var(--info-l);color:var(--info)}
+.chip-purple{background:#f0e9ff;color:#6b3fa0}
 .chip-gray{background:#eef1f5;color:var(--text2)}
 
 .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:500}

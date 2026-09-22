@@ -65,7 +65,7 @@ Views.quality = {
 
   tabs() {
     const t = [['pending', '待检队列'], ['issues', '质量异常单'], ['records', '检验记录'], ['dash', '质量看板']];
-    if (App.user && ['admin', 'leader'].includes(App.user.role)) t.push(['setup', '检验设置']);
+    if (App.user && ['admin', 'technician'].includes(App.user.role)) t.push(['setup', '检验设置']);
     return t;
   },
 
@@ -153,7 +153,7 @@ Views.quality = {
           <div class="stat-s">会暂停工单后续流转并禁止入库</div></div>
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--warn)"></i>指派给我</div>
           <div class="stat-v" style="color:var(--warn)">${mine.length}</div>
-          <div class="stat-s">按工序指派班组的班组长定责</div></div>
+          <div class="stat-s">按工序指派班组的技术员定责</div></div>
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--ok)"></i>已闭环</div>
           <div class="stat-v" style="color:var(--ok)">${stat.total_closed || 0}</div>
           <div class="stat-s">平均响应 ${stat.avg_claim_minutes == null ? '—' : stat.avg_claim_minutes + ' 分钟'}</div></div>
@@ -318,7 +318,7 @@ Views.quality = {
           <div class="stat-s">形成「发现 → 处理 → 验证」完整痕迹</div></div>
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--warn)"></i>超期未闭环</div>
           <div class="stat-v" style="color:${(st.overdue || []).length ? 'var(--danger)' : 'inherit'}">${(st.overdue || []).length}</div>
-          <div class="stat-s">超时自动抄送班组主管 / 升级管理员</div></div>
+          <div class="stat-s">超时自动抄送技术员 / 升级管理员</div></div>
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--primary)"></i>平均响应时长</div>
           <div class="stat-v">${st.avg_claim_minutes == null ? '—' : st.avg_claim_minutes}</div>
           <div class="stat-s">从开单到认领（分钟）</div></div>
@@ -375,7 +375,7 @@ Views.quality = {
           <div class="grid g3">
             <label class="field"><span>待认领催办（分钟）</span>
               <input class="input" type="number" min="1" id="remind" value="${cfg.remind_minutes || 30}" ${isAdmin ? '' : 'disabled'}>
-              <span class="small muted">超过该时长未认领 → 抄送该班组主管</span></label>
+              <span class="small muted">超过该时长未认领 → 抄送该技术员</span></label>
             <label class="field"><span>超时升级（分钟）</span>
               <input class="input" type="number" min="1" id="esc" value="${cfg.escalate_minutes || 240}" ${isAdmin ? '' : 'disabled'}>
               <span class="small muted">超过该时长未处理 → 升级管理员并标记</span></label>
@@ -400,7 +400,7 @@ Views.quality = {
               <li><b>不检验</b>：报工即完工（保持原流程）</li>
             </ul>
             <div style="margin-top:10px">报工流程：员工报工 → 该工序落「<span class="ins-mark waiting">待检</span>」→ 质检员在「待检队列」判定
-              → 合格/让步放行；不合格自动开「质量异常单」，推送给该工序<b>指派班组的班组长</b>跟踪处理，超时自动催办/升级。</div>
+              → 合格/让步放行；不合格自动开「质量异常单」，推送给该工序<b>指派班组的技术员</b>跟踪处理，超时自动催办/升级。</div>
             <div style="margin-top:10px" class="muted">严重异常（终检不合格或不合格占比 ≥ 20%）会暂停工单后续流转并禁止入库，需在异常单里「验证关闭」后放行。</div>
           </div>
         </div>
@@ -483,7 +483,7 @@ Views.quality = {
     catch (e) { el.innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`; return; }
     this.issue = it;
     const canHandle = App.canEdit();
-    const canClose = App.user && ['admin', 'leader'].includes(App.user.role);
+    const canClose = App.user && ['admin', 'technician'].includes(App.user.role);
     const openState = !['closed', 'cancelled'].includes(it.status);
     const insp = it.inspection;
     const levelLabel = (this.LEVEL[it.level] || [it.level])[0];
@@ -505,7 +505,7 @@ Views.quality = {
             <dt>工序</dt><dd>${UI.esc(it.process_name || '—')}</dd>
             <dt>影响数量</dt><dd><b class="mono" style="color:var(--danger)">${UI.n2(it.qty_affected)}</b> 件</dd>
             <dt>不良原因</dt><dd>${UI.esc(it.bad_summary || '—')}</dd>
-            <dt>责任人</dt><dd>${UI.esc(it.assignee_name || '未指派')}（按工序指派班组的班组长定责）</dd>
+            <dt>责任人</dt><dd>${UI.esc(it.assignee_name || '未指派')}（按工序指派班组的技术员定责）</dd>
             <dt>开单时间</dt><dd>${UI.esc(it.created_at || '')}</dd>
             <dt>认领时间</dt><dd>${UI.esc(it.claimed_at || '—')}</dd>
             ${it.closed_at ? `<dt>关闭时间</dt><dd>${UI.esc(it.closed_at)} · 验证人 ${UI.esc(it.verifier || '—')}</dd>` : ''}

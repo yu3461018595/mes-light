@@ -30,8 +30,8 @@
     msgs: [], msgFilter: '',
     pollTimer: null,
   };
-  const ALLOWED = ['admin', 'leader', 'inspector', 'worker'];
-  const ROLE_LABEL = { admin: '管理员', leader: '班组长', inspector: '质检员', worker: '操作工' };
+  const ALLOWED = ['admin', 'technician', 'inspector', 'worker'];
+  const ROLE_LABEL = { admin: '管理员', technician: '技术员', inspector: '质检员', worker: '操作工' };
   const BADGE = { created: ['待处理', 'b-released'], released: ['已下发', 'b-released'], running: ['生产中', 'b-running'],
     paused: ['已暂停', 'b-paused'], done: ['已完成', 'b-done'], closed: ['已关闭', 'b-closed'] };
   const LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
@@ -259,7 +259,7 @@
   async function renderHome() {
     const me = await ensureMe();
     const isInspector = me.role === 'inspector';
-    const isManager = me.role === 'admin' || me.role === 'leader';
+    const isManager = me.role === 'admin' || me.role === 'technician';
     const [orders, openIssues, stocks] = await Promise.all([
       get('/api/app/my_orders').then((r) => r.orders || []).catch(() => []),
       get('/api/quality_issues?open=1').then((r) => r || []).catch(() => []),
@@ -269,7 +269,7 @@
     if (isInspector || isManager) {
       inspectQ = await get('/api/inspections/queue').then((r) => r.steps || []).catch(() => []);
     }
-    // worker 只看自己相关；leader/admin 看全部；inspector 看该班组
+    // worker 只看自己相关；technician/admin 看全部；inspector 看该班组
     const mineIssues = isManager ? openIssues : openIssues.filter((x) => String(x.assignee_user_id) === String(me.id));
     const blocks = [];
 
@@ -412,7 +412,7 @@
       const v = S.vals[s.id] || { good: '', min: '', badRows: [{ reason: '', qty: '', detail: '' }] };
       const waiting = String(s.inspect_status || '') === 'waiting';
       const failed = String(s.inspect_status || '') === 'failed';
-      const note = lock ? '<span class="st-lock">🔒 需管理员/班组长报工</span>'
+      const note = lock ? '<span class="st-lock">🔒 需管理员/技术员报工</span>'
         : failed ? '<span class="st-lock">⚠️ 检验不合格，待异常处理</span>'
         : waiting ? '<span class="st-lock" style="color:#e08a00;background:#fff3e0">⏳ 已报工，待检验</span>'
         : (done ? '<span class="st-lock" style="color:#6b7682;background:#eef1f5">已完成</span>' : '');
@@ -577,7 +577,7 @@
       okMask('报工成功', [
         autoQty ? `末道工序已自动成品入库 ${autoQty} 件` : '',
         need ? `${need} 道工序已转入待检，质检员已收到通知` : '',
-        '已通知对应班组长',
+        '已通知对应技术员',
       ].filter(Boolean).join('<br>'), [
         { text: '继续报工本单', cls: 'ghost', onClick: () => renderOrder(S.order.id) },
         { text: '返回工作台', onClick: () => nav('#/home') },
@@ -674,7 +674,7 @@
   /* ---------------- 页面：质量异常 ---------------- */
   async function renderQuality() {
     const me = await ensureMe();
-    const isManager = me.role === 'admin' || me.role === 'leader' || me.role === 'inspector';
+    const isManager = me.role === 'admin' || me.role === 'technician' || me.role === 'inspector';
     const [all, mine] = await Promise.all([
       get('/api/quality_issues').catch(() => []),
       get('/api/quality_issues?mine=1').catch(() => []),
@@ -715,7 +715,7 @@
   async function renderIssue(id) {
     const it = await get('/api/quality_issues/' + id);
     const me = S.me || {};
-    const canHandle = ['admin', 'leader', 'inspector'].includes(me.role);
+    const canHandle = ['admin', 'technician', 'inspector'].includes(me.role);
     const isOpen = ['open', 'processing', 'verifying'].includes(it.status);
     const defects = (it.inspection && it.inspection.defects) || [];
     $view.innerHTML = `
@@ -750,8 +750,8 @@
       ${isOpen && canHandle ? `<div class="card"><div class="card-b">
         ${it.status === 'open' ? '<button class="btn" id="actClaim">认领并开始处理</button>' : ''}
         ${it.status === 'processing' ? '<button class="btn" id="actHandle">提交处理结果</button>' : ''}
-        ${it.status === 'verifying' && (me.role === 'admin' || me.role === 'leader') ? '<button class="btn ok" id="actClose">验证通过并闭环</button>' : ''}
-        ${it.status === 'verifying' && me.role !== 'admin' && me.role !== 'leader' ? '<div class="tiny center muted">已提交处理，等待管理员验证闭环</div>' : ''}
+        ${it.status === 'verifying' && (me.role === 'admin' || me.role === 'technician') ? '<button class="btn ok" id="actClose">验证通过并闭环</button>' : ''}
+        ${it.status === 'verifying' && me.role !== 'admin' && me.role !== 'technician' ? '<div class="tiny center muted">已提交处理，等待管理员验证闭环</div>' : ''}
       </div></div>` : ''}
       <div style="height:10px"></div>`;
 
@@ -891,7 +891,7 @@
     const me = await ensureMe();
     const pushOn = localStorage.getItem(LS_PUSH) !== '0';
     const counts = await get('/api/notifications/unread_count').catch(() => ({ count: 0, by_source: {} }));
-    const isManager = me.role === 'admin' || me.role === 'leader';
+    const isManager = me.role === 'admin' || me.role === 'technician';
     $view.innerHTML = `
       <div class="profile-head">
         <div class="av">${esc((me.name || '?').slice(0, 1))}</div>

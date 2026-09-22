@@ -89,7 +89,7 @@
   const actor = () => Store.currentUser || { id: 1, name: '系统' };
   // 多角色放行：传入若干角色，当前用户不在其中则视为“无权限”（返回 true 表示拦截）
   const requireRole = (...roles) => !Store.currentUser || !roles.includes(Store.currentUser.role);
-  const requireOrderMgr = () => requireRole('admin', 'leader');
+  const requireOrderMgr = () => requireRole('admin', 'technician');
 
   /* ------------------------------ 聚合/视图 ------------------------------ */
   function computeOrderAgg(o) {
@@ -159,7 +159,7 @@
     items.forEach((it) => {
       const step = find('order_steps', it.order_step_id);
       if (!step || Number(step.order_id) !== Number(b.order_id)) throw new Error('工序不存在（#' + it.order_step_id + '）');
-      if (step.assignee_team && act.role !== 'admin' && act.role !== 'leader') {
+      if (step.assignee_team && act.role !== 'admin' && act.role !== 'technician') {
         const wid = Number(b.worker_id) || act.id;
         const wu = find('users', wid);
         const wteam = (act.team) || (wu && wu.team);
@@ -167,8 +167,8 @@
           throw new Error('工序「' + step.seq + '」限「' + step.assignee_team + '」班组报工（您为「' + (wteam || '未分组') + '」）');
         }
       }
-      if (step.allow_report === 0 && act.role !== 'admin' && act.role !== 'leader') {
-        throw new Error('工序「' + step.seq + '」需由管理员/班组长报工，员工不可申报');
+      if (step.allow_report === 0 && act.role !== 'admin' && act.role !== 'technician') {
+        throw new Error('工序「' + step.seq + '」需由管理员/技术员报工，员工不可申报');
       }
       const good = Math.max(0, Math.floor(num(it.qty_good)));
       // 不良明细：支持一道工序多种不良（bad_reasons 数组）；旧版单原因兜底
@@ -249,14 +249,14 @@
     try { notifyAfterReport(order, act, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
     return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
   }
-  // 报工后的负责人通知（操作工 → 班组长/质检员）
+  // 报工后的负责人通知（操作工 → 技术员/质检员）
   function notifyAfterReport(order, act, items, results, product) {
     const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0); void tg;
     const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad || it.qty_bad || 0))), 0);
     if (totalBad > 0) {
       const teams = [];
       items.forEach((it) => { const s = find('order_steps', it.order_step_id); if (s && s.assignee_team && teams.indexOf(s.assignee_team) < 0) teams.push(s.assignee_team); });
-      const leaders = T('users').filter((u) => u.active && (u.role === 'admin' || (u.role === 'leader' && (!teams.length || teams.indexOf(u.team) >= 0))));
+      const leaders = T('users').filter((u) => u.active && (u.role === 'admin' || (u.role === 'technician' && (!teams.length || teams.indexOf(u.team) >= 0))));
       pushMessage({
         source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
         title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
@@ -727,7 +727,7 @@
     const lastStep = stepsAll[stepsAll.length - 1];
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: lastStep ? num(lastStep.qty_good) : 0, qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
     const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, inspect_type: s.inspect_type || '', inspect_status: s.inspect_status || '', process_name: pr.name, process_code: pr.code }; });
-    const workers = T('users').filter((u) => ['worker', 'leader'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
+    const workers = T('users').filter((u) => ['worker', 'technician'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
   });
   R('GET', '/orders/(\\d+)/bad-reasons', (m) => {
@@ -740,7 +740,7 @@
     return ok({ configured, reasons, selected });
   });
   R('PUT', '/orders/(\\d+)/bad-reasons', (m, b) => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     const oid = Number(m[0]);
     if (!find('orders', oid)) return fail('工单不存在', 404);
     const ids = Array.isArray(b.ids) ? b.ids.map((x) => Number(x)).filter((x) => x > 0) : [];
@@ -777,7 +777,7 @@
     const p = find('products', o.product_id) || {};
     const stepsAll = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq);
     const lastStep = stepsAll[stepsAll.length - 1];
-    const canManage = ['admin', 'leader'].includes(u.role);
+    const canManage = ['admin', 'technician'].includes(u.role);
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan,
       qty_done: lastStep ? num(lastStep.qty_good) : 0,
       qty_bad: stepsAll.reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
@@ -885,8 +885,8 @@
   crud('work_centers', '工作中心', { unique: 'code', onDelete: (id) => { if (T('order_steps').some((s) => s.work_center_id === id) || T('users').some((u) => u.work_center_id === id) || T('route_steps').some((s) => s.work_center_id === id)) return '该工作中心已被使用，无法删除'; return ''; } });
   crud('customers', '客户', { unique: 'code' });
   crud('bad_reasons', '不良原因', { unique: 'name' });
-  crud('materials', '物料档案', { roles: ['admin', 'leader'], unique: 'code', onDelete: (id) => { if (T('inventory_tx').some((t) => Number(t.material_id) === id)) return '该物料已有库存流水，不能删除（可停用）'; return ''; } });
-  crud('warehouses', '仓库', { roles: ['admin', 'leader'], unique: 'code', onDelete: (id) => { if (T('inventory').some((r) => Number(r.warehouse_id) === id)) return '该仓库已有库存记录，不能删除'; return ''; } });
+  crud('materials', '物料档案', { roles: ['admin', 'technician'], unique: 'code', onDelete: (id) => { if (T('inventory_tx').some((t) => Number(t.material_id) === id)) return '该物料已有库存流水，不能删除（可停用）'; return ''; } });
+  crud('warehouses', '仓库', { roles: ['admin', 'technician'], unique: 'code', onDelete: (id) => { if (T('inventory').some((r) => Number(r.warehouse_id) === id)) return '该仓库已有库存记录，不能删除'; return ''; } });
 
   R('POST', '/materials/import_products', () => {
     if (requireOrderMgr()) return fail('无权限', 403);
@@ -1031,7 +1031,7 @@
     return b;
   }
   function docWrite(table, name, txType, prefix) {
-    const check = () => (requireRole('admin', 'leader') ? fail('无权限', 403) : null);
+    const check = () => (requireRole('admin', 'technician') ? fail('无权限', 403) : null);
     R('POST', '/' + table, (_p, b) => {
       const f = check(); if (f) return f;
       const code = b.code || prefix + String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate()) + String(Math.floor(Math.random() * 900) + 100);
@@ -1068,18 +1068,18 @@
       return ok(true);
     });
   }
-  crud('incoming_materials', '来料记录', { roles: ['admin', 'leader'], noWrite: true, noDelete: true });
-  crud('finished_goods_in', '成品入库', { roles: ['admin', 'leader'], noWrite: true, noDelete: true });
+  crud('incoming_materials', '来料记录', { roles: ['admin', 'technician'], noWrite: true, noDelete: true });
+  crud('finished_goods_in', '成品入库', { roles: ['admin', 'technician'], noWrite: true, noDelete: true });
   docWrite('incoming_materials', '来料入库', 'in_incoming', 'LM');
   docWrite('finished_goods_in', '成品入库', 'in_finish', 'RK');
   // 完工入库补齐：把工单末道完工量与该工单自动入库量的差额补生成成品入库单（幂等，可反复执行）
   R('POST', '/warehouse/sync_finished', () => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     try { return ok(syncFinishedStatic()); } catch (e) { return fail(e.message, 400); }
   });
   crud('users', '用户', { admin: true, unique: 'username', onDelete: (id) => { if (Store.currentUser && id === Store.currentUser.id) return '不能删除当前登录的账号'; const rep = T('reports').filter((r) => r.worker_id === id).length; const asg = T('order_steps').filter((s) => s.assignee_id === id).length; if (rep || asg) return `该员工已有 ${rep} 条报工、${asg} 条派工记录，无法删除；如需停用，请在“编辑”中将其状态设为“停用”。`; return ''; } });
   // 工艺路线：写操作走下方专用处理器（会展开 steps → route_steps），故这里 noWrite
-  crud('routes', '工艺路线', { roles: ['admin', 'leader'], unique: 'code', noWrite: true, onDelete: (id) => { if (T('orders').some((o) => o.route_id === id)) return '该工艺路线已被工单使用，无法删除'; return ''; } });
+  crud('routes', '工艺路线', { roles: ['admin', 'technician'], unique: 'code', noWrite: true, onDelete: (id) => { if (T('orders').some((o) => o.route_id === id)) return '该工艺路线已被工单使用，无法删除'; return ''; } });
   // 工艺路线工序明细（编辑回显）
   R('GET', '/routes/(\\d+)/steps', (m) => ok(T('route_steps').filter((s) => s.route_id === Number(m[0])).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const w = s.work_center_id ? find('work_centers', s.work_center_id) : null; return Object.assign({}, s, { process_name: pr.name, process_code: pr.code, wc_name: w ? w.name : '' }); })));
   R('POST', '/routes', (_p, b) => {
@@ -1103,7 +1103,7 @@
   const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
   const ISSUE_LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
   const DISPOSITION_LABEL = { rework: '返工', repair: '返修', concession: '让步接收', scrap: '报废' };
-  const canInspect = () => requireRole('admin', 'leader', 'inspector');
+  const canInspect = () => requireRole('admin', 'technician', 'inspector');
 
   const genCode = (prefix) => {
     const d = new Date();
@@ -1120,11 +1120,11 @@
     const r = T('settings').find((x) => x.key === key);
     if (r) r.value = String(val); else insert('settings', { key, value: String(val) });
   };
-  // 定责：工序指派班组 → 该班组 leader → 工单创建人（非 worker） → 管理员
+  // 定责：工序指派班组 → 该班组 technician → 工单创建人（非 worker） → 管理员
   function resolveIssueAssignee(step, order) {
     const team = step && step.assignee_team;
     if (team) {
-      const l = T('users').find((u) => u.role === 'leader' && u.team === team && u.active);
+      const l = T('users').find((u) => u.role === 'technician' && u.team === team && u.active);
       if (l) return { id: l.id, name: l.name };
     }
     if (order && order.created_by) {
@@ -1179,7 +1179,7 @@
   }
   function scanStockAlerts() {
     const todayStr = today();
-    const targets = T('users').filter((u) => u.active && (u.role === 'admin' || u.role === 'leader' || String(u.team || '').indexOf('仓') >= 0));
+    const targets = T('users').filter((u) => u.active && (u.role === 'admin' || u.role === 'technician' || String(u.team || '').indexOf('仓') >= 0));
     let fired = 0;
     T('materials').filter((m) => m.active !== 0 && Number(m.safe_min) > 0).forEach((m) => {
       const qty = T('inventory').filter((i) => i.material_id === m.id).reduce((s, i) => s + Number(i.qty || 0), 0);
@@ -1425,7 +1425,7 @@
     return ok(true);
   });
   R('POST', '/quality_issues/(\\d+)/close', (m, b) => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     const it = find('quality_issues', m[0]);
     if (!it) return fail('异常单不存在', 404);
     if (it.status === 'closed') return fail('该异常单已关闭');
@@ -1520,11 +1520,11 @@
   });
   R('GET', '/message_sources', () => ok(Object.keys(MSG_SOURCE_LABEL).map((k) => ({ key: k, label: MSG_SOURCE_LABEL[k] }))));
   R('POST', '/stock_alerts/scan', () => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     return ok({ sent: scanStockAlerts() });
   });
   R('GET', '/stock_alerts', () => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     return ok(T('materials').filter((m) => m.active !== 0).map((m) => {
       const qty = T('inventory').filter((i) => i.material_id === m.id).reduce((s, i) => s + Number(i.qty || 0), 0);
       let lv = 'ok';
@@ -1535,7 +1535,7 @@
   });
 
   R('GET', '/quality/settings', () => {
-    if (requireRole('admin', 'leader')) return fail('无权限', 403);
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
     return ok({
       webhook_url: getSetting('webhook_url', ''),
       escalate_minutes: num(getSetting('escalate_minutes', 240), 240),

@@ -353,7 +353,7 @@ Views.orders = {
           <label class="field"><span>允许员工扫码申报</span>
             <select class="input" id="aReport">
               <option value="1"${st.allow_report !== 0 ? ' selected' : ''}>是（员工可报工）</option>
-              <option value="0"${st.allow_report === 0 ? ' selected' : ''}>否（仅管理员/班组长可报）</option>
+              <option value="0"${st.allow_report === 0 ? ' selected' : ''}>否（仅管理员/技术员可报）</option>
             </select></label>`,
         onOk: async (mask) => {
           await API.patch(`/orders/${id}/steps/${st.id}`, {

@@ -45,7 +45,7 @@ const call = (m, u, b) => Store.handle(m, u, b || {});
   r = await call('GET', '/inspections/pending');
   assert(r.ok, '质检员可读待检队列');
   r = await call('GET', '/quality/settings');
-  assert(!r.ok, '质检员不可读检验设置（仅 admin/leader）');
+  assert(!r.ok, '质检员不可读检验设置（仅 admin/technician）');
   await loginAs('admin');
 
   console.log('\n--- 3) 建检验点工单 → 报工落待检 ---');

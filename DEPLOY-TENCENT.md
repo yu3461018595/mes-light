@@ -111,7 +111,7 @@ node deploy/migrate_db.cjs /path/to/mes_live_backup_YYYYMMDD.json
 ## 10. 阶段九：验证与收尾
 - [ ] 浏览器打开 `https://你的域名`，后台可登录（admin/123456）。
 - [ ] **用微信扫一张工单二维码**：应**直接打开**报工页，不再提示「在浏览器打开」。
-- [ ] 在「系统/用户」处**修改默认密码**（admin、leader1、worker1 等均为 123456）。
+- [ ] 在「系统/用户」处**修改默认密码**（admin、tech1、worker1 等均为 123456）。
 - [ ] 页脚挂备案号。
 - [ ] 配置定期备份：把 `/opt/mes-light/data/mes.db` 定时打包到对象存储/其他机器。
 

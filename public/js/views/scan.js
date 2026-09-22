@@ -1,4 +1,4 @@
-/* 扫码报单：为工单 / 员工生成微信可扫的报工二维码（管理员 / 班组长） */
+/* 扫码报单：为工单 / 员工生成微信可扫的报工二维码（管理员 / 技术员） */
 window.Views = window.Views || {};
 Views.scan = {
   title: '扫码报单',
@@ -6,7 +6,7 @@ Views.scan = {
 
   async render(el) {
     if (!App.canEdit()) {
-      el.innerHTML = `<div class="empty">${UI.icon('warn')}<div>仅管理员 / 班组长可生成报工二维码</div></div>`;
+      el.innerHTML = `<div class="empty">${UI.icon('warn')}<div>仅管理员 / 技术员可生成报工二维码</div></div>`;
       return;
     }
     const [meta, orders] = await Promise.all([

@@ -99,7 +99,7 @@ const data = (r) => r.data;
     r = await call('POST', '/notifications/read', {});
     assert(r.ok && data(await call('GET', '/notifications/unread_count')).count === 0, '全部已读后未读归零');
   }
-  // 管理员视角：库存预警场景筛选（预警只发给 admin/leader/仓管）
+  // 管理员视角：库存预警场景筛选（预警只发给 admin/technician/仓管）
   Store.currentUser = users.find((u) => u.role === 'admin');
   await call('POST', '/stock_alerts/scan', {});
   const adminMsgs = data(await call('GET', '/notifications'));

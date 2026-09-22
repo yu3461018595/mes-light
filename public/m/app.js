@@ -206,7 +206,7 @@
       if (sel) cls.push('sel');
       if (lock || done) cls.push('locked');
       const v = S.vals[s.id] || { good: 0, bad: 0, reason: '', min: '' };
-      const note = lock ? '<span class="lock">🔒 需管理员/班组长报工</span>'
+      const note = lock ? '<span class="lock">🔒 需管理员/技术员报工</span>'
         : (done ? '<span class="lock" style="color:#6b7682;background:#eef1f5">已完成</span>' : '');
       const detail = (sel && canReport(s)) ? `
         <div class="subrep">
