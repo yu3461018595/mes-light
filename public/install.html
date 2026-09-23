@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>智工MES · 手机端安装</title>
+<style>
+  :root{
+    --brand:#2f6fed; --brand-d:#1f56c4; --bg:#f5f7fb; --card:#fff;
+    --text:#1f2430; --muted:#6b7280; --line:#e6e9f0;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+  .wrap{max-width:520px;margin:0 auto;padding:24px 18px 40px}
+  .hero{text-align:center;padding:18px 0 8px}
+  .logo{width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,var(--brand),#5b8df8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px;font-weight:700;margin:0 auto 12px;box-shadow:0 8px 20px rgba(47,111,237,.25)}
+  h1{font-size:21px;margin:6px 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0;box-shadow:0 4px 16px rgba(20,30,60,.04)}
+  .qrbox{text-align:center;padding:6px 0 2px}
+  .qrbox img{width:200px;height:200px;image-rendering:pixelated;border:1px solid var(--line);border-radius:12px;background:#fff}
+  .qr-tip{color:var(--muted);font-size:13px;margin-top:10px}
+  .btn{display:block;width:100%;text-align:center;text-decoration:none;background:var(--brand);color:#fff;font-size:17px;font-weight:600;padding:15px;border-radius:12px;margin:14px 0 4px;box-shadow:0 6px 16px rgba(47,111,237,.3)}
+  .btn:active{background:var(--brand-d)}
+  h2{font-size:15px;margin:4px 0 10px;display:flex;align-items:center;gap:8px}
+  .step{display:flex;gap:12px;margin:12px 0;align-items:flex-start}
+  .num{flex:0 0 24px;height:24px;border-radius:50%;background:var(--brand);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;font-weight:700;margin-top:1px}
+  .step p{margin:0;font-size:14px}
+  .step b{color:var(--text)}
+  .note{background:#fff8e6;border:1px solid #ffe2a8;color:#8a6d1f;border-radius:12px;padding:14px;font-size:13px;margin:16px 0}
+  .ios{background:#eef3ff;border:1px solid #cfe0ff;color:#1f56c4;border-radius:12px;padding:14px;font-size:13px;margin:16px 0}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="logo">智</div>
+    <h1>智工MES 手机端</h1>
+    <p class="sub">公司内部安装包 · 版本 v1.0</p>
+  </div>
+
+  <div class="card">
+    <div class="qrbox">
+      <div id="qr"></div>
+      <p class="qr-tip">扫码打开本页，或直接点击下方按钮下载</p>
+    </div>
+    <a class="btn" href="/downloads/mes-app-v1.0.apk" download>⬇ 下载安装包（Android）</a>
+  </div>
+
+  <div class="card">
+    <h2>📲 Android 安装步骤</h2>
+    <div class="step"><div class="num">1</div><p>点击上方按钮下载 <b>mes-app-v1.0.apk</b>。</p></div>
+    <div class="step"><div class="num">2</div><p>若提示“禁止安装”，点<b>“设置”</b>，开启<b>“允许来自此来源的应用”</b>（给当前浏览器 / 文件管理 / 微信授权即可，无需全局开启）。</p></div>
+    <div class="step"><div class="num">3</div><p>返回点击<b>“安装”</b>。小米 / 华为 / OPPO / vivo 等若弹出安全扫描拦截，点<b>“继续安装 / 允许”</b>即可。</p></div>
+    <div class="step"><div class="num">4</div><p>安装完成后打开 App，输入管理员分配的账号登录即可使用。</p></div>
+  </div>
+
+  <div class="ios">
+    🍎 <b>iPhone 用户：</b>苹果不支持直接安装 APK。请在 Safari 打开本系统移动端网页，点<b>“分享 → 添加到主屏幕”</b>，即可在桌面生成图标，使用体验与 App 基本一致。
+  </div>
+
+  <div class="note">
+    ⚠️ 本安装包仅限公司内部使用，请勿转发至外部。App 所有功能均连接公司服务器，账号由管理员统一分配。
+  </div>
+
+  <p class="foot">智工MES · 内部工具</p>
+</div>
+
+<script src="/lib/qrcode.js"></script>
+<script>
+(function(){
+  var url = location.href;
+  var el = document.getElementById('qr');
+  if (typeof qrcode !== 'function') {
+    el.innerHTML = '<p style="color:#c0392b;font-size:13px">二维码组件未能加载</p>';
+    return;
+  }
+  // 二维码版本从小到大尝试，容量不足则自动升级，避免溢出报错
+  for (var t = 4; t <= 40; t++) {
+    try {
+      var qr = qrcode(t, 'M');
+      qr.addData(url);
+      qr.make();
+      el.innerHTML = qr.createImgTag(6, 8);
+      break;
+    } catch (e) { /* 数据过长，尝试更大版本 */ }
+  }
+})();
+</script>
+</body>
+</html>
