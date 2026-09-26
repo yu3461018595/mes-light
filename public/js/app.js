@@ -11,6 +11,7 @@ window.App = {
     { k: 'scan', v: 'scan', t: '扫码报单', roles: ['admin', 'technician'] },
     { k: 'stats', v: 'stats', t: '报表', roles: ['admin', 'technician', 'worker'] },
     { k: 'logs', v: 'logs', t: '日志', roles: ['admin', 'technician'] },
+    { k: 'app', v: 'app', t: '手机端', href: '/install.html', roles: ['admin', 'technician', 'worker', 'inspector'] },
   ],
 
   isAdmin: () => App.user && App.user.role === 'admin',
@@ -40,9 +41,13 @@ window.App = {
     const menu = document.getElementById('menu');
     menu.innerHTML = App.MENU
       .filter((m) => m.roles.includes(App.user.role))
-      .map((m) => `<div class="menu-item" data-k="${m.k}">
-          ${UI.icon(Views[m.v] ? Views[m.v].icon : 'dash')}<span>${m.t}</span></div>`).join('');
-    menu.querySelectorAll('.menu-item').forEach((m) => m.onclick = () => location.hash = '#/' + m.dataset.k);
+      .map((m) => {
+        if (m.href) {
+          return `<a class="menu-item" href="${m.href}" target="_blank" rel="noopener">${UI.icon('phone')}<span>${m.t}</span></a>`;
+        }
+        return `<div class="menu-item" data-k="${m.k}">${UI.icon(Views[m.v] ? Views[m.v].icon : 'dash')}<span>${m.t}</span></div>`;
+      }).join('');
+    menu.querySelectorAll('.menu-item[data-k]').forEach((m) => m.onclick = () => location.hash = '#/' + m.dataset.k);
   },
 
   /* ---------- 登录 ---------- */

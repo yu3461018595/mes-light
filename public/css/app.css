@@ -55,6 +55,7 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke
 .menu-item svg{width:18px;height:18px;flex:none}
 .menu-item:hover{background:var(--line2);color:var(--text)}
 .menu-item.active{background:var(--primary-l);color:var(--primary);font-weight:600}
+a.menu-item{text-decoration:none}
 .menu-group{font-size:11px;color:var(--text3);padding:12px 12px 6px;letter-spacing:1px}
 .side-foot{padding:10px;border-top:1px solid var(--line2)}
 .side-user{display:flex;align-items:center;gap:8px;padding:6px 8px 10px;font-size:13px;color:var(--text2);min-width:0}
