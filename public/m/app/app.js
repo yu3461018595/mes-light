@@ -920,7 +920,7 @@
       <div class="card nopad">
         ${isManager ? `<div class="list-row" id="mStocks"><span class="k">库存预警</span><span class="chev">›</span></div>` : ''}
         <div class="list-row" id="mRefresh"><span class="k">刷新数据</span><span class="v">拉取最新 <span class="chev">›</span></span></div>
-        <div class="list-row"><span class="k">当前版本</span><span class="v">APP 雏形 v0.1（PWA）</span></div>
+        <div class="list-row"><span class="k">当前版本</span><span class="v">智工 v1.0</span></div>
       </div>
 
       <div class="card"><div class="card-b"><button class="btn ghost" id="mLogout">退出登录</button></div></div>
@@ -1005,6 +1005,8 @@
   };
   $title.onclick = () => { if (token()) nav('#/home'); };
   document.getElementById('tbBell').onclick = () => { if (token()) nav('#/messages'); };
+  // 底部导航：工作台 / 消息 / 我的（此前未绑定点击，导致消息、我的点不开）
+  $tabbar.querySelectorAll('.tab').forEach((t) => t.onclick = () => { if (token()) nav('#/' + t.dataset.tab); });
   window.addEventListener('hashchange', route);
   boot();
 })();
