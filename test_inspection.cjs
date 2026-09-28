@@ -145,6 +145,35 @@ async function api(m, u, b, t) {
     const od2 = await H('GET', '/api/orders/' + ord2.data.id);
     chk('工单已完工', od2.data.status === 'done', od2.data.status);
 
+    console.log('\n--- 8b) 一般不合格（非终检、低占比）→ 不开异常单，返工重报回待检 ---');
+    const sfx3 = String(Date.now() + 13).slice(-6);
+    const prod3 = await H('POST', '/api/products', { code: 'IQN-' + sfx3, name: '一般异常测试件' + sfx3, unit: '件', price: 10 });
+    const qm = await H('POST', '/api/processes', { code: 'IQM-' + sfx3, name: '粗车' + sfx3, std_time: 4, std_price: 1, inspect_type: 'ipqc' });
+    const rtm = await H('POST', '/api/routes', { code: 'RTM-' + sfx3, name: '一般路线' + sfx3, product_id: prod3.data.id, steps: [{ seq: 10, process_id: qm.data.id }] });
+    const ord3 = await H('POST', '/api/orders', { product_id: prod3.data.id, route_id: rtm.data.id, qty_plan: 100 });
+    await H('POST', '/api/orders/' + ord3.data.id + '/release', {});
+    const stm = (await H('GET', '/api/orders/' + ord3.data.id)).data.steps;
+    await H('POST', '/api/reports', { order_id: ord3.data.id, order_step_id: stm[0].id, qty_good: 100, qty_bad: 0, work_min: 30 });
+    const insm = await H('POST', '/api/inspections', {
+      order_step_id: stm[0].id, qty_pass: 98, qty_fail: 2, conclusion: 'fail',
+      defects: [{ bad_reason: '表面划伤', qty: 2 }],
+    });
+    chk('一般不合格判定成功', insm.ok, insm);
+    chk('一般不合格（占比2%）不开异常单', !insm.data.issue, insm.data.issue);
+    const stm1 = (await H('GET', '/api/orders/' + ord3.data.id)).data.steps;
+    chk('工序置 failed 待返工', stm1[0].inspect_status === 'failed', stm1[0].inspect_status);
+    const odm = await H('GET', '/api/orders/' + ord3.data.id);
+    chk('工单不暂停', odm.data.status !== 'paused', odm.data.status);
+    // 返工重报 → 自动回待检，复检合格放行
+    const rw = await H('POST', '/api/reports', { order_id: ord3.data.id, order_step_id: stm[0].id, qty_good: 2, qty_bad: 0, work_min: 10 });
+    chk('返工重报成功', rw.ok, rw);
+    const stm2 = (await H('GET', '/api/orders/' + ord3.data.id)).data.steps;
+    chk('返工后回到待检', stm2[0].inspect_status === 'waiting', stm2[0].inspect_status);
+    const insr = await H('POST', '/api/inspections', { order_step_id: stm[0].id, qty_pass: 2, qty_fail: 0, conclusion: 'pass' });
+    chk('复检合格放行', insr.ok && !insr.data.issue, insr.data);
+    const stm3 = (await H('GET', '/api/orders/' + ord3.data.id)).data.steps;
+    chk('复检后工序已放行', stm3[0].inspect_status === 'passed', stm3[0].inspect_status);
+
     console.log('\n--- 9) 质量统计 ---');
     const q = await H('GET', '/api/stats/quality');
     chk('质量统计可用', q.ok, q);

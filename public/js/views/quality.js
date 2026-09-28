@@ -29,7 +29,7 @@ Views.quality = {
     const name = this.INSPECT_LABEL[t] || t;
     const st = String(r.inspect_status || '').trim();
     if (st === 'waiting') return `<span class="ins-mark waiting" title="报工完成，等待质检判定">${name}·待检</span>`;
-    if (st === 'failed') return `<span class="ins-mark failed" title="检验不合格，已开质量异常单">${name}·不合格</span>`;
+    if (st === 'failed') return `<span class="ins-mark failed" title="检验不合格，返修后重新报工送检；重大异常已开单">${name}·不合格</span>`;
     if (st === 'passed') return `<span class="ins-mark passed" title="检验已放行">${name}·已放行</span>`;
     return `<span class="ins-mark" title="该工序为检验点">${name}</span>`;
   },
@@ -85,7 +85,7 @@ Views.quality = {
     el.innerHTML = `
       <div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>待检队列</h3>
-          <span class="small muted">共 <b style="color:var(--warn)">${rows.length}</b> 道工序待判定 · 判定后自动放行或开异常单</span>
+          <span class="small muted">共 <b style="color:var(--warn)">${rows.length}</b> 道工序待判定 · 合格自动放行；重大异常自动开单并上报管理层</span>
           <div class="spacer"></div>
           <button class="btn btn-sm" id="refresh">刷新</button></div>
         <div class="card-b" id="insps">
@@ -117,7 +117,7 @@ Views.quality = {
         <label class="field" style="margin:0"><span>判定结论</span>
           <select class="input" data-k="conclusion">
             <option value="pass">合格放行</option>
-            <option value="fail">不合格（开异常单）</option>
+            <option value="fail">不合格</option>
             <option value="concession">让步接收（特采放行）</option>
           </select></label>
       </div>
@@ -127,7 +127,7 @@ Views.quality = {
         <input class="input" data-k="remark" placeholder="如：抽检 20 件，外观合格"></label>
       <div class="row">
         <button class="btn btn-primary" data-judge="${r.order_step_id}">提交判定</button>
-        <span class="small muted">提交后：合格/让步 → 放行完工${isFinal ? '（末道同时自动成品入库）' : ''}；不合格 → 自动生成质量异常单并推送责任管理人员。</span>
+        <span class="small muted">提交后：合格/让步 → 放行完工${isFinal ? '（末道同时自动成品入库）' : ''}；不合格 → 工序转待返工，返修后重新报工送检；重大异常（终检不合格或不良率≥20%）自动开单并逐级上报管理层。</span>
       </div>
     </div>`;
   },

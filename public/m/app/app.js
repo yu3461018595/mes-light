@@ -665,7 +665,7 @@
       const r = await post('/api/app/inspections', { order_step_id: stepId, qty_pass: qtyPass, qty_fail: qtyFail, conclusion, defects, remark: '' });
       okMask('判定已提交', [
         r && r.autoFinishIn ? `末道工序已自动入库 ${r.autoFinishIn.qty} 件` : '',
-        r && r.issue ? `已生成质量异常单 ${r.issue.code}，责任人 ${r.issue.assignee_name || '—'} 已收到待办` : '',
+        r && r.issue ? `已生成重大质量异常单 ${r.issue.code}，责任人 ${r.issue.assignee_name || '—'} 与管理层已收到待办` : (r && r.conclusion === 'fail' ? '一般不合格：工序已转待返工，返修后重新报工送检' : ''),
         '已通知对应班组',
       ].filter(Boolean).join('<br>'), [{ text: '继续判定', onClick: () => renderInspect() }]);
     } catch (e) { toast(e.message); }

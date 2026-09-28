@@ -1441,7 +1441,7 @@ function usersByRole(...roles) {
   return all(`SELECT id,name,role,team FROM users WHERE role IN (${ph}) AND active=1`, roles);
 }
 
-function notifyIssue(issue, toUser, kind, title, body) {
+function notifyIssue(issue, toUser, kind, title, body, external) {
   const ts = now();
   insert('INSERT INTO issue_notifications(issue_id,to_user_id,to_name,channel,kind,title,body,source,ref_type,ref_id,link,read_at,sent_at,ok) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,1)',
     [issue.id, toUser && toUser.id ? toUser.id : null, toUser ? toUser.name : '', 'inbox', kind, title, body,
@@ -1455,7 +1455,8 @@ function notifyIssue(issue, toUser, kind, title, body) {
         [issue.id, a.id, a.name, 'inbox', kind, title, body, 'quality', 'issue', issue.id, '#/quality/issue/' + issue.id, ts]);
     }
   }
-  pushExternal(issue, kind, title, body);
+  // 上报口径：external !== false 才推外部管理层群；一般异常仅站内，超时升级时再推
+  if (external !== false) pushExternal(issue, kind, title, body);
 }
 
 // 外部推送（企业微信/钉钉群机器人）。webhook 未配置时静默跳过，不影响主流程。
@@ -1559,11 +1560,22 @@ function createQualityIssue(opt) {  const ts = now();
   const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
   const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
   const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
-  notifyIssue(issue, assignee, 'created', title, body);
+  // 上报口径（2026-09-28）：仅重大异常（critical）立即推送管理层（webhook 群 + 管理员站内）；
+  // 一般异常只通知负责人站内待办，超时未处理由 scanOverdueIssues 逐级上报（remind → escalate）。
+  const isCritical = issue.level === 'critical';
+  notifyIssue(issue, assignee, 'created', title, body, isCritical);
+  if (isCritical) {
+    const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => !assignee || a.id !== assignee.id);
+    pushMessage({
+      source: 'quality', toUsers: admins.filter((a) => !assignee || a.id !== assignee.id), kind: 'escalate', issue_id: issue.id,
+      ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
+      title: `重大质量异常：${issue.code}`, body: `${title}　${body}`,
+    });
+  }
   return issue;
 }
 
-// 检验判定 → 写检验记录；不合格自动开异常单
+// 检验判定 → 写检验记录；仅重大异常（critical）自动开异常单并逐级上报管理层，一般不合格待返工重检
 function doInspection(b, actor) {
   const stepId = num(b.order_step_id);
   const step = get('SELECT * FROM order_steps WHERE id=?', [stepId]);
@@ -1634,16 +1646,16 @@ function doInspection(b, actor) {
     const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [order.id]);
     if (left.c === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), order.id]);
   } else {
-    // 不合格 → 工序挂起 + 开异常单
+    // 不合格 → 工序置 failed 待返工（重新报工自动回到待检）；
+    // 仅重大异常（critical：终检不合格或不良率≥20%）自动开异常单并暂停工单、立即上报管理层
     run("UPDATE order_steps SET inspect_status='failed' WHERE id=?", [step.id]);
-    result.issue = createQualityIssue({
-      level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
-      product_id: order.product_id, product_name: product ? product.name : null,
-      process_name: (step.process_name || ('工序' + step.seq)) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
-      qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: actor.id,
-    });
-    // 严重异常：暂停工单，阻塞后续流转
     if (level === 'critical') {
+      result.issue = createQualityIssue({
+        level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
+        product_id: order.product_id, product_name: product ? product.name : null,
+        process_name: (step.process_name || ('工序' + step.seq)) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+        qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: actor.id,
+      });
       run("UPDATE orders SET status='paused' WHERE id=? AND status IN ('running','released')", [order.id]);
     }
   }
@@ -1660,7 +1672,9 @@ function doInspection(b, actor) {
       const head = `${INSPECT_LABEL[step.inspect_type] || '检验'}${pass ? '合格放行' : '不合格'}：${order.code}`;
       const tail = pass
         ? `合格 ${qtyPass} 件${conclusion === 'concession' ? '（让步接收）' : ''}${result.autoFinishIn ? '，已自动成品入库 ' + result.autoFinishIn.qty + ' 件' : ''}。`
-        : `不合格 ${qtyFail} 件，已生成质量异常单 ${result.issue ? result.issue.code : ''}${level === 'critical' ? '，工单已暂停待处理' : ''}。`;
+        : (result.issue
+          ? `不合格 ${qtyFail} 件，已生成重大质量异常单 ${result.issue.code}，工单已暂停待处理。`
+          : `不合格 ${qtyFail} 件，请安排返工返修后重新报工送检。`);
       pushMessage({
         source: 'quality', toUsers: tos, kind: pass ? 'closed' : 'created',
         issue_id: result.issue ? result.issue.id : null, ref_type: 'order', ref_id: order.id,
