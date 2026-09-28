@@ -33,12 +33,20 @@ Views.basic = {
           { t: '编码', f: (r) => `<b>${UI.esc(r.code)}</b>` }, { t: '名称', k: 'name' },
           { t: '标准工时(分/件)', f: (r) => `<span class="mono">${UI.f1(r.std_time)}</span>` },
           { t: '计件单价(¥)', f: (r) => `<span class="mono">${UI.f1(r.std_price)}</span>` },
+          { t: '默认检验点', f: (r) => {
+              const t = String(r.inspect_type || '').trim();
+              if (!t) return '<span class="muted">—</span>';
+              const m = { iqc: ['首检 IQC', 'chip-info'], ipqc: ['过程检 IPQC', 'chip-warn'], fqc: ['终检 FQC', 'chip-danger'] }[t] || [t, 'chip-gray'];
+              return `<span class="chip ${m[1]}">${m[0]}</span>`;
+            } },
           { t: '备注', f: (r) => UI.esc(r.remark || '—') },
         ],
         fields: [
           { k: 'code', t: '工序编码', req: 1 }, { k: 'name', t: '工序名称', req: 1 },
           { k: 'std_time', t: '标准工时(分钟/件)', type: 'number' },
-          { k: 'std_price', t: '计件单价(元)', type: 'number' }, { k: 'remark', t: '备注' },
+          { k: 'std_price', t: '计件单价(元)', type: 'number' },
+          { k: 'inspect_type', t: '默认检验点', type: 'select', opts: [['', '不检验'], ['iqc', '首检 IQC'], ['ipqc', '过程检 IPQC'], ['fqc', '终检 FQC']], hint: '设为检验点后，该工序报工完成将进入质检判定，合格才放行' },
+          { k: 'remark', t: '备注' },
         ],
       },
       workCenters: {
@@ -262,6 +270,12 @@ Views.basic = {
         <input class="input" data-s="seq" type="number" value="${s.seq || 10}" style="width:64px" title="顺序号">
         <select class="input" data-s="process_id" style="flex:1.2">${UI.options(M.processes, s.process_id, 'name')}</select>
         <select class="input" data-s="work_center_id" style="flex:1.2"><option value="">不限设备</option>${UI.options(M.workCenters, s.work_center_id, 'name')}</select>
+        <select class="input" data-s="inspect_type" style="width:96px" title="检验点：报工后需质检判定放行">
+          <option value=""${!String(s.inspect_type || '').trim() ? ' selected' : ''}>不检验</option>
+          <option value="iqc"${s.inspect_type === 'iqc' ? ' selected' : ''}>首检</option>
+          <option value="ipqc"${s.inspect_type === 'ipqc' ? ' selected' : ''}>过程检</option>
+          <option value="fqc"${s.inspect_type === 'fqc' ? ' selected' : ''}>终检</option>
+        </select>
         <input class="input" data-s="std_time" type="number" step="0.1" value="${s.std_time || 0}" style="width:78px" title="标准工时(分)">
         <input class="input" data-s="std_price" type="number" step="0.01" value="${s.std_price || 0}" style="width:78px" title="计件单价">
         <button class="icon-btn" data-rmStep>${UI.icon('close')}</button>
@@ -281,7 +295,7 @@ Views.basic = {
           <h3 style="font-size:14px">工序明细</h3>
           <button class="btn btn-sm" id="addStep">${UI.icon('plus')}添加工序</button>
         </div>
-        <div class="small muted" style="margin-bottom:8px">顺序号 · 工序 · 工作中心 · 标准工时(分钟/件) · 计件单价(元)</div>
+        <div class="small muted" style="margin-bottom:8px">顺序号 · 工序 · 工作中心 · 检验点(首检/过程检/终检，报工后需质检放行) · 标准工时(分钟/件) · 计件单价(元)</div>
         <div id="steps">${steps.map(stepRow).join('') || stepRow({ seq: 10 })}</div>`,
       onMount: (mask) => {
         mask.querySelector('#addStep').onclick = () => {
@@ -305,6 +319,7 @@ Views.basic = {
             seq: Number(r.querySelector('[data-s=seq]').value),
             process_id: Number(r.querySelector('[data-s=process_id]').value),
             work_center_id: r.querySelector('[data-s=work_center_id]').value || null,
+            inspect_type: r.querySelector('[data-s=inspect_type]').value || '',
             std_time: Number(r.querySelector('[data-s=std_time]').value) || 0,
             std_price: Number(r.querySelector('[data-s=std_price]').value) || 0,
           })),

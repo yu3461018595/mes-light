@@ -593,6 +593,23 @@ route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req
   ok(res, true);
 });
 
+// 设置/取消工序检验点：inspect_type 传 '' 取消；要求无报工且未进入检验流程
+route('PUT', '/api/orders/(\\d+)/steps/(\\d+)/inspect', ['admin', 'technician'], (req, res, m, b, u) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整检验点');
+  const st = get('SELECT s.*, p.name pname FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=? AND s.order_id=?', [m[2], m[1]]);
+  if (!st) return fail(res, '工序不存在', 404);
+  const rc = get('SELECT COUNT(*) c FROM reports WHERE order_step_id=?', [m[2]]).c;
+  if (rc) return fail(res, '该工序已有 ' + rc + ' 条报工记录，不能修改检验点');
+  if (st.inspect_status) return fail(res, '该工序已在检验流程中，不能修改检验点');
+  const t = String(b.inspect_type || '').trim();
+  if (t && !INSPECT_LABEL[t]) return fail(res, '无效的检验类型（可选：iqc 首检 / ipqc 过程检 / fqc 终检）');
+  run('UPDATE order_steps SET inspect_type=? WHERE id=?', [t, m[2]]);
+  writeLog(u, '工单设置检验点', o.code + '「' + (st.pname || '#' + m[2]) + '」→ ' + (t ? INSPECT_LABEL[t] : '取消检验点'));
+  ok(res, { inspect_type: t });
+});
+
 // 调整工序顺序：传入完整有序的工序 id 列表，按 10 递增重排 seq（上移/下移/拖拽统一走此接口）
 route('PUT', '/api/orders/(\\d+)/steps/order', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);

@@ -129,6 +129,20 @@ async function api(method, url, body, token) {
     const r5b = await api('DELETE', '/api/orders/' + o2.id + '/steps/' + only.id, null, H);
     chk('至少保留一道工序', !r5b.ok && /保留/.test(r5b.msg || ''), r5b.msg);
 
+    // 5c. 检验点设置/取消/校验 + 增加工序带检验点
+    const ins1 = await api('PUT', '/api/orders/' + o2.id + '/steps/' + only.id + '/inspect', { inspect_type: 'fqc' }, H);
+    chk('设置终检点成功', ins1.ok && ins1.data && ins1.data.inspect_type === 'fqc', JSON.stringify(ins1));
+    let od2 = (await api('GET', '/api/orders/' + o2.id, null, H)).data;
+    chk('工单详情反映检验点', od2.steps[0].inspect_type === 'fqc', JSON.stringify(od2.steps[0].inspect_type));
+    const ins2 = await api('PUT', '/api/orders/' + o2.id + '/steps/' + only.id + '/inspect', { inspect_type: '' }, H);
+    chk('取消检验点成功', ins2.ok && ins2.data.inspect_type === '', JSON.stringify(ins2));
+    const ins3 = await api('PUT', '/api/orders/' + o2.id + '/steps/' + only.id + '/inspect', { inspect_type: 'xxx' }, H);
+    chk('非法检验类型被拒', !ins3.ok && /无效/.test(ins3.msg || ''), ins3.msg);
+    const ins4 = await api('POST', '/api/orders/' + o2.id + '/steps', { process_id: pAdd.id, inspect_type: 'ipqc' }, H);
+    chk('增加工序可指定检验点', ins4.ok, ins4.msg);
+    od2 = (await api('GET', '/api/orders/' + o2.id, null, H)).data;
+    chk('新增工序检验点生效', od2.steps.some((s) => s.inspect_type === 'ipqc'), JSON.stringify(od2.steps.map((s) => s.inspect_type)));
+
     // 6. 完成 / 关闭 状态禁止增删
     await api('PATCH', '/api/orders/' + id + '/status', { status: 'done' }, H);
     const r6 = await api('POST', '/api/orders/' + id + '/steps', { process_id: pAdd.id }, H);

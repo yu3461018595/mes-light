@@ -211,7 +211,7 @@ Views.orders = {
       </div></div>
 
       <div class="card" style="margin-bottom:14px">
-        <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序</span>
+        <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序 · ${o.steps.filter((s) => String(s.inspect_type || '').trim()).length} 个检验点</span>
           <div class="spacer"></div>
           ${canEdit && stepEditable ? `<button class="btn btn-sm btn-primary" id="addStep">${UI.icon('plus')}增加工序</button>` : ''}</div>
         <div class="card-b tight">
@@ -237,6 +237,7 @@ Views.orders = {
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
                 ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}
+                ${canEdit && stepEditable ? `<button class="btn btn-sm" data-inspect="${r.id}" ${busy(r) ? 'disabled title="已有报工，不能修改检验点"' : ''} title="设置/取消检验点">检验点</button>` : ''}
                 ${canEdit && stepEditable ? `<button class="btn btn-sm btn-ghost" data-delstep="${r.id}" ${busy(r) ? 'disabled title="已有报工，需先撤销报工记录"' : ''}>删除</button>` : ''}` },
           ], o.steps)}
         </div>
@@ -378,20 +379,30 @@ Views.orders = {
           <label class="field"><span>插入位置</span><select class="input" id="sPos">${posOpts}</select></label>
           <label class="field"><span>工作中心 / 设备</span>
             <select class="input" id="sWc"><option value="">不指定</option>${UI.options(meta.workCenters, '', 'name')}</select></label>
+          <label class="field"><span>检验点</span>
+            <select class="input" id="sIns">
+              <option value="">跟随工序档案</option>
+              <option value="iqc">首检 IQC</option>
+              <option value="ipqc">过程检 IPQC</option>
+              <option value="fqc">终检 FQC</option>
+            </select></label>
           <label class="field"><span>计划数量</span><input class="input" id="sQty" type="number" min="1" value="${o.qty_plan}"></label>
           <label class="field"><span>指派班组</span>
             <select class="input" id="sTeam"><option value="">不指定（全员可报工）</option>${teams.map((t) => `<option value="${UI.esc(t)}">${UI.esc(t)}</option>`).join('')}</select></label>
-          <div class="small muted">新工序状态为「待生产」，保存后可立即指派班组或报工。</div>`,
+          <div class="small muted">新工序状态为「待生产」，保存后可立即指派班组或报工。设为检验点后，报工完成将进入质检判定，合格才放行；也可直接选用「来料检验 IQC / 过程检验 IPQC / 成品检验 FQC」标准检验工序。</div>`,
         onOk: async (mask) => {
           const pid = mask.querySelector('#sProc').value;
           if (!pid) throw new Error('请选择工序');
-          await API.post('/orders/' + id + '/steps', {
+          const payload = {
             process_id: Number(pid),
             at_pos: Number(mask.querySelector('#sPos').value) || 0,
             work_center_id: mask.querySelector('#sWc').value || null,
             qty_plan: Number(mask.querySelector('#sQty').value) || o.qty_plan,
             assignee_team: mask.querySelector('#sTeam').value || null,
-          });
+          };
+          const ins = mask.querySelector('#sIns').value;
+          if (ins) payload.inspect_type = ins;
+          await API.post('/orders/' + id + '/steps', payload);
           UI.toast('工序已增加', 'ok');
           App.render();
         },
@@ -405,6 +416,27 @@ Views.orders = {
         UI.toast('工序已删除', 'ok');
         App.render();
       } catch (e) { UI.toast(e.message, 'err'); }
+    });
+    el.querySelectorAll('[data-inspect]').forEach((b) => b.onclick = () => {
+      const st = o.steps.find((x) => x.id == b.dataset.inspect);
+      if (!st) return;
+      const cur = String(st.inspect_type || '').trim();
+      UI.modal({
+        title: '检验点 · 第 ' + (st.seq_no || st.seq) + ' 道 ' + st.process_name,
+        body: `<label class="field"><span>检验类型</span>
+            <select class="input" id="iType">
+              <option value=""${!cur ? ' selected' : ''}>不检验（普通工序）</option>
+              <option value="iqc"${cur === 'iqc' ? ' selected' : ''}>首检 IQC（开工首件/来料把关）</option>
+              <option value="ipqc"${cur === 'ipqc' ? ' selected' : ''}>过程检 IPQC（过程中抽检把关）</option>
+              <option value="fqc"${cur === 'fqc' ? ' selected' : ''}>终检 FQC（完工最终检验）</option>
+            </select></label>
+          <div class="small muted">设为检验点后：该工序报工完成 → 状态「待检」，由质检员在「质量」页判定；合格放行，重大不合格自动开异常单并暂停工单。已有报工或已进入检验流程的工序不能修改。</div>`,
+        onOk: async (mask) => {
+          await API.put('/orders/' + id + '/steps/' + st.id + '/inspect', { inspect_type: mask.querySelector('#iType').value });
+          UI.toast('检验点已更新', 'ok');
+          App.render();
+        },
+      });
     });
     const moveStep = async (stepId, dir) => {
       const i = stepIndex[stepId];

@@ -543,6 +543,22 @@
     writeLog(actor(), '工单工序排序', o.code + ' 调整为 ' + ids.length + ' 道工序的新顺序');
     return ok(true);
   });
+  R('PUT', '/orders/(\\d+)/steps/(\\d+)/inspect', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整检验点');
+    const st = find('order_steps', m[1]);
+    if (!st || st.order_id !== o.id) return fail('工序不存在', 404);
+    const hasRep = T('reports').some((r) => r.order_step_id === st.id) || num(st.qty_good) || num(st.qty_bad);
+    if (hasRep) return fail('该工序已有报工记录，不能修改检验点');
+    if (st.inspect_status) return fail('该工序已在检验流程中，不能修改检验点');
+    const t = String((b || {}).inspect_type || '').trim();
+    if (t && !['iqc', 'ipqc', 'fqc'].includes(t)) return fail('无效的检验类型');
+    update('order_steps', st.id, { inspect_type: t });
+    writeLog(actor(), '工单设置检验点', o.code + ' → ' + (t || '取消检验点'));
+    return ok({ inspect_type: t });
+  });
   R('DELETE', '/orders/(\\d+)', (m) => {
     if (requireRole('admin')) return fail('无权限', 403);
     const o = find('orders', m[0]);
