@@ -94,7 +94,7 @@ Views.report = {
             <div class="step-card ${s.id === pick.id ? 'active' : ''} ${s.status === 'done' ? 'done' : ''}" data-s="${s.id}">
               <div class="row" style="justify-content:space-between">
                 <div>
-                  <b>${s.seq} ${UI.esc(s.process_name)}</b>
+                  <b>${s.seq_no || s.seq} ${UI.esc(s.process_name)}</b>
                   <div class="small muted">${UI.esc(s.wc_name || '未指定设备')} · 责任人 ${UI.esc(s.assignee_name || '暂无')}</div>
                 </div>
                 <div style="text-align:right">

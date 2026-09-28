@@ -431,7 +431,8 @@ route('GET', '/api/orders', [], (req, res, _m, _b, _u, query) => {
 route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   const o = get(ORDER_SQL + ' WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, w.name wc_name, s.assignee_team
+  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, w.name wc_name, s.assignee_team,
+      (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s
     JOIN processes pr ON pr.id=s.process_id
     LEFT JOIN work_centers w ON w.id=s.work_center_id
@@ -853,8 +854,9 @@ function notifyAfterReport(order, actor, items, results, product) {
     const tos = inspectors.filter((x) => x.id !== actor.id);
     if (tos.length) {
       const names = waiting.map((r) => {
-        const s = get('SELECT p.name process_name FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?', [r.order_step_id]);
-        return s && s.process_name ? s.process_name + '（第' + r.seq + '道）' : '第' + r.seq + '道';
+        const s = get('SELECT p.name process_name, s.order_id, s.seq FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?', [r.order_step_id]);
+        const no = s ? stepSeqNo(s.order_id, s.seq) : r.seq;
+        return s && s.process_name ? s.process_name + '（第' + no + '道）' : '第' + no + '道';
       });
       pushMessage({
         source: 'quality', toUsers: tos, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/inspect',
@@ -1153,7 +1155,8 @@ route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
   if (!o) return fail(res, '工单不存在', 404);
   const canManage = ['admin', 'technician'].includes(u.role);
   const steps = all(`SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,
-      s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code
+      s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code,
+      (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
   for (const s of steps) {
     // 班组不符 → 不可报（管理员/技术员兜底可越权，与 doReport 一致）
@@ -1212,7 +1215,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
       p.name product_name,p.spec
     FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
+  const steps = all('SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code,(SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq', [m[1]]);
   const workers = all("SELECT id,name,team FROM users WHERE role IN ('worker','technician') AND active=1 ORDER BY team,name");
   const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
@@ -1253,7 +1256,8 @@ route('GET', '/api/public/inspector/(\\d+)', [], (req, res, m, _b, _u, q) => {
   if (!w) return fail(res, '用户不存在', 404);
   const steps = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
       p.name process_name, p.code process_code, o.code order_code, o.status order_status, od.name product_name,
-      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
+      (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN orders o ON o.id=s.order_id
     LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
     WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed') ORDER BY s.id DESC LIMIT 200`);
@@ -1393,6 +1397,11 @@ function getSetting(key, def) {
 }
 
 // 定责：优先该工序指派班组 → 班组 technician；再退工单创建人；最后 admin
+// 工序在其工单内的显示道次（seq 按 10 递增存储，展示时换算为 1 开始的顺序号）
+function stepSeqNo(orderId, seq) {
+  return num(get('SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND seq<?', [orderId, seq]).c) + 1;
+}
+
 function resolveIssueAssignee(step, order) {
   const team = step && step.assignee_team;
   if (team) {
@@ -1491,7 +1500,7 @@ function notifyAssign(order, orderId, onlySteps) {
   for (const team of Object.keys(byTeam)) {
     const members = all("SELECT id,name FROM users WHERE team=? AND active=1 AND role<>'admin'", [team]);
     if (!members.length) continue;
-    const names = byTeam[team].map((s) => s.process_name || ('工序' + s.seq));
+    const names = byTeam[team].map((s) => s.process_name || ('工序' + stepSeqNo(s.order_id, s.seq)));
     const plan = byTeam[team][0].qty_plan;
     sent += pushMessage({
       source: 'assign',
@@ -1653,7 +1662,7 @@ function doInspection(b, actor) {
       result.issue = createQualityIssue({
         level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
         product_id: order.product_id, product_name: product ? product.name : null,
-        process_name: (step.process_name || ('工序' + step.seq)) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+        process_name: (step.process_name || ('工序' + stepSeqNo(step.order_id, step.seq))) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
         qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: actor.id,
       });
       run("UPDATE orders SET status='paused' WHERE id=? AND status IN ('running','released')", [order.id]);
@@ -1691,7 +1700,8 @@ function doInspection(b, actor) {
 route('GET', '/api/inspections/pending', ['admin', 'technician', 'inspector'], (req, res) => {
   ok(res, all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
       p.name process_name, o.code order_code, o.status order_status, od.name product_name, s.start_time,
-      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
+      (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN orders o ON o.id=s.order_id
     LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
     WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed')
@@ -1721,7 +1731,8 @@ route('POST', '/api/inspections', ['admin', 'technician', 'inspector'], (req, re
 route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (req, res, _m, _b, u) => {
   const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
       s.assignee_team, p.name process_name, o.code order_code, od.name product_name,
-      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker
+      (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
+      (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN orders o ON o.id=s.order_id
     LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
     WHERE s.inspect_status='waiting' AND o.status<>'closed'

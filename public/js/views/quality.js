@@ -101,7 +101,7 @@ Views.quality = {
     const qty = Number(r.qty_good) || 0;
     const bad = Number(r.qty_bad) || 0;
     return `<div class="insp-step ${isFinal ? 'crit' : ''}" id="insp${r.order_step_id}">
-      <h4>${UI.esc(r.order_code)} · 第 ${r.seq} 道 <b>${UI.esc(r.process_name)}</b>
+      <h4>${UI.esc(r.order_code)} · 第 ${r.seq_no || r.seq} 道 <b>${UI.esc(r.process_name)}</b>
         <span class="ins-mark ${isFinal ? 'failed' : ''}">${this.INSPECT_LABEL[r.inspect_type] || '检验'}</span>
         ${isFinal ? '<span class="chip chip-danger">终检</span>' : ''}</h4>
       <div class="small muted">

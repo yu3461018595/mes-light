@@ -234,8 +234,8 @@ Views.basic = {
       { t: '编码', f: (r) => `<b>${UI.esc(r.code)}</b>` },
       { t: '名称', k: 'name' },
       { t: '产品', f: (r) => `${UI.esc(r.product_name)} <span class="small muted">${UI.esc(r.product_code)}</span>` },
-      { t: '工序', w: '46%', f: (r) => stepCache[r.id].map((s) =>
-        `<span class="chip chip-gray" style="margin:2px 4px 2px 0">${s.seq} ${UI.esc(s.process_name)}</span>`).join('') },
+      { t: '工序', w: '46%', f: (r) => stepCache[r.id].slice().sort((a, b) => a.seq - b.seq).map((s, i) =>
+        `<span class="chip chip-gray" style="margin:2px 4px 2px 0">${i + 1} ${UI.esc(s.process_name)}</span>`).join('') },
       { t: '工序数', f: (r) => stepCache[r.id].length, align: 'right' },
       App.canEdit() ? {
         t: '操作', align: 'right', w: '130px',

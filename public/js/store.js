@@ -116,6 +116,10 @@
       route_code: r.code, route_name: r.name, customer_name: c ? c.name : '',
     }));
   }
+  // 工序在其工单内的显示道次（seq 按 10 递增存储，展示换算为 1 开始的顺序号）
+  function stepOrd(s) {
+    return T('order_steps').filter((x) => x.order_id === s.order_id && num(x.seq) < num(s.seq)).length + 1;
+  }
   function stepView(s) {
     const pr = find('processes', s.process_id) || {};
     const w = s.work_center_id ? find('work_centers', s.work_center_id) : null;
@@ -271,7 +275,8 @@
           const s = find('order_steps', r.order_step_id);
           const p = s ? find('processes', s.process_id) : null;
           const nm = s ? (s.process_name || (p ? p.name : '')) : '';
-          return nm ? nm + '（第' + r.seq + '道）' : '第' + r.seq + '道';
+          const no = s ? stepOrd(s) : r.seq;
+          return nm ? nm + '（第' + no + '道）' : '第' + no + '道';
         });
         pushMessage({
           source: 'quality', toUsers: tos, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/inspect',
@@ -404,7 +409,7 @@
     const o = find('orders', m[0]);
     if (!o) return fail('工单不存在', 404);
     const out = orderRow(o);
-    out.steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map(stepView);
+    out.steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s, i) => Object.assign(stepView(s), { seq_no: i + 1 }));
     out.reports = T('reports').filter((r) => r.order_id === o.id).sort((a, b) => b.id - a.id).slice(0, 100).map(reportView);
     return ok(out);
   });
@@ -726,7 +731,7 @@
     const stepsAll = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq);
     const lastStep = stepsAll[stepsAll.length - 1];
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, qty_done: lastStep ? num(lastStep.qty_good) : 0, qty_bad: T('order_steps').filter((s) => s.order_id === o.id).reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
-    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, inspect_type: s.inspect_type || '', inspect_status: s.inspect_status || '', process_name: pr.name, process_code: pr.code }; });
+    const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq).map((s) => { const pr = find('processes', s.process_id) || {}; const au = s.assignee_id ? find('users', s.assignee_id) : null; return { id: s.id, seq: s.seq, seq_no: stepOrd(s), qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, status: s.status, assignee_id: s.assignee_id, assignee_team: s.assignee_team || '', assignee_name: au ? au.name : '', allow_report: s.allow_report === 0 ? 0 : 1, inspect_type: s.inspect_type || '', inspect_status: s.inspect_status || '', process_name: pr.name, process_code: pr.code }; });
     const workers = T('users').filter((u) => ['worker', 'technician'].includes(u.role) && u.active).map((u) => ({ id: u.id, name: u.name, team: u.team }));
     return ok({ order, steps, workers });
   });
@@ -785,7 +790,7 @@
       const pr = find('processes', s.process_id) || {};
       let allow = s.allow_report === 0 ? 0 : 1;
       if (s.assignee_team && s.assignee_team !== u.team && !canManage) allow = 0;
-      return { id: s.id, seq: s.seq, qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad,
+      return { id: s.id, seq: s.seq, seq_no: stepOrd(s), qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad,
         status: s.status, assignee_team: s.assignee_team || '', allow_report: allow,
         inspect_type: s.inspect_type || '', inspect_status: s.inspect_status || '',
         process_name: pr.name, process_code: pr.code };
@@ -812,7 +817,7 @@
         const p = find('processes', s.process_id) || {};
         const od = find('products', o.product_id) || {};
         const lw = s.assignee_id ? find('users', s.assignee_id) : null;
-        return { order_step_id: s.id, order_id: s.order_id, seq: s.seq, inspect_type: s.inspect_type,
+        return { order_step_id: s.id, order_id: s.order_id, seq: s.seq, seq_no: stepOrd(s), inspect_type: s.inspect_type,
           qty_plan: s.qty_plan, qty_good: s.qty_good, qty_bad: s.qty_bad, assignee_team: s.assignee_team,
           process_name: p.name, order_code: o.code, product_name: od.name, last_worker: lw ? lw.name : '' };
       }).filter(Boolean).sort((a, b) => b.order_step_id - a.order_step_id);
@@ -1166,7 +1171,7 @@
     Object.keys(byTeam).forEach((team) => {
       const members = T('users').filter((u) => u.team === team && u.active && u.role !== 'admin');
       if (!members.length) return;
-      const names = byTeam[team].map((s) => s.process_name || ('工序' + s.seq));
+      const names = byTeam[team].map((s) => s.process_name || ('工序' + stepOrd(s)));
       const plan = byTeam[team][0].qty_plan;
       sent += pushMessage({
         source: 'assign', toUsers: members, kind: 'created',
@@ -1305,13 +1310,16 @@
       }
     } else {
       update('order_steps', step.id, { inspect_status: 'failed' });
-      result.issue = createQualityIssue({
-        level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
-        product_id: order.product_id, product_name: product.name,
-        process_name: (step.process_name || (find('processes', step.process_id) || {}).name || ('工序' + step.seq)) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
-        qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: act.id,
-      });
-      if (level === 'critical' && ['running', 'released'].includes(order.status)) update('orders', order.id, { status: 'paused' });
+      // 上报口径与 server.js 一致：仅重大异常（critical）自动开异常单并暂停工单；一般不合格待返工重检
+      if (level === 'critical') {
+        result.issue = createQualityIssue({
+          level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
+          product_id: order.product_id, product_name: product.name,
+          process_name: (step.process_name || (find('processes', step.process_id) || {}).name || ('工序' + stepOrd(step))) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+          qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: act.id,
+        });
+        if (['running', 'released'].includes(order.status)) update('orders', order.id, { status: 'paused' });
+      }
     }
     writeLog(act, '提交检验判定', insCode + ' ' + (INSPECT_LABEL[step.inspect_type] || '') + ' ' + conclusion + ' 合格' + qtyPass + '/不合格' + qtyFail);
     // 通知责任班组：放行 → 可继续流转；不合格 → 已开异常单/工单可能暂停

@@ -62,7 +62,7 @@
         const isFinal = String(s.inspect_type) === 'fqc';
         return `<div class="card insp" data-s="${s.order_step_id}">
           <div class="card-b">
-            <div class="ocode" style="font-size:15px">${esc(s.order_code)} · 第 ${s.seq} 道 ${esc(s.process_name)}
+            <div class="ocode" style="font-size:15px">${esc(s.order_code)} · 第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}
               <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${INSPECT_LABEL[s.inspect_type] || '检验'}</span></div>
             <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
             <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>
@@ -219,7 +219,7 @@
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
         <div class="step-main">
-          <div class="nm">${s.seq}. ${esc(s.process_name)}</div>
+          <div class="nm">${s.seq_no || s.seq}. ${esc(s.process_name)}</div>
           <div class="sub">${esc(s.process_code || '')} · 指派班组 ${esc(s.assignee_team || '暂无')}${done ? ' · 已完成' : ''} · 已报 ${s.qty_good}/${s.qty_plan}</div>
           ${note}
         </div>

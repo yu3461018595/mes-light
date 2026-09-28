@@ -320,7 +320,7 @@
           <div class="item" data-go="inspect">
             <div class="avatar" style="background:#e8efff">🔍</div>
             <div class="body">
-              <div class="t1">${esc(s.order_code)} · 第 ${s.seq} 道 ${esc(s.process_name)}</div>
+              <div class="t1">${esc(s.order_code)} · 第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}</div>
               <div class="t2">${esc(s.product_name || '')} · 已报合格 ${s.qty_good}/${s.qty_plan}</div>
               <div class="t3"><span class="badge b-paused">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span>
                 <span>指派班组 ${esc(s.assignee_team || '暂无')}</span></div>
@@ -431,7 +431,7 @@
         </div>` : '';
       return `<div class="${cls.join(' ')}" data-s="${s.id}">
         <div class="st-main">
-          <div class="st-nm">${s.seq}. ${esc(s.process_name)}</div>
+          <div class="st-nm">${s.seq_no || s.seq}. ${esc(s.process_name)}</div>
           <div class="st-sub">${esc(s.process_code || '')} · 指派班组 ${esc(s.assignee_team || '暂无')}${
             s.inspect_type ? ' · 检验点 ' + esc(INSPECT_LABEL[s.inspect_type] || '检验') : ''}<br>已报 ${s.qty_good}/${s.qty_plan}${s.qty_bad ? ' · 不良 ' + s.qty_bad : ''}</div>
           ${note}
@@ -622,7 +622,7 @@
       ${list.length ? list.map((s) => {
         const isFinal = String(s.inspect_type) === 'fqc';
         return `<div class="card insp" data-s="${s.order_step_id}"><div class="card-b">
-          <div class="ocode" style="font-size:16px">${esc(s.order_code)} · 第 ${s.seq} 道 ${esc(s.process_name)}
+          <div class="ocode" style="font-size:16px">${esc(s.order_code)} · 第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}
             <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span></div>
           <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
           <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>

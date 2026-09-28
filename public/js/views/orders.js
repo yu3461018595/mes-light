@@ -216,7 +216,7 @@ Views.orders = {
           ${canEdit && stepEditable ? `<button class="btn btn-sm btn-primary" id="addStep">${UI.icon('plus')}增加工序</button>` : ''}</div>
         <div class="card-b tight">
           ${UI.table([
-            { t: '序', f: (r) => `<span class="mono muted">${r.seq}</span>` },
+            { t: '序', f: (r) => `<span class="mono muted">${r.seq_no || r.seq}</span>` },
             { t: '移动', align: 'center', w: '62px', f: (r) => {
                 if (!(canEdit && stepEditable)) return '';
                 const i = stepIndex[r.id];
