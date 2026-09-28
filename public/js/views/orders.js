@@ -148,10 +148,12 @@ Views.orders = {
 
   /* ---------- 详情 ---------- */
   async detail(el, id) {
-    const [o, meta, issues] = await Promise.all([
+    const [o, meta, issues, matIssues, shipments] = await Promise.all([
       API.get('/orders/' + id),
       API.get('/meta'),
       API.get('/quality_issues').catch(() => []),
+      API.get('/material_issues?order_id=' + id).catch(() => []),
+      API.get('/stock_shipments?order_id=' + id).catch(() => []),
     ]);
     const myIssues = (issues || []).filter((x) => Number(x.order_id) === Number(id));
     const openIssues = myIssues.filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
@@ -242,6 +244,30 @@ Views.orders = {
           ], o.steps)}
         </div>
       </div>
+
+      ${(matIssues.length || shipments.length) ? (() => {
+        const pickT = matIssues.filter((r) => r.type === 'pick').reduce((a, r) => a + (Number(r.qty) || 0), 0);
+        const retT = matIssues.filter((r) => r.type === 'return').reduce((a, r) => a + (Number(r.qty) || 0), 0);
+        const shipT = shipments.reduce((a, r) => a + (Number(r.qty) || 0), 0);
+        const rows = [
+          ...matIssues.map((r) => ({ kind: r.type === 'return' ? '退料' : '领料', code: r.code, date: r.issue_date, name: r.material_name, qty: (r.type === 'return' ? '+' : '−') + UI.n2(r.qty), op: r.operator })),
+          ...shipments.map((r) => ({ kind: '成品出库', code: r.code, date: r.ship_date, name: r.material_name, qty: '−' + UI.n2(r.qty), op: r.operator })),
+        ];
+        return `<div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>领发料记录</h3>
+          <span class="small muted">领料合计 <b style="color:var(--danger)">${UI.n2(pickT)}</b> · 退料 <b style="color:var(--ok)">${UI.n2(retT)}</b> · 成品出库 <b>${UI.n2(shipT)}</b>（数量按各单据单位）</span></div>
+        <div class="card-b tight">
+          ${UI.table([
+            { t: '类型', f: (r) => r.kind === '领料' ? '<span class="chip chip-warn">领料</span>' : r.kind === '退料' ? '<span class="chip chip-info">退料</span>' : '<span class="chip chip-gray">成品出库</span>' },
+            { t: '单号', f: (r) => `<b>${UI.esc(r.code || '—')}</b>` },
+            { t: '日期', f: (r) => UI.esc(r.date || '') },
+            { t: '物料', f: (r) => UI.esc(r.name || '') },
+            { t: '数量', align: 'right', f: (r) => `<span class="mono">${r.qty}</span>` },
+            { t: '经手人', f: (r) => UI.esc(r.op || '—') },
+          ], rows)}
+        </div>
+      </div>`;
+      })() : ''}
 
       ${myIssues.length ? `<div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>质量异常单</h3>

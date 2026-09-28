@@ -1333,6 +1333,22 @@ function applyStock(o) {
   if (!m) return null;
   // 单据未指定仓库时，回退到物料档案的默认仓库，避免产生「无仓库」的平行台账行
   const wh = num(o.warehouse_id) || num(m.warehouse_id) || null;
+  // 出库未指定批次：自动按批次分扣（先扣无批次行，再按入库时间先进先出），支持跨批次合计出库
+  if (qty < 0 && !String(o.batch || '').trim() && !o._autoBatch) {
+    const lines = all("SELECT * FROM inventory WHERE material_id=? AND IFNULL(warehouse_id,0)=? AND qty>1e-9 ORDER BY (CASE WHEN IFNULL(batch,'')='' THEN 0 ELSE 1 END), updated_at ASC, id ASC",
+      [materialId, num(wh)]);
+    const total = lines.reduce((s, r) => s + num(r.qty), 0);
+    if (total < -qty - 1e-9) throw new Error('库存不足：' + m.name + '，当前库存 ' + (Math.round(total * 1e6) / 1e6) + '，本次出库 ' + Math.abs(qty));
+    let need = -qty, first = null;
+    for (const r of lines) {
+      if (need <= 1e-9) break;
+      const take = Math.min(num(r.qty), need);
+      need -= take;
+      const r2 = applyStock(Object.assign({}, o, { _autoBatch: 1, qty: -take, batch: r.batch || '' }));
+      if (!first) first = r2;
+    }
+    return first;
+  }
   const row = invEnsure(materialId, wh, o.batch, o.location);
   const before = num(row.qty);
   const after = before + qty;
@@ -2122,6 +2138,176 @@ route('DELETE', '/api/finished_goods_in/(\\d+)', ['admin'], (req, res, m, _b, u)
   ok(res, true);
 });
 
+/* ------------------------------ 领料 / 退料（关联工单） ------------------------------ */
+const ISSUE_TYPE_LABEL = { pick: '领料', return: '退料' };
+
+route('GET', '/api/material_issues', [], (req, res, _m, _b, _u, q) => {
+  const where = []; const ps = [];
+  if (q.order_id) { where.push('i.order_id=?'); ps.push(num(q.order_id)); }
+  if (q.type) { where.push('i.type=?'); ps.push(q.type); }
+  const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  ok(res, all(`SELECT i.*, o.code order_code, m.code m_code, m.name m_name, w.name warehouse_name
+    FROM material_issues i LEFT JOIN orders o ON o.id=i.order_id
+    LEFT JOIN materials m ON m.id=i.material_id LEFT JOIN warehouses w ON w.id=i.warehouse_id
+    ${w} ORDER BY i.id DESC`, ps));
+});
+
+route('POST', '/api/material_issues', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const type = b.type === 'return' ? 'return' : 'pick';
+  const qty = num(b.qty);
+  if (!(qty > 0)) return fail(res, '数量必须大于 0');
+  if (type === 'pick' && !b.order_id) return fail(res, '领料必须关联工单（退料可选）');
+  const mid = resolveMaterialId(b);
+  if (!mid) return fail(res, '请选择物料');
+  fillFromMaterial(b, mid);
+  const code = (b.code && b.code.trim()) ? b.code.trim() : genCode(type === 'pick' ? 'LL' : 'TL');
+  if (get('SELECT id FROM material_issues WHERE code=?', [code])) return fail(res, '该单号已存在');
+  const date = b.issue_date || today();
+  let id;
+  tx(() => {
+    id = insert(`INSERT INTO material_issues(code,type,issue_date,order_id,material_id,material_code,material_name,material_spec,qty,unit,warehouse_id,batch,reason,operator,remark,created_by,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, type, date, b.order_id ? num(b.order_id) : null, mid, b.material_code || null, b.material_name,
+        b.material_spec || null, qty, b.unit || '件', b.warehouse_id ? num(b.warehouse_id) : null,
+        b.batch || null, b.reason || null, b.operator || u.name, b.remark || null, u.id, now()]);
+    applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch,
+      qty: type === 'pick' ? -qty : qty, tx_type: type === 'pick' ? 'out_pick' : 'in_return',
+      ref_type: 'material_issues', ref_id: id, ref_code: code, order_id: b.order_id,
+      operator: u.name, tx_date: date, remark: ISSUE_TYPE_LABEL[type] + ' ' + code });
+  });
+  writeLog(u, ISSUE_TYPE_LABEL[type], code + ' ' + (b.material_name || '') + ' ×' + qty + (b.order_id ? '（工单）' : ''));
+  ok(res, { id, code });
+});
+
+route('PUT', '/api/material_issues/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const row = get('SELECT * FROM material_issues WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '单据不存在', 404);
+  const type = b.type === 'return' ? 'return' : (b.type === 'pick' ? 'pick' : row.type);
+  const qty = num(b.qty) > 0 ? num(b.qty) : num(row.qty);
+  if (type === 'pick' && !b.order_id && !row.order_id) return fail(res, '领料必须关联工单');
+  const mid = resolveMaterialId(b) || row.material_id;
+  fillFromMaterial(b, mid);
+  tx(() => {
+    revertStock('material_issues', Number(m[1]), u.name);
+    run(`UPDATE material_issues SET type=?,issue_date=?,order_id=?,material_id=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,warehouse_id=?,batch=?,reason=?,operator=?,remark=? WHERE id=?`,
+      [type, b.issue_date || row.issue_date, b.order_id ? num(b.order_id) : (type === 'pick' ? row.order_id : (b.order_id === null ? null : row.order_id)),
+        mid, b.material_code || null, b.material_name, b.material_spec || null, qty, b.unit || '件',
+        b.warehouse_id ? num(b.warehouse_id) : null, b.batch || null, b.reason || null,
+        b.operator || row.operator, b.remark || null, m[1]]);
+    applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch,
+      qty: type === 'pick' ? -qty : qty, tx_type: type === 'pick' ? 'out_pick' : 'in_return',
+      ref_type: 'material_issues', ref_id: Number(m[1]), ref_code: row.code, order_id: row.order_id,
+      operator: u.name, tx_date: b.issue_date || row.issue_date, remark: ISSUE_TYPE_LABEL[type] + '(改) ' + row.code });
+  });
+  writeLog(u, '修改' + ISSUE_TYPE_LABEL[type] + '单', row.code);
+  ok(res, true);
+});
+
+route('DELETE', '/api/material_issues/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  const row = get('SELECT * FROM material_issues WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '单据不存在', 404);
+  tx(() => {
+    revertStock('material_issues', Number(m[1]), u.name);
+    run('DELETE FROM material_issues WHERE id=?', [m[1]]);
+  });
+  writeLog(u, '删除' + ISSUE_TYPE_LABEL[row.type] + '单', row.code);
+  ok(res, true);
+});
+
+/* ------------------------------ 成品出库（发货 / 销售出库） ------------------------------ */
+route('GET', '/api/stock_shipments', [], (req, res, _m, _b, _u, q) => {
+  const where = []; const ps = [];
+  if (q.order_id) { where.push('s.order_id=?'); ps.push(num(q.order_id)); }
+  const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  ok(res, all(`SELECT s.*, o.code order_code, m.code m_code, m.name m_name, w.name warehouse_name
+    FROM stock_shipments s LEFT JOIN orders o ON o.id=s.order_id
+    LEFT JOIN materials m ON m.id=s.material_id LEFT JOIN warehouses w ON w.id=s.warehouse_id
+    ${w} ORDER BY s.id DESC`, ps));
+});
+
+route('POST', '/api/stock_shipments', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const qty = num(b.qty);
+  if (!(qty > 0)) return fail(res, '数量必须大于 0');
+  const mid = resolveMaterialId(b);
+  if (!mid) return fail(res, '请选择物料');
+  fillFromMaterial(b, mid);
+  const code = (b.code && b.code.trim()) ? b.code.trim() : genCode('CK');
+  if (get('SELECT id FROM stock_shipments WHERE code=?', [code])) return fail(res, '该出库单号已存在');
+  const date = b.ship_date || today();
+  let id;
+  tx(() => {
+    id = insert(`INSERT INTO stock_shipments(code,ship_date,customer,order_id,sale_ref,material_id,material_code,material_name,material_spec,qty,unit,warehouse_id,batch,operator,remark,created_by,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, date, b.customer || null, b.order_id ? num(b.order_id) : null, b.sale_ref || null,
+        mid, b.material_code || null, b.material_name, b.material_spec || null, qty, b.unit || '件',
+        b.warehouse_id ? num(b.warehouse_id) : null, b.batch || null, b.operator || u.name,
+        b.remark || null, u.id, now()]);
+    applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: -qty, tx_type: 'out_ship',
+      ref_type: 'stock_shipments', ref_id: id, ref_code: code, order_id: b.order_id,
+      operator: u.name, tx_date: date, remark: '成品出库 ' + code });
+  });
+  writeLog(u, '成品出库', code + ' ' + (b.material_name || '') + ' ×' + qty + (b.customer ? ' → ' + b.customer : ''));
+  ok(res, { id, code });
+});
+
+route('PUT', '/api/stock_shipments/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const row = get('SELECT * FROM stock_shipments WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '单据不存在', 404);
+  const qty = num(b.qty) > 0 ? num(b.qty) : num(row.qty);
+  const mid = resolveMaterialId(b) || row.material_id;
+  fillFromMaterial(b, mid);
+  tx(() => {
+    revertStock('stock_shipments', Number(m[1]), u.name);
+    run(`UPDATE stock_shipments SET ship_date=?,customer=?,order_id=?,sale_ref=?,material_id=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,warehouse_id=?,batch=?,operator=?,remark=? WHERE id=?`,
+      [b.ship_date || row.ship_date, b.customer !== undefined ? (b.customer || null) : row.customer,
+        b.order_id !== undefined ? (b.order_id ? num(b.order_id) : null) : row.order_id,
+        b.sale_ref !== undefined ? (b.sale_ref || null) : row.sale_ref,
+        mid, b.material_code || null, b.material_name, b.material_spec || null, qty, b.unit || '件',
+        b.warehouse_id ? num(b.warehouse_id) : null, b.batch || null, b.operator || row.operator,
+        b.remark || null, m[1]]);
+    applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: -qty, tx_type: 'out_ship',
+      ref_type: 'stock_shipments', ref_id: Number(m[1]), ref_code: row.code, order_id: row.order_id,
+      operator: u.name, tx_date: b.ship_date || row.ship_date, remark: '成品出库(改) ' + row.code });
+  });
+  writeLog(u, '修改成品出库', row.code);
+  ok(res, true);
+});
+
+route('DELETE', '/api/stock_shipments/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  const row = get('SELECT * FROM stock_shipments WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '单据不存在', 404);
+  tx(() => {
+    revertStock('stock_shipments', Number(m[1]), u.name);
+    run('DELETE FROM stock_shipments WHERE id=?', [m[1]]);
+  });
+  writeLog(u, '删除成品出库', row.code);
+  ok(res, true);
+});
+
+/* ------------------------------ 盘点调整（实盘数 → 差异流水） ------------------------------ */
+route('POST', '/api/inventory/adjust', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const mid = num(b.material_id);
+  if (!mid) return fail(res, '请选择物料');
+  const m = get('SELECT * FROM materials WHERE id=?', [mid]);
+  if (!m) return fail(res, '物料不存在', 404);
+  if (b.physical_qty === undefined || b.physical_qty === null || b.physical_qty === '' || num(b.physical_qty) < 0) return fail(res, '请填写有效的实盘数量');
+  const physical = num(b.physical_qty);
+  // 仓库口径与 applyStock 一致：未指定时回退物料默认仓库
+  const whAdj = num(b.warehouse_id) || num(m.warehouse_id) || null;
+  const inv = get('SELECT * FROM inventory WHERE material_id=? AND IFNULL(warehouse_id,0)=? AND IFNULL(batch,\'\')=?',
+    [mid, num(whAdj), String(b.batch || '').trim()]);
+  const book = inv ? num(inv.qty) : 0;
+  const diff = Math.round((physical - book) * 1e6) / 1e6;
+  if (Math.abs(diff) < 1e-9) return fail(res, '实盘数与账面数一致（' + book + '），无需调整');
+  const code = genCode('PD');
+  applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: diff, tx_type: 'adjust',
+    ref_type: 'adjust', ref_id: null, ref_code: code, order_id: null,
+    operator: u.name, tx_date: b.adjust_date || today(),
+    remark: '盘点调整 ' + code + '：账面 ' + book + ' → 实盘 ' + physical + (b.remark ? '，' + b.remark : '') });
+  writeLog(u, '盘点调整', (m.name || '') + ' 账面 ' + book + ' → 实盘 ' + physical + '（差异 ' + diff + '）');
+  ok(res, { code, book, physical, diff });
+});
+
 /* ------------------------------ 完工入库补齐（工单完工量 → 成品库） ------------------------------
  * 把「工单末道工序完工量」与「该工单自动入库量」的差额补生成成品入库单，使工单完工多少件都能在仓储查到。
  * 用于历史报工（自动入库功能上线前）未生成入库单的补救；可反复执行：
@@ -2268,6 +2454,97 @@ route('GET', '/api/inventory_tx', [], (req, res, _m, _b, _u, q) => {
     FROM inventory_tx t JOIN materials m ON m.id=t.material_id
     LEFT JOIN warehouses w ON w.id=t.warehouse_id LEFT JOIN orders o ON o.id=t.order_id
     ${w} ORDER BY t.id DESC LIMIT ?`, [...ps, limit]));
+});
+
+/* ------------------------------ 投入产出比（来料 → 成品入库） ------------------------------
+ * 口径：产出比 = 成品入库合格数 ÷ 来料合格数 × 100%（默认只计检验合格，可含待检）。
+ * 三层：总览（期间合计）+ 按月趋势（近6个月）+ 按工单明细（利用来料/入库单的 order_id 关联）。
+ * 未关联工单的来料单汇总为「公共来料」，不摊入工单口径。 */
+route('GET', '/api/stats/yield', [], (req, res, _m, _b, _u, q) => {
+  const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+  const monthsMap = { month: 1, quarter: 3, year: 12, all: 0 };
+  const months = monthsMap[q.period] !== undefined ? monthsMap[q.period] : 1;
+  let start = null;
+  if (months > 0) {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (months - 1));
+    start = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+  }
+  const incRes = q.include_pending === '1' ? ['qualified', 'pending'] : ['qualified'];
+  const resIn = incRes.map(() => '?').join(',');
+  // 期间合计（总览 + 工单口径）
+  const incWhere = `result IN (${resIn})` + (start ? ' AND incoming_date>=?' : '');
+  const incPs = start ? [...incRes, start] : [...incRes];
+  const finWhere = `result IN (${resIn})` + (start ? ' AND in_date>=?' : '');
+  const finPs = start ? [...incRes, start] : [...incRes];
+  const incTotal = r2(get(`SELECT SUM(qty) qty FROM incoming_materials WHERE ${incWhere}`, incPs).qty);
+  const finTotal = r2(get(`SELECT SUM(qty) qty FROM finished_goods_in WHERE ${finWhere}`, finPs).qty);
+  const incPublic = r2(get(`SELECT SUM(qty) qty FROM incoming_materials WHERE ${incWhere} AND order_id IS NULL`, incPs).qty);
+  // 按工单
+  const incByOrder = all(`SELECT order_id, SUM(qty) qty FROM incoming_materials WHERE ${incWhere} AND order_id IS NOT NULL GROUP BY order_id`, incPs);
+  const finByOrder = all(`SELECT order_id, SUM(qty) qty FROM finished_goods_in WHERE ${finWhere} AND order_id IS NOT NULL GROUP BY order_id`, finPs);
+  const ids = [...new Set([...incByOrder.map((r) => r.order_id), ...finByOrder.map((r) => r.order_id)])];
+  const oRows = ids.length ? all(`SELECT o.id, o.code, o.qty_plan, p.name product_name,
+      (SELECT MIN(s.qty_good) FROM order_steps s WHERE s.order_id=o.id) qty_done
+    FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id IN (${ids.map(() => '?').join(',')})`, ids) : [];
+  const incMap = {}; incByOrder.forEach((r) => { incMap[r.order_id] = r2(r.qty); });
+  const finMap = {}; finByOrder.forEach((r) => { finMap[r.order_id] = r2(r.qty); });
+  const orders = oRows.map((o) => ({
+    order_id: o.id, order_code: o.code, product_name: o.product_name,
+    qty_plan: num(o.qty_plan), qty_done: num(o.qty_done),
+    incoming_qty: incMap[o.id] || 0, finished_qty: finMap[o.id] || 0,
+    ratio: incMap[o.id] > 0 ? r2((finMap[o.id] || 0) / incMap[o.id] * 100) : null,
+  })).sort((a, b) => b.order_id - a.order_id);
+  // 按月趋势（近6个月，独立于期间筛选）
+  const d6 = new Date(); d6.setDate(1); d6.setMonth(d6.getMonth() - 5);
+  const mStart = d6.getFullYear() + '-' + String(d6.getMonth() + 1).padStart(2, '0') + '-01';
+  const incM = all(`SELECT substr(incoming_date,1,7) ym, SUM(qty) qty FROM incoming_materials WHERE result IN (${resIn}) AND incoming_date>=? GROUP BY ym`, [...incRes, mStart]);
+  const finM = all(`SELECT substr(in_date,1,7) ym, SUM(qty) qty FROM finished_goods_in WHERE result IN (${resIn}) AND in_date>=? GROUP BY ym`, [...incRes, mStart]);
+  const im = {}; incM.forEach((r) => { im[r.ym] = r2(r.qty); });
+  const fm = {}; finM.forEach((r) => { fm[r.ym] = r2(r.qty); });
+  const monthly = [];
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 5 + i);
+    const ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    const iq = im[ym] || 0, fq = fm[ym] || 0;
+    monthly.push({ month: ym, incoming_qty: iq, finished_qty: fq, ratio: iq > 0 ? r2(fq / iq * 100) : null });
+  }
+  ok(res, {
+    period: months === 0 ? 'all' : (q.period || 'month'), start,
+    include_pending: q.include_pending === '1',
+    summary: {
+      incoming_qty: incTotal, finished_qty: finTotal,
+      ratio: incTotal > 0 ? r2(finTotal / incTotal * 100) : null,
+      orders_count: ids.length, public_incoming: incPublic,
+    },
+    monthly, orders,
+  });
+});
+
+/* ------------------------------ 收发存汇总（期初 + 收入 − 发出 = 期末） ------------------------------
+ * 口径：期末取自库存台账当前值；期间收入/发出按流水统计（含冲销红字，ERP 惯例）；
+ * 期初 = 期末 − 收入 + 发出 倒推，保证恒等式恒成立（冲销不破坏账实一致）。 */
+route('GET', '/api/stats/inventory_summary', [], (req, res, _m, _b, _u, q) => {
+  const d = new Date();
+  const start = q.start || d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+  const end = q.end || today();
+  const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+  const rows = all(`SELECT m.id material_id, m.code material_code, m.name material_name, m.unit, m.category,
+      IFNULL(inv.qty, 0) closing,
+      IFNULL(tx.in_qty, 0) in_qty, IFNULL(tx.out_qty, 0) out_qty
+    FROM materials m
+    LEFT JOIN (SELECT material_id, SUM(qty) qty FROM inventory GROUP BY material_id) inv ON inv.material_id = m.id
+    LEFT JOIN (SELECT material_id,
+        SUM(CASE WHEN qty > 0 THEN qty ELSE 0 END) in_qty,
+        SUM(CASE WHEN qty < 0 THEN -qty ELSE 0 END) out_qty
+      FROM inventory_tx WHERE tx_date >= ? AND tx_date <= ? GROUP BY material_id) tx ON tx.material_id = m.id
+    ORDER BY m.code`, [start, end])
+    .map((r) => {
+      const closing = r2(r.closing), inq = r2(r.in_qty), outq = r2(r.out_qty);
+      return { material_id: r.material_id, material_code: r.material_code, material_name: r.material_name, unit: r.unit, category: r.category,
+        opening: r2(closing - inq + outq), in_qty: inq, out_qty: outq, closing };
+    })
+    .filter((r) => r.opening || r.in_qty || r.out_qty || r.closing);
+  ok(res, { start, end, rows });
 });
 
 /* ------------------------------ 请求分发 ------------------------------ */

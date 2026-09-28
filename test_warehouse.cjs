@@ -130,6 +130,86 @@ async function api(method, url, body, token) {
     // 8. 收发明细只读校验（无写接口）
     const bad = await H('POST', '/api/inventory_tx', { material_id: m1.id, qty: 1 });
     chk('收发明细不允许手工写入', !bad.ok, JSON.stringify(bad));
+
+    // ============ 9. 领料 / 退料 / 成品出库 / 盘点调整 ============
+    const ords = await H('GET', '/api/orders');
+    chk('演示工单存在（用于领料关联）', ords.data && ords.data.length >= 1, JSON.stringify(ords.data && ords.data.length));
+    const oid = ords.data[0].id;
+    const invSum = async (mid) => (await H('GET', '/api/inventory')).data.filter((r) => r.material_id === mid).reduce((s, r) => s + Number(r.qty), 0);
+
+    const pick = await H('POST', '/api/material_issues', { type: 'pick', order_id: oid, material_id: m1.id, qty: 60, unit: 'kg', reason: '测试领料' });
+    chk('领料成功（LL 单号自动生成，未指定批次自动扣）', pick.ok && /^LL/.test(pick.data.code), JSON.stringify(pick));
+    let invA = await invSum(m1.id);
+    chk('领料后库存合计 = 500 − 60', invA === 440, '实际 ' + invA);
+    const pickNoOrder = await H('POST', '/api/material_issues', { type: 'pick', material_id: m1.id, qty: 10 });
+    chk('领料未关联工单被拒', !pickNoOrder.ok && /工单/.test(pickNoOrder.msg), JSON.stringify(pickNoOrder));
+
+    const ret = await H('POST', '/api/material_issues', { type: 'return', order_id: oid, material_id: m1.id, qty: 10, reason: '余料退回' });
+    chk('退料成功（TL 单号）', ret.ok && /^TL/.test(ret.data.code), JSON.stringify(ret));
+    invA = await invSum(m1.id);
+    chk('退料后库存合计 = 440 + 10', invA === 450, '实际 ' + invA);
+
+    const pickAll = await H('POST', '/api/material_issues', { type: 'pick', order_id: oid, material_id: m1.id, qty: 9999 });
+    chk('库存不足禁止领料', !pickAll.ok && /库存不足/.test(pickAll.msg), JSON.stringify(pickAll));
+
+    const pickUpd = await H('PUT', '/api/material_issues/' + pick.data.id, { type: 'pick', order_id: oid, material_id: m1.id, qty: 30 });
+    chk('修改领料数量成功', pickUpd.ok, JSON.stringify(pickUpd));
+    invA = await invSum(m1.id);
+    chk('改量后库存合计 = 450 + 60(冲销) − 30 = 480', invA === 480, '实际 ' + invA);
+
+    // 盘点调整：m2 现有量 → +100，再无批次出库 50（自动扣种子批次）
+    const m2Row0 = (await H('GET', '/api/inventory')).data.find((r) => r.material_id === m2.id);
+    const m2Batch = (m2Row0 && m2Row0.batch) || null;
+    const m2Qty0 = await invSum(m2.id);
+    const adj = await H('POST', '/api/inventory/adjust', { material_id: m2.id, warehouse_id: m2.warehouse_id || null, batch: m2Batch, physical_qty: m2Qty0 + 100, remark: '测试盘点' });
+    chk('盘点调整成功（+100 差异）', adj.ok && Number(adj.data.diff) === 100, JSON.stringify(adj));
+    const adjSame = await H('POST', '/api/inventory/adjust', { material_id: m2.id, batch: m2Batch, physical_qty: m2Qty0 + 100 });
+    chk('实盘=账面时提示无需调整', !adjSame.ok && /一致/.test(adjSame.msg), JSON.stringify(adjSame));
+    const ship = await H('POST', '/api/stock_shipments', { customer: '测试客户', order_id: oid, material_id: m2.id, qty: 50 });
+    chk('成品出库成功（CK 单号，未指定批次自动扣）', ship.ok && /^CK/.test(ship.data.code), JSON.stringify(ship));
+    const m2Qty1 = await invSum(m2.id);
+    chk('出库后 m2 库存合计 = 盘点后 − 50', m2Qty1 === m2Qty0 + 100 - 50, '实际 ' + m2Qty1);
+
+    // ============ 10. 产出比（新建独立工单，避免种子数据干扰） ============
+    const prods = (await H('GET', '/api/products')).data;
+    const rts = (await H('GET', '/api/routes')).data;
+    const rt = rts.find((r) => r.product_id === prods[0].id) || rts[0];
+    const nOrd = await H('POST', '/api/orders', { product_id: rt.product_id, route_id: rt.id, qty_plan: 50 });
+    chk('新建测试工单成功', nOrd.ok, JSON.stringify(nOrd));
+    const nOid = nOrd.data.id;
+
+    await H('POST', '/api/incoming_materials', { code: 'LM-YIELD-1', incoming_date: '2026-09-20', material_id: m1.id, qty: 100, unit: 'kg', result: 'qualified', order_id: nOid });
+    await H('POST', '/api/finished_goods_in', { code: 'RK-YIELD-1', in_date: '2026-09-22', material_id: m2.id, product_name: m2.name, qty: 40, unit: '套', result: 'qualified', order_id: nOid });
+    invA = await invSum(m1.id);
+    const m2Qty2 = await invSum(m2.id);
+    const yd = await H('GET', '/api/stats/yield?period=all');
+    chk('产出比接口返回', yd.ok && yd.data && yd.data.summary, JSON.stringify(yd).slice(0, 200));
+    const yOrder = yd.data.orders.find((r) => Number(r.order_id) === Number(nOid));
+    chk('按工单产出比 = 40 ÷ 100 = 40%', yOrder && Number(yOrder.incoming_qty) === 100 && Number(yOrder.finished_qty) === 40 && Number(yOrder.ratio) === 40, JSON.stringify(yOrder));
+    chk('按月趋势返回 6 个月', Array.isArray(yd.data.monthly) && yd.data.monthly.length === 6, JSON.stringify(yd.data.monthly && yd.data.monthly.length));
+
+    await H('POST', '/api/incoming_materials', { code: 'LM-YIELD-2', incoming_date: '2026-09-21', material_id: m1.id, qty: 50, unit: 'kg', result: 'pending', order_id: nOid });
+    const yd2 = await H('GET', '/api/stats/yield?period=all&include_pending=1');
+    const yOrder2 = yd2.data.orders.find((r) => Number(r.order_id) === Number(nOid));
+    chk('含待检口径：来料 150，产出比 26.67%', yOrder2 && Number(yOrder2.incoming_qty) === 150 && Math.abs(Number(yOrder2.ratio) - 26.67) < 0.02, JSON.stringify(yOrder2));
+    const yd3 = await H('GET', '/api/stats/yield?period=all');
+    const yOrder3 = yd3.data.orders.find((r) => Number(r.order_id) === Number(nOid));
+    chk('默认口径不含待检（仍为 100/40）', yOrder3 && Number(yOrder3.incoming_qty) === 100, JSON.stringify(yOrder3));
+
+    // 清理待检单（deleted 后库存冲销），再对账汇总
+    const pendDoc = (await H('GET', '/api/incoming_materials')).data.find((r) => r.code === 'LM-YIELD-2');
+    await H('DELETE', '/api/incoming_materials/' + pendDoc.id);
+    invA = await invSum(m1.id);
+    const m2Qty3 = await invSum(m2.id);
+
+    // ============ 11. 收发存汇总 ============
+    const sm = await H('GET', '/api/stats/inventory_summary');
+    chk('收发存汇总接口返回', sm.ok && Array.isArray(sm.data.rows), JSON.stringify(sm).slice(0, 200));
+    const sRow1 = sm.data.rows.find((r) => r.material_id === m1.id);
+    chk('汇总 m1 期末 = 期初 + 收入 − 发出', sRow1 && Number(sRow1.closing) === Number(sRow1.opening) + Number(sRow1.in_qty) - Number(sRow1.out_qty), JSON.stringify(sRow1));
+    chk('汇总 m1 期末与台账合计一致', sRow1 && Number(sRow1.closing) === invA, JSON.stringify({ closing: sRow1 && sRow1.closing, inv: invA }));
+    const sRow2 = sm.data.rows.find((r) => r.material_id === m2.id);
+    chk('汇总 m2 期末与台账合计一致', sRow2 && Number(sRow2.closing) === m2Qty3, JSON.stringify({ closing: sRow2 && sRow2.closing, inv: m2Qty3 }));
   } catch (e) {
     fail++;
     console.log('  EXCEPTION  ' + e.message);

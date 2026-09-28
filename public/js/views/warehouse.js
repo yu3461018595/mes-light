@@ -9,12 +9,25 @@ Views.warehouse = {
   tabs: [
     ['stock', '库存台账'],
     ['incoming', '来料入库'],
+    ['issues', '领料退料'],
     ['finished', '成品入库'],
+    ['shipments', '成品出库'],
     ['tx', '收发明细'],
+    ['ratio', '产出比'],
     ['materials', '物料档案'],
     ['prod', '产销报表'],
     ['warehouses', '仓库'],
   ],
+
+  // 领料/退料类型
+  ISSUE_TYPE: {
+    pick: ['领料', 'chip-warn'],
+    return: ['退料', 'chip-info'],
+  },
+  issueChip(t) {
+    const m = this.ISSUE_TYPE[t] || [t || '—', 'chip-gray'];
+    return `<span class="chip ${m[1]}">${m[0]}</span>`;
+  },
 
   // 检验/质检结论样式
   RESULT: {
@@ -169,6 +182,74 @@ Views.warehouse = {
         ],
       },
 
+      // ---------------- 领料 / 退料（关联工单） ----------------
+      issues: {
+        api: '/material_issues', name: '领料退料',
+        cols: [
+          { t: '单号', f: (r) => `<b>${UI.esc(r.code || '—')}</b>` },
+          { t: '类型', f: (r) => this.issueChip(r.type) },
+          { t: '日期', f: (r) => UI.esc(r.issue_date || '') },
+          { t: '关联工单', f: (r) => UI.esc(r.order_code || (r.type === 'pick' ? '<span style="color:var(--danger)">未关联</span>' : '—')) },
+          { t: '物料', f: (r) => `${UI.esc(r.material_name || '')}${r.material_spec ? ` <span class="small muted">${UI.esc(r.material_spec)}</span>` : ''}` },
+          { t: '数量', align: 'right', f: (r) => `<span class="mono">${UI.n2(r.qty)}</span> ${UI.esc(r.unit || '')}` },
+          { t: '批次', f: (r) => UI.esc(r.batch || '—') },
+          { t: '仓库', f: (r) => UI.esc(r.warehouse_name || '—') },
+          { t: '用途/原因', f: (r) => `<span class="small">${UI.esc(r.reason || '—')}</span>` },
+          { t: '经手人', f: (r) => UI.esc(r.operator || '—') },
+        ],
+        fields: [
+          { k: 'code', t: '单号', hint: '留空自动生成（领料 LL / 退料 TL + 日期 + 序号）' },
+          { k: 'type', t: '单据类型', type: 'select', opts: [['pick', '领料（扣库存）'], ['return', '退料（回增库存）']], def: 'pick' },
+          { k: 'issue_date', t: '单据日期', type: 'date', def: UI.today() },
+          { k: 'order_id', t: '关联工单', type: 'select', opts: ordersOpts, hint: '领料必选；退料建议选择以便工单核算' },
+          { k: 'material_id', t: '物料档案', type: 'select', opts: matOpts, hint: '选择后自动带出编码/名称/单位/仓库' },
+          { k: 'warehouse_id', t: '仓库', type: 'select', opts: whOpts },
+          { k: 'material_code', t: '物料编码' },
+          { k: 'material_name', t: '物料名称', req: 1 },
+          { k: 'material_spec', t: '规格型号' },
+          { k: 'qty', t: '数量', type: 'number', req: 1 },
+          { k: 'unit', t: '单位', def: '件' },
+          { k: 'batch', t: '批次' },
+          { k: 'reason', t: '领料用途 / 退料原因' },
+          { k: 'operator', t: '经手人' },
+          { k: 'remark', t: '备注' },
+        ],
+      },
+
+      // ---------------- 成品出库（发货 / 销售） ----------------
+      shipments: {
+        api: '/stock_shipments', name: '成品出库',
+        cols: [
+          { t: '出库单号', f: (r) => `<b>${UI.esc(r.code || '—')}</b>` },
+          { t: '出库日期', f: (r) => UI.esc(r.ship_date || '') },
+          { t: '客户', f: (r) => UI.esc(r.customer || '—') },
+          { t: '关联工单', f: (r) => UI.esc(r.order_code || '—') },
+          { t: '销售单号', f: (r) => UI.esc(r.sale_ref || '—') },
+          { t: '物料', f: (r) => `${UI.esc(r.material_name || '')}${r.material_spec ? ` <span class="small muted">${UI.esc(r.material_spec)}</span>` : ''}` },
+          { t: '数量', align: 'right', f: (r) => `<span class="mono">${UI.n2(r.qty)}</span> ${UI.esc(r.unit || '')}` },
+          { t: '批次', f: (r) => UI.esc(r.batch || '—') },
+          { t: '仓库', f: (r) => UI.esc(r.warehouse_name || '—') },
+          { t: '经手人', f: (r) => UI.esc(r.operator || '—') },
+        ],
+        fields: [
+          { k: 'code', t: '出库单号', hint: '留空自动生成（CK+日期+序号）' },
+          { k: 'ship_date', t: '出库日期', type: 'date', def: UI.today() },
+          { k: 'customer', t: '客户', list: 'supList', placeholder: '可输入或从下拉选择' },
+          { k: 'order_id', t: '关联工单', type: 'select', opts: ordersOpts },
+          { k: 'sale_ref', t: '销售单号' },
+          { k: 'material_id', t: '物料档案', type: 'select', opts: matOpts, hint: '选择后自动带出编码/名称/单位/仓库' },
+          { k: 'warehouse_id', t: '仓库', type: 'select', opts: whOpts },
+          { k: 'material_code', t: '物料编码' },
+          { k: 'material_name', t: '物料名称', req: 1 },
+          { k: 'material_spec', t: '规格型号' },
+          { k: 'qty', t: '出库数量', type: 'number', req: 1 },
+          { k: 'unit', t: '单位', def: '件' },
+          { k: 'batch', t: '批次' },
+          { k: 'operator', t: '经手人' },
+          { k: 'remark', t: '备注' },
+        ],
+      },
+
       // ---------------- 物料档案 ----------------
       materials: {
         api: '/materials', name: '物料档案',
@@ -220,6 +301,7 @@ Views.warehouse = {
 
   async render(el) {
     if (this.tab === 'prod') { await this.renderProd(el); return; }
+    if (this.tab === 'ratio') { await this.renderRatio(el); return; }
     try { this.meta = await API.get('/meta'); } catch (e) { this.meta = {}; }
     try { this.meta.orders = await API.get('/orders'); } catch (e) { this.meta.orders = []; }
     try { this.meta.materials = await API.get('/materials'); } catch (e) { this.meta.materials = []; }
@@ -227,6 +309,7 @@ Views.warehouse = {
     const canEdit = App.canEdit();
     const c = this.conf()[this.tab];
     const showAdd = canEdit && !c.noAdd && (c.fields || []).length > 0;
+    const txSummary = this.tab === 'tx' && this.txView === 'summary';
     el.innerHTML = `
       <div class="tabs">
         ${this.tabs.map(([k, t]) => `<div class="tab ${this.tab === k ? 'active' : ''}" data-tab="${k}">${t}</div>`).join('')}
@@ -235,8 +318,10 @@ Views.warehouse = {
         <div class="card-h"><h3 id="tbTitle"></h3>
           <div style="display:flex;gap:8px;align-items:center">
             <span id="tbStat" class="small muted"></span>
-            ${c.export ? `<button class="btn btn-sm" id="exp">导出 CSV</button>` : ''}
+            ${c.export && !txSummary ? `<button class="btn btn-sm" id="exp">导出 CSV</button>` : ''}
             ${(this.tab === 'materials' && canEdit) ? `<button class="btn btn-sm" id="imp">从产品导入</button>` : ''}
+            ${(this.tab === 'stock' && canEdit) ? `<button class="btn btn-sm" id="adjustBtn">${UI.icon('edit')}盘点调整</button>` : ''}
+            ${(this.tab === 'tx') ? `<button class="btn btn-sm" id="sumBtn">${txSummary ? '← 返回明细' : '收发存汇总'}</button>` : ''}
             ${showAdd ? `<button class="btn btn-primary btn-sm" id="add">${UI.icon('plus')}新增</button>` : ''}
           </div>
         </div>
@@ -244,13 +329,216 @@ Views.warehouse = {
       </div>`;
     el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
     if (showAdd) el.querySelector('#add').onclick = () => this.form();
-    if (c.export) el.querySelector('#exp').onclick = () => this.exportCsv(el);
+    if (c.export && !txSummary) el.querySelector('#exp').onclick = () => this.exportCsv(el);
+    const sumBtn = el.querySelector('#sumBtn');
+    if (sumBtn) sumBtn.onclick = () => { this.txView = txSummary ? 'detail' : 'summary'; this.render(el); };
+    const adjustBtn = el.querySelector('#adjustBtn');
+    if (adjustBtn) adjustBtn.onclick = () => this.adjustModal(el);
     const imp = el.querySelector('#imp');
     if (imp) imp.onclick = async () => {
       try { const r = await API.post('/materials/import_products', {}); UI.toast(`已导入 ${r.imported} 条成品物料`, 'ok'); this.render(el); }
       catch (e) { UI.toast(e.message, 'err'); }
     };
+    if (txSummary) { el.querySelector('#tbTitle').textContent = '收发存汇总'; await this.renderTxSummary(el); return; }
     await this.loadTable(el);
+  },
+
+  /* ------------------------------ 盘点调整（账面 → 实盘差异流水） ------------------------------ */
+  async adjustModal(el) {
+    const M = this.meta || {};
+    let inv = [];
+    try { inv = await API.get('/inventory'); } catch (e) { /* 忽略 */ }
+    const matOpts = (M.materials || []).filter((m) => m.active !== 0);
+    const book = (mid, wid, batch) => {
+      const r = inv.find((x) => String(x.material_id) === String(mid)
+        && String(x.warehouse_id || '') === String(wid || '')
+        && String(x.batch || '') === String(batch || ''));
+      return r ? Number(r.qty) || 0 : 0;
+    };
+    UI.modal({
+      title: '库存盘点调整',
+      body: `
+        <label class="field"><span class="label-req">物料</span>
+          <select class="input" id="aMat"><option value="">请选择</option>${matOpts.map((m) => `<option value="${m.id}">${UI.esc(m.code)} ${UI.esc(m.name)}</option>`).join('')}</select></label>
+        <div class="grid g2">
+          <label class="field"><span>仓库</span><select class="input" id="aWh"><option value="">默认</option>${(M.warehouses || []).map((w) => `<option value="${w.id}">${UI.esc(w.code)} ${UI.esc(w.name)}</option>`).join('')}</select></label>
+          <label class="field"><span>批次</span><input class="input" id="aBatch" placeholder="留空=无批次"></label>
+        </div>
+        <div class="grid g2">
+          <label class="field"><span>账面数量</span><input class="input" id="aBook" disabled value="—"></label>
+          <label class="field"><span class="label-req">实盘数量</span><input class="input" id="aQty" type="number" step="0.01"></label>
+        </div>
+        <label class="field"><span>差异说明</span><input class="input" id="aRemark" placeholder="如：破损 / 丢失 / 盘盈"></label>
+        <div class="small muted">确认后按「实盘 − 账面」差异自动生成盘点调整流水，全程留痕；可在收发明细按「盘点调整」类型审计。</div>`,
+      onMount: (mask) => {
+        const upd = () => {
+          const q = book(mask.querySelector('#aMat').value, mask.querySelector('#aWh').value, mask.querySelector('#aBatch').value.trim());
+          mask.querySelector('#aBook').value = q;
+        };
+        ['#aMat', '#aWh'].forEach((s) => mask.querySelector(s).addEventListener('change', upd));
+        mask.querySelector('#aBatch').addEventListener('input', upd);
+      },
+      onOk: async (mask) => {
+        if (!mask.querySelector('#aMat').value) throw new Error('请选择物料');
+        const r = await API.post('/inventory/adjust', {
+          material_id: Number(mask.querySelector('#aMat').value),
+          warehouse_id: mask.querySelector('#aWh').value ? Number(mask.querySelector('#aWh').value) : null,
+          batch: mask.querySelector('#aBatch').value.trim() || null,
+          physical_qty: mask.querySelector('#aQty').value,
+          remark: mask.querySelector('#aRemark').value.trim() || null,
+        });
+        UI.toast(`盘点完成：账面 ${r.book} → 实盘 ${r.physical}（差异 ${r.diff > 0 ? '+' : ''}${r.diff}）`, 'ok');
+        this.render(el);
+      },
+    });
+  },
+
+  /* ------------------------------ 收发存汇总（期初 + 收入 − 发出 = 期末） ------------------------------ */
+  async renderTxSummary(el) {
+    const d = new Date();
+    const defStart = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+    el.querySelector('#tb').innerHTML = `
+      <div class="row" style="gap:10px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+        <span class="small muted">期间</span>
+        <input class="input" id="sumStart" type="date" value="${defStart}" style="width:150px">
+        <span class="small muted">至</span>
+        <input class="input" id="sumEnd" type="date" value="${UI.today()}" style="width:150px">
+        <button class="btn btn-sm btn-primary" id="sumGo">查询</button>
+        <button class="btn btn-sm" id="sumExp">导出 CSV</button>
+        <span class="small muted">口径：期初 + 收入 − 发出 = 期末（含盘点调整）</span>
+      </div>
+      <div id="sumBody">加载中…</div>`;
+    const load = async () => {
+      const start = el.querySelector('#sumStart').value, end = el.querySelector('#sumEnd').value;
+      try {
+        const r = await API.get(`/stats/inventory_summary?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        this._sumRows = r.rows || [];
+        el.querySelector('#sumBody').innerHTML = UI.table([
+          { t: '物料编码', f: (x) => `<b>${UI.esc(x.material_code)}</b>` },
+          { t: '物料名称', f: (x) => UI.esc(x.material_name) },
+          { t: '分类', f: (x) => UI.esc(x.category || '—') },
+          { t: '单位', f: (x) => UI.esc(x.unit || '') },
+          { t: '期初', align: 'right', f: (x) => `<span class="mono">${UI.n2(x.opening)}</span>` },
+          { t: '收入', align: 'right', f: (x) => `<span class="mono" style="color:var(--ok)">+${UI.n2(x.in_qty)}</span>` },
+          { t: '发出', align: 'right', f: (x) => `<span class="mono" style="color:var(--danger)">−${UI.n2(x.out_qty)}</span>` },
+          { t: '期末', align: 'right', f: (x) => `<b class="mono">${UI.n2(x.closing)}</b>` },
+        ], this._sumRows);
+      } catch (e) {
+        el.querySelector('#sumBody').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
+      }
+    };
+    el.querySelector('#sumGo').onclick = load;
+    el.querySelector('#sumExp').onclick = () => {
+      const lines = [`【收发存汇总】 ${el.querySelector('#sumStart').value} 至 ${el.querySelector('#sumEnd').value}`];
+      lines.push('物料编码,物料名称,分类,单位,期初,收入,发出,期末');
+      (this._sumRows || []).forEach((x) => lines.push([x.material_code, x.material_name, x.category || '', x.unit || '', x.opening, x.in_qty, x.out_qty, x.closing].join(',')));
+      const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `收发存汇总_${UI.today()}.csv`;
+      a.click();
+      UI.toast('已导出 CSV', 'ok');
+    };
+    await load();
+  },
+
+  /* ------------------------------ 产出比报表（来料 → 成品入库） ------------------------------ */
+  ratioChip(v) {
+    if (v === null || v === undefined) return '<span class="muted">—</span>';
+    const n = Number(v);
+    const cls = n >= 90 ? 'chip-ok' : n >= 70 ? 'chip-warn' : 'chip-danger';
+    return `<span class="chip ${cls}">${UI.f1(n)}%</span>`;
+  },
+
+  async renderRatio(el) {
+    this.ratioPeriod = this.ratioPeriod || 'month';
+    el.innerHTML = `
+      <div class="tabs">
+        ${this.tabs.map(([k, t]) => `<div class="tab ${this.tab === k ? 'active' : ''}" data-tab="${k}">${t}</div>`).join('')}
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>投入产出比</h3>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <span id="tbStat" class="small muted"></span>
+            <select class="input" id="rPeriod" style="width:120px">
+              <option value="month"${this.ratioPeriod === 'month' ? ' selected' : ''}>本月</option>
+              <option value="quarter"${this.ratioPeriod === 'quarter' ? ' selected' : ''}>近 3 月</option>
+              <option value="year"${this.ratioPeriod === 'year' ? ' selected' : ''}>近 1 年</option>
+              <option value="all"${this.ratioPeriod === 'all' ? ' selected' : ''}>全部</option>
+            </select>
+            <label class="small muted" style="display:flex;gap:4px;align-items:center;cursor:pointer" title="默认只统计检验合格的来料/入库">
+              <input type="checkbox" id="rPending"> 含待检数量</label>
+            <button class="btn btn-sm" id="rExp">导出 CSV</button>
+          </div>
+        </div>
+        <div class="card-b" id="rBody">加载中…</div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>按工单明细</h3><span class="small muted">来料 / 成品入库按单据关联工单汇总；未关联工单的来料计入「公共来料」</span></div>
+        <div class="card-b" id="rOrders">加载中…</div>
+      </div>`;
+    el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
+    const load = async () => {
+      try {
+        this.yield = await API.get(`/stats/yield?period=${this.ratioPeriod}&include_pending=${el.querySelector('#rPending').checked ? '1' : '0'}`);
+        this.paintRatio(el);
+      } catch (e) {
+        el.querySelector('#rBody').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
+      }
+    };
+    el.querySelector('#rPeriod').onchange = () => { this.ratioPeriod = el.querySelector('#rPeriod').value; load(); };
+    el.querySelector('#rPending').onchange = load;
+    el.querySelector('#rExp').onclick = () => this.exportYield();
+    await load();
+  },
+
+  paintRatio(el) {
+    const data = this.yield || { summary: {}, monthly: [], orders: [] };
+    const s = data.summary || {};
+    const stat = el.querySelector('#tbStat');
+    if (stat) stat.textContent = (s.start ? '自 ' + s.start + ' 起 · ' : '') + (data.include_pending ? '含待检' : '仅合格');
+    const ratioHtml = s.ratio === null || s.ratio === undefined ? '<span class="muted">—</span>' : `<b style="font-size:26px;color:${Number(s.ratio) >= 90 ? 'var(--ok)' : Number(s.ratio) >= 70 ? 'var(--warn)' : 'var(--danger)'}">${UI.f1(s.ratio)}%</b>`;
+    el.querySelector('#rBody').innerHTML = `
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-l">来料合格总量</div><div class="stat-v">${UI.n2(s.incoming_qty || 0)}</div><div class="stat-s">含公共来料 ${UI.n2(s.public_incoming || 0)}</div></div>
+        <div class="stat"><div class="stat-l">成品入库总量</div><div class="stat-v" style="color:var(--primary)">${UI.n2(s.finished_qty || 0)}</div><div class="stat-s">件数按各单据单位</div></div>
+        <div class="stat"><div class="stat-l">综合产出比</div><div class="stat-v">${ratioHtml}</div><div class="stat-s">成品入库 ÷ 来料</div></div>
+        <div class="stat"><div class="stat-l">涉及工单</div><div class="stat-v">${s.orders_count || 0}</div><div class="stat-s">个</div></div>
+      </div>
+      ${UI.lineChart((data.monthly || []).map((m) => ({ d: m.month, incoming_qty: m.incoming_qty, finished_qty: m.finished_qty })), [
+        { key: 'incoming_qty', label: '来料入库', color: '#1d4ed8' },
+        { key: 'finished_qty', label: '成品入库', color: '#0f9d58' },
+      ], { title: '近 6 个月 来料 vs 成品入库', h: 210 })}
+      <div class="small muted" style="margin-top:6px">提示：来料与成品的计量单位可能不同（如来料按 KG、成品按 件），数量比供趋势与管理参考。</div>`;
+    const rows = data.orders || [];
+    el.querySelector('#rOrders').innerHTML = UI.table([
+      { t: '工单号', f: (r) => `<b class="link" data-go="${r.order_id}">${UI.esc(r.order_code)}</b>` },
+      { t: '产品', f: (r) => UI.esc(r.product_name || '—') },
+      { t: '计划', align: 'right', f: (r) => `<span class="mono muted">${UI.n2(r.qty_plan)}</span>` },
+      { t: '完工', align: 'right', f: (r) => `<span class="mono">${UI.n2(r.qty_done)}</span>` },
+      { t: '来料合计', align: 'right', f: (r) => `<span class="mono" style="color:var(--primary)">${UI.n2(r.incoming_qty)}</span>` },
+      { t: '成品入库', align: 'right', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.finished_qty)}</span>` },
+      { t: '产出比', f: (r) => this.ratioChip(r.ratio) },
+    ], rows) || '<div class="empty">期间内暂无关联工单的来料 / 成品入库</div>';
+    el.querySelectorAll('[data-go]').forEach((a) => a.onclick = () => { location.hash = '#/orders/' + a.dataset.go; });
+  },
+
+  exportYield() {
+    const data = this.yield || { summary: {}, monthly: [], orders: [] };
+    const s = data.summary || {};
+    const lines = [`【投入产出比】 期间: ${data.period}${s.start ? '（自 ' + s.start + '）' : ''}${data.include_pending ? ' 含待检' : ' 仅合格'}`];
+    lines.push('来料合格总量,成品入库总量,综合产出比(%),涉及工单数,公共来料');
+    lines.push([s.incoming_qty || 0, s.finished_qty || 0, s.ratio == null ? '' : s.ratio, s.orders_count || 0, s.public_incoming || 0].join(','));
+    lines.push('', '【按月趋势】', '月份,来料入库,成品入库,产出比(%)');
+    (data.monthly || []).forEach((m) => lines.push([m.month, m.incoming_qty, m.finished_qty, m.ratio == null ? '' : m.ratio].join(',')));
+    lines.push('', '【按工单明细】', '工单号,产品,计划,完工,来料合计,成品入库,产出比(%)');
+    (data.orders || []).forEach((r) => lines.push([r.order_code, r.product_name || '', r.qty_plan, r.qty_done, r.incoming_qty, r.finished_qty, r.ratio == null ? '' : r.ratio].join(',')));
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `投入产出比_${UI.today()}.csv`;
+    a.click();
+    UI.toast('已导出 CSV', 'ok');
   },
 
   async loadTable(el) {
