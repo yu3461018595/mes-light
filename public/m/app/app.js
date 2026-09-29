@@ -128,7 +128,7 @@
   const TITLES = {
     home: '工作台', messages: '消息', mine: '我的', order: '报工', inspect: '质检台',
     quality: '质量异常', issue: '异常详情', stocks: '库存预警', profile: '个人资料', password: '修改密码',
-    pick: '领料申请', stocktake: '扫码盘点',
+    pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验',
   };
   function nav(hash, replace) {
     if (replace) location.replace(hash); else location.hash = hash;
@@ -165,6 +165,7 @@
         case 'stocks': return await renderStocks();
         case 'pick': return await renderPick();
         case 'stocktake': return await renderStocktake();
+      case 'incoming': return await renderIncoming();
         case 'profile': return await renderProfile();
         case 'password': return await renderPassword();
         default: return void okMask('页面不存在', '即将返回工作台', [{ text: '返回', onClick: () => nav('#/home', true) }]);
@@ -269,8 +270,10 @@
       isManager ? get('/api/stock_alerts').then((r) => r || []).catch(() => []) : Promise.resolve([]),
     ]);
     let inspectQ = [];
+    let incomingPending = [];
     if (isInspector || isManager) {
       inspectQ = await get('/api/inspections/queue').then((r) => r.steps || []).catch(() => []);
+      incomingPending = await get('/api/incoming_materials').then((r) => (r || []).filter((x) => x.result === 'pending')).catch(() => []);
     }
     // worker 只看自己相关；technician/admin 看全部；inspector 看该班组
     const mineIssues = isManager ? openIssues : openIssues.filter((x) => String(x.assignee_user_id) === String(me.id));
@@ -327,6 +330,24 @@
               <div class="t2">${esc(s.product_name || '')} · 已报合格 ${s.qty_good}/${s.qty_plan}</div>
               <div class="t3"><span class="badge b-paused">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span>
                 <span>指派班组 ${esc(s.assignee_team || '暂无')}</span></div>
+            </div>
+            <div class="chev">›</div>
+          </div>`).join('')}
+        </div></div>`);
+    }
+
+    // 待检来料（IQC）
+    if ((isInspector || isManager) && incomingPending.length) {
+      blocks.push(`<div class="card"><div class="card-h"><h3>待检来料 <span class="tiny">(${incomingPending.length})</span></h3>
+        <button class="inline-link" data-go="incoming">来料检验 ›</button></div>
+        <div class="card-b" style="padding:6px 0 0">
+        ${incomingPending.slice(0, 3).map((s) => `
+          <div class="item" data-go="incoming">
+            <div class="avatar" style="background:#e8efff">📥</div>
+            <div class="body">
+              <div class="t1">${esc(s.code)} · ${esc(s.material_name || '')}</div>
+              <div class="t2">供应商 ${esc(s.supplier || '—')} · 批次 ${esc(s.batch || '—')} · ${s.qty} ${esc(s.unit || '')}</div>
+              <div class="t3"><span class="badge b-paused">待检</span><span>到货 ${esc(s.incoming_date || '')}</span></div>
             </div>
             <div class="chev">›</div>
           </div>`).join('')}
@@ -762,6 +783,60 @@
       $view.querySelectorAll('.seg button').forEach((x) => x.classList.toggle('on', x === b));
       paint(b.dataset.f);
     });
+  }
+
+  /* ---------------- 页面：来料检验（IQC） ---------------- */
+  async function renderIncoming() {
+    const me = await ensureMe();
+    if (me.role === 'worker') return renderError('工人账号无需做来料检验');
+    const list = await get('/api/incoming_materials').catch(() => []);
+    const pending = (list || []).filter((x) => x.result === 'pending');
+    $view.innerHTML = `
+      <div class="card"><div class="card-b">
+        <div class="ocode">来料检验（IQC）</div>
+        <div class="pname">${esc((S.me && S.me.name) || me.name)} · 待检 <b>${pending.length}</b> 批</div>
+      </div></div>
+      ${pending.length ? pending.map((s) => `
+        <div class="card insp" data-i="${s.id}" data-total="${s.qty}"><div class="card-b">
+          <div class="ocode" style="font-size:16px">${esc(s.code)} · ${esc(s.material_name || '')}
+            <span class="badge b-paused">待检</span></div>
+          <div class="pname">供应商：${esc(s.supplier || '—')}</div>
+          <div class="pname">批次 ${esc(s.batch || '—')} · 到货 ${esc(s.incoming_date || '')} · 数量 <b>${s.qty}</b> ${esc(s.unit || '')}</div>
+          <div style="margin-top:10px">
+            <div class="field" style="margin-bottom:10px"><span>不合格数</span>
+              <input class="ipt qi-fail2" type="number" inputmode="numeric" min="0" max="${s.qty}" value="0"></div>
+            <div class="field" style="margin-bottom:6px"><span>备注</span>
+              <input class="ipt qi-remark" placeholder="如：外观缺陷 5 件"></div>
+          </div>
+          <div class="btn-row" style="gap:8px">
+            <button class="btn ok sm" data-judge="${s.id}" data-cc="pass">合格入库</button>
+            <button class="btn warn sm" data-judge="${s.id}" data-cc="concession">让步接收</button>
+            <button class="btn danger sm" data-judge="${s.id}" data-cc="fail">不合格</button>
+          </div>
+          <div class="mask-hint" style="margin-top:8px">合格 / 让步自动入库；不合格不入库并自动开质量异常单（含供应商留痕）。</div>
+        </div></div>`).join('') : `<div class="card"><div class="empty"><div class="ico">📭</div><p>当前没有待检来料</p></div></div>`}
+      <div style="height:10px"></div>`;
+    $view.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => submitIncoming(b.dataset.judge, b.dataset.cc));
+  }
+
+  async function submitIncoming(id, conclusion) {
+    const card = $view.querySelector('.insp[data-i="' + id + '"]');
+    if (!card) return;
+    const total = Math.max(0, Math.floor(num(card.dataset.total)));
+    const qtyFail = Math.max(0, Math.floor(num(card.querySelector('.qi-fail2').value)));
+    if (conclusion === 'pass' && qtyFail > 0) return toast('合格入库时不合格数须为 0');
+    if (conclusion !== 'pass' && qtyFail <= 0) return toast('请填写不合格数');
+    if (qtyFail > total) return toast('不合格数不能大于到货数');
+    const label = conclusion === 'pass' ? '合格入库' : conclusion === 'concession' ? '让步接收' : '不合格';
+    const remark = (card.querySelector('.qi-remark').value || '').trim();
+    if (!confirm('判定「' + label + '」：到货 ' + total + ' 件 / 不合格 ' + qtyFail + ' 件。确定提交？')) return;
+    try {
+      const r = await post('/api/incoming_inspections', { id: num(id), conclusion, qty_fail: qtyFail, bad_summary: remark, remark });
+      okMask('判定已提交', [
+        r.result !== 'rejected' ? ('已自动入库 ' + r.qty_pass + ' 件') : '',
+        r.issue ? ('已生成质量异常单 ' + r.issue.code + '（供应商 ' + (r.issue.supplier || '—') + '），责任人已收到待办') : (r.result === 'rejected' ? '不合格：未入库，已开异常单' : ''),
+      ].filter(Boolean).join('<br>'), [{ text: '继续判定', onClick: () => renderIncoming() }]);
+    } catch (e) { toast(e.message); }
   }
 
   async function renderIssue(id) {
