@@ -30,7 +30,24 @@
   .note{background:#fff8e6;border:1px solid #ffe2a8;color:#8a6d1f;border-radius:12px;padding:14px;font-size:13px;margin:16px 0}
   .ios{background:#eef3ff;border:1px solid #cfe0ff;color:#1f56c4;border-radius:12px;padding:14px;font-size:13px;margin:16px 0}
   .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+  /* 微信引导遮罩 */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:99;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:0 22px;color:#fff;text-align:center}
+  .mask .arrow{position:absolute;top:10px;right:18px;font-size:44px;line-height:1;animation:bob 1.4s ease-in-out infinite}
+  .mask .arrow em{display:block;font-size:13px;font-style:normal;margin-top:2px}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(6px)}}
+  .mask .ttl{font-size:19px;font-weight:700;margin:74px 0 10px}
+  .mask .desc{font-size:15px;color:#e6e6e6;line-height:1.9;margin-bottom:24px}
+  .mask .copy{background:#fff;color:#1f2430;border:none;border-radius:12px;padding:14px 26px;font-size:16px;font-weight:600}
+  .mask .copy:active{background:#e6e6e6}
+  .mask .copied{margin-top:12px;font-size:13px;color:#7CFC9B;height:18px}
+  .mask .url{margin-top:18px;font-size:11px;color:#9aa0a6;word-break:break-all;max-width:100%}
 </style>
+<script>
+  // 微信内置浏览器无法直接下载 apk，先引导在浏览器打开
+  if (/MicroMessenger/i.test(navigator.userAgent) && location.href.indexOf('wx.html') < 0) {
+    location.replace('wx.html');
+  }
+</script>
 </head>
 <body>
 <div class="wrap">

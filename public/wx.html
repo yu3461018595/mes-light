@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>智工MES · 下载手机端</title>
+<style>
+  :root{--brand:#2f6fed;--brand-d:#1f56c4;--bg:#f5f7fb;--card:#fff;--text:#1f2430;--muted:#6b7280;--line:#e6e9f0}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+  .wrap{max-width:520px;margin:0 auto;padding:24px 18px 40px}
+  .hero{text-align:center;padding:18px 0 8px}
+  .logo{width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,var(--brand),#5b8df8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px;font-weight:700;margin:0 auto 12px;box-shadow:0 8px 20px rgba(47,111,237,.25)}
+  h1{font-size:21px;margin:6px 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0;box-shadow:0 4px 16px rgba(20,30,60,.04)}
+  .btn{display:block;width:100%;text-align:center;text-decoration:none;background:var(--brand);color:#fff;font-size:17px;font-weight:600;padding:15px;border-radius:12px;margin:14px 0 4px;box-shadow:0 6px 16px rgba(47,111,237,.3)}
+  .btn:active{background:var(--brand-d)}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+  /* 微信引导遮罩 */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:99;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:0 22px;color:#fff;text-align:center}
+  .mask .arrow{position:absolute;top:10px;right:18px;font-size:44px;line-height:1;animation:bob 1.4s ease-in-out infinite}
+  .mask .arrow em{display:block;font-size:13px;font-style:normal;margin-top:2px}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(6px)}}
+  .mask .ttl{font-size:19px;font-weight:700;margin:74px 0 10px}
+  .mask .desc{font-size:15px;color:#e6e6e6;line-height:1.9;margin-bottom:24px}
+  .mask .copy{background:#fff;color:#1f2430;border:none;border-radius:12px;padding:14px 26px;font-size:16px;font-weight:600}
+  .mask .copy:active{background:#e6e6e6}
+  .mask .copied{margin-top:12px;font-size:13px;color:#7CFC9B;height:18px}
+  .mask .url{margin-top:18px;font-size:11px;color:#9aa0a6;word-break:break-all;max-width:100%}
+</style>
+</head>
+<body>
+<div class="wrap" id="main">
+  <div class="hero">
+    <div class="logo">智</div>
+    <h1>智工MES 手机端</h1>
+    <p class="sub">公司内部安装包 · 版本 v1.0</p>
+  </div>
+  <div class="card">
+    <a class="btn" href="/downloads/mes-app-v1.0.apk" download>⬇ 下载安装包（Android）</a>
+    <p class="sub" style="text-align:center">正在为你打开安装页…</p>
+  </div>
+  <p class="foot">智工MES · 内部工具</p>
+</div>
+
+<div class="mask" id="mask" style="display:none">
+  <div class="arrow">↗<em>点这里</em></div>
+  <div class="ttl">请这样下载 App</div>
+  <div class="desc">微信暂不支持直接下载安装包。<br>请点击右上角 <b>···</b>，选择 <b>“在浏览器中打开”</b>，<br>即可自动跳转至下载页。</div>
+  <button class="copy" id="copyBtn">复制下载链接</button>
+  <div class="copied" id="copied"></div>
+  <div class="url" id="url"></div>
+</div>
+
+<script>
+(function(){
+  var isWx = /MicroMessenger/i.test(navigator.userAgent);
+  if (isWx){
+    var m = document.getElementById('mask');
+    var u = location.href.indexOf('wx.html') >= 0 ? location.href
+          : location.href.replace(/install\.html(\?.*)?$/i, 'wx.html');
+    document.getElementById('url').textContent = u;
+    m.style.display = 'flex';
+    var btn = document.getElementById('copyBtn');
+    btn.onclick = function(){
+      var done = function(){ document.getElementById('copied').textContent = '已复制，去浏览器粘贴打开'; };
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(u).then(done, function(){ fallback(u); });
+      } else { fallback(u); }
+      function fallback(t){
+        var ta = document.createElement('textarea');
+        ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); }
+        catch (e){ document.getElementById('copied').textContent = '请长按上方链接复制'; }
+        document.body.removeChild(ta);
+      }
+    };
+  } else {
+    // 普通浏览器：直接跳转安装页（带二维码 + 下载按钮）
+    location.replace('install.html');
+  }
+})();
+</script>
+</body>
+</html>
