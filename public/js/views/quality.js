@@ -18,6 +18,8 @@ Views.quality = {
   },
   CONCLUSION: { pass: ['合格', 'chip-ok'], fail: ['不合格', 'chip-danger'], concession: ['让步接收', 'chip-warn'] },
   DISPOSITION: { rework: '返工', repair: '返修', concession: '让步接收', scrap: '报废' },
+  RESULT: { pending: ['待检', 'chip-gray'], qualified: ['合格', 'chip-ok'], rejected: ['不合格', 'chip-danger'] },
+  resChip(r) { const m = this.RESULT[r] || [r || '—', 'chip-gray']; return `<span class="chip ${m[1]}">${m[0]}</span>`; },
 
   levelChip(l) { const m = this.LEVEL[l] || [l || '—', 'chip-gray']; return `<span class="chip ${m[1]}">${m[0]}</span>`; },
   statusChip(s) { const m = this.ISSUE_STATUS[s] || [s || '—', 'chip-gray']; return `<span class="chip ${m[1]}">${m[0]}</span>`; },
@@ -54,6 +56,7 @@ Views.quality = {
     const body = el.querySelector('#qbody');
     try {
       if (this.tab === 'pending') await this.renderPending(body);
+      else if (this.tab === 'incoming') await this.renderIncoming(body);
       else if (this.tab === 'issues') await this.renderIssues(body);
       else if (this.tab === 'records') await this.renderRecords(body);
       else if (this.tab === 'dash') await this.renderDash(body);
@@ -64,7 +67,7 @@ Views.quality = {
   },
 
   tabs() {
-    const t = [['pending', '待检队列'], ['issues', '质量异常单'], ['records', '检验记录'], ['dash', '质量看板']];
+    const t = [['pending', '待检队列'], ['incoming', '来料检验'], ['issues', '质量异常单'], ['records', '检验记录'], ['dash', '质量看板']];
     if (App.user && ['admin', 'technician'].includes(App.user.role)) t.push(['setup', '检验设置']);
     return t;
   },
@@ -94,12 +97,23 @@ Views.quality = {
       </div>`;
     el.querySelector('#refresh').onclick = () => this.render(document.getElementById('view'));
     el.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => this.judge(b.dataset.judge));
+    // 检验方式切换：抽检显示样本数；检查表 NG 项显示数量输入
+    el.querySelectorAll('[data-k="inspect_mode"]').forEach((sel) => sel.onchange = () => {
+      const card = sel.closest('.insp-step');
+      const wrap = card && card.querySelector('[data-sample-wrap]');
+      if (wrap) wrap.hidden = sel.value !== 'sample';
+    });
+    el.querySelectorAll('.cl-item select[data-cres]').forEach((sel) => sel.onchange = () => {
+      const q = sel.closest('.cl-item').querySelector('[data-cqty]');
+      if (q) q.hidden = sel.value !== 'ng';
+    });
   },
 
   pendingCard(r, badReasons) {
     const isFinal = String(r.inspect_type) === 'fqc';
     const qty = Number(r.qty_good) || 0;
     const bad = Number(r.qty_bad) || 0;
+    const cl = Array.isArray(r.checklist) ? r.checklist : [];
     return `<div class="insp-step ${isFinal ? 'crit' : ''}" id="insp${r.order_step_id}">
       <h4>${UI.esc(r.order_code)} · 第 ${r.seq_no || r.seq} 道 <b>${UI.esc(r.process_name)}</b>
         <span class="ins-mark ${isFinal ? 'failed' : ''}">${this.INSPECT_LABEL[r.inspect_type] || '检验'}</span>
@@ -110,6 +124,13 @@ Views.quality = {
         指派班组 ${UI.esc(r.assignee_team || '暂无')} · 最近报工人 ${UI.esc(r.last_worker || '—')}
       </div>
       <div class="insp-grid">
+        <label class="field" style="margin:0"><span>检验方式</span>
+          <select class="input" data-k="inspect_mode">
+            <option value="full">全检</option>
+            <option value="sample">抽检</option>
+          </select></label>
+        <label class="field" style="margin:0" data-sample-wrap hidden><span>样本数</span>
+          <input class="input" type="number" min="1" data-k="sample_qty" value="${qty}"></label>
         <label class="field" style="margin:0"><span>本次受检数</span>
           <input class="input" type="number" min="0" data-k="qty_pass" value="${qty}" readonly></label>
         <label class="field" style="margin:0"><span>不合格数</span>
@@ -121,15 +142,114 @@ Views.quality = {
             <option value="concession">让步接收（特采放行）</option>
           </select></label>
       </div>
+      ${cl.length ? `<div class="field" style="margin:0 0 10px"><span>检验项目（模板：${UI.esc(r.checklist_name || '默认')} · NG 项自动计入不良）</span>
+        <div class="cl-rows">${cl.map((it, i) => `<div class="row cl-item" data-ci="${i}" data-cname="${UI.esc(it.name)}" data-cstd="${UI.esc(it.standard || '')}" style="gap:8px;align-items:center;flex-wrap:nowrap;margin:4px 0">
+          <span style="flex:1;min-width:120px">${UI.esc(it.name)}${it.standard ? `<span class="small muted" style="margin-left:6px">${UI.esc(it.standard)}</span>` : ''}</span>
+          <select class="input" data-cres style="width:88px;margin:0">
+            <option value="skip">未检</option><option value="ok">OK</option><option value="ng">NG</option>
+          </select>
+          <input class="input" type="number" min="0" data-cqty placeholder="NG数" style="width:76px;margin:0" hidden>
+        </div>`).join('')}</div></div>` : ''}
       <div class="field" style="margin:0 0 10px"><span>不良明细（可多种：选原因 + 数量，选「其他」需填说明）</span>
         <div class="badrows" data-rows="${r.order_step_id}"></div></div>
       <label class="field" style="margin:0 0 10px"><span>检验备注</span>
         <input class="input" data-k="remark" placeholder="如：抽检 20 件，外观合格"></label>
       <div class="row">
         <button class="btn btn-primary" data-judge="${r.order_step_id}">提交判定</button>
-        <span class="small muted">提交后：合格/让步 → 放行完工${isFinal ? '（末道同时自动成品入库）' : ''}；不合格 → 工序转待返工，返修后重新报工送检；重大异常（终检不合格或不良率≥20%）自动开单并逐级上报管理层。</span>
+        <span class="small muted">提交后：合格/让步 → 放行完工${isFinal ? '（末道同时自动成品入库）' : ''}；不合格 → 工序转待返工，返修后重新报工送检；重大异常（终检不合格或不良率超阈值）自动开单并逐级上报管理层。</span>
       </div>
     </div>`;
+  },
+
+  /* ---------------- 来料检验（IQC） ---------------- */
+  async renderIncoming(el) {
+    const [rows, sup, cfg] = await Promise.all([
+      API.get('/incoming_materials'),
+      API.get('/stats/supplier_quality').catch(() => []),
+      API.get('/quality/settings').catch(() => ({})),
+    ]);
+    this.settings = cfg;
+    const pending = rows.filter((r) => r.result === 'pending');
+    const done = rows.filter((r) => r.result !== 'pending').slice(0, 20);
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>来料待检</h3>
+          <span class="small muted">共 <b style="color:var(--warn)">${pending.length}</b> 单待判定 · 待检来料暂不计库存，合格判定后自动入库</span>
+          <div class="spacer"></div>
+          <a class="link small" href="#/warehouse" onclick="sessionStorage.setItem('wh_tab','incoming')">去仓储录来料 →</a></div>
+        <div class="card-b" id="iqcList">
+          ${pending.length ? pending.map((r) => `<div class="insp-step" id="iqc${r.id}">
+            <h4>${UI.esc(r.code || '—')} · <b>${UI.esc(r.material_name || '')}</b>
+              <span class="ins-mark waiting">待检</span></h4>
+            <div class="small muted">
+              供应商 ${UI.esc(r.supplier || '—')} · 数量 <b>${UI.n2(r.qty)}</b> ${UI.esc(r.unit || '')}
+              ${r.batch ? ' · 批次 ' + UI.esc(r.batch) : ''} · 来料日期 ${UI.esc((r.incoming_date || '').slice(0, 10))}
+              ${r.order_code ? ' · 关联工单 ' + UI.esc(r.order_code) : ''}
+            </div>
+            <div class="insp-grid">
+              <label class="field" style="margin:0"><span>不合格数</span>
+                <input class="input" type="number" min="0" max="${r.qty}" data-k="qty_fail" value="0" placeholder="0"></label>
+              <label class="field" style="margin:0"><span>判定结论</span>
+                <select class="input" data-k="conclusion">
+                  <option value="pass">合格入库</option>
+                  <option value="concession">让步接收（特采入库）</option>
+                  <option value="fail">不合格（退货处理）</option>
+                </select></label>
+              <label class="field" style="margin:0"><span>备注</span>
+                <input class="input" data-k="remark" placeholder="如：抽检合格 / 尺寸超差"></label>
+            </div>
+            <div class="row"><button class="btn btn-primary" data-iqc="${r.id}">提交判定</button>
+              <span class="small muted">合格/让步 → 整单自动入库；不合格 → 不入库并自动开质量异常单（含供应商留痕）。</span></div>
+          </div>`).join('') : `<div class="empty">${UI.icon('check')}<div>没有待检来料，去「仓储 → 来料入库」录入（结论选「待检」）</div></div>`}
+        </div>
+      </div>
+
+      <div class="grid" style="grid-template-columns:1.2fr 1fr;margin-bottom:14px">
+        <div class="card">
+          <div class="card-h"><h3>供应商来料质量</h3><span class="small muted">按来料数量排序 · 合格率=合格÷已检</span></div>
+          <div class="card-b tight">
+            ${UI.table([
+              { t: '供应商', f: (r) => UI.esc(r.name || '—') },
+              { t: '来料', align: 'right', f: (r) => `<span class="mono">${UI.n2(r.total)}</span>` },
+              { t: '合格', align: 'right', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.qualified)}</span>` },
+              { t: '不合格', align: 'right', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.rejected)}</span>` },
+              { t: '待检', align: 'right', f: (r) => `<span class="mono muted">${UI.n2(r.pending)}</span>` },
+              { t: '合格率', align: 'right', f: (r) => r.pass_rate == null
+                  ? '<span class="muted">—</span>'
+                  : `<b class="mono" style="color:${r.pass_rate < 0.9 ? 'var(--danger)' : r.pass_rate < 0.98 ? 'var(--warn)' : 'var(--ok)'}">${UI.f1(r.pass_rate * 100)}%</b>` },
+            ], sup, { emptyText: '暂无来料数据' })}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>最近判定</h3></div>
+          <div class="card-b tight">
+            ${UI.table([
+              { t: '单号', f: (r) => UI.esc(r.code || '—') },
+              { t: '物料', f: (r) => UI.esc(r.material_name || '—') },
+              { t: '供应商', f: (r) => UI.esc(r.supplier || '—') },
+              { t: '结论', f: (r) => this.resChip(r.result) },
+              { t: '检验员', f: (r) => UI.esc(r.inspector || '—') },
+              { t: '时间', f: (r) => `<span class="small muted">${UI.esc((r.updated_at || r.created_at || '').slice(5, 16))}</span>` },
+            ], done, { emptyText: '暂无判定记录' })}
+          </div>
+        </div>
+      </div>`;
+    el.querySelectorAll('[data-iqc]').forEach((b) => b.onclick = async () => {
+      const card = document.getElementById('iqc' + b.dataset.iqc);
+      if (!card) return;
+      const g = (k) => { const e2 = card.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
+      const qtyFail = Number(g('qty_fail')) || 0;
+      const conclusion = g('conclusion');
+      if (conclusion === 'pass' && qtyFail > 0) return UI.toast('判定合格时不合格数必须为 0', 'err');
+      if (conclusion !== 'pass' && qtyFail <= 0) return UI.toast('判定不合格/让步接收时须填写不合格数', 'err');
+      const label = conclusion === 'pass' ? '合格入库' : conclusion === 'concession' ? '让步接收（特采入库）' : '不合格（退货处理）';
+      if (!confirm(`来料判定「${label}」：不合格 ${qtyFail} 件。${conclusion === 'fail' ? '将不开库存并自动开质量异常单。' : '整单自动入库。'}确定提交？`)) return;
+      try {
+        const r = await API.post('/incoming_inspections', { id: Number(b.dataset.iqc), conclusion, qty_fail: qtyFail, remark: g('remark') });
+        UI.toast('判定已提交' + (r.issue ? `，已生成异常单 ${r.issue.code}` : ''), 'ok');
+        this.render(el.closest('#qbody') ? document.getElementById('view') : el);
+      } catch (e) { UI.toast(e.message, 'err'); }
+    });
   },
 
   /* ---------------- 异常单列表 ---------------- */
@@ -194,14 +314,15 @@ Views.quality = {
   },
 
   exportIssues() {
-    const cols = ['异常单号', '等级', '状态', '来源', '工单', '产品', '工序', '影响数量', '不良原因', '责任人', '已升级', '原因分析', '处理措施', '处置方式', '验证人', '发现时间', '关闭时间'];
+    const cols = ['异常单号', '等级', '状态', '来源', '工单', '产品', '工序', '影响数量', '不良原因', '责任人', '已升级', '原因分析', '处理措施', '处置方式', '报废数量', '损失金额', '验证人', '发现时间', '关闭时间'];
     const lines = [cols.join(',')];
     (this.issues || []).forEach((r) => lines.push([
       r.code, (this.LEVEL[r.level] || [r.level])[0], (this.ISSUE_STATUS[r.status] || [r.status])[0],
       r.source, r.order_code || '', r.product_name || '', r.process_name || '', r.qty_affected,
       r.bad_summary || '', r.assignee_name || '', r.escalated ? '是' : '否',
-      r.cause || '', r.action || '', this.DISPOSITION[r.disposition] || '', r.verifier || '',
-      r.created_at || '', r.closed_at || '',
+      r.cause || '', r.action || '', this.DISPOSITION[r.disposition] || '',
+      r.loss_qty != null ? r.loss_qty : '', r.loss_amount != null ? r.loss_amount : '',
+      r.verifier || '', r.created_at || '', r.closed_at || '',
     ].map((v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',')));
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
@@ -304,10 +425,17 @@ Views.quality = {
 
   /* ---------------- 质量看板 ---------------- */
   async renderDash(el) {
-    const st = await API.get('/stats/quality');
+    const [st, fpy, trend] = await Promise.all([
+      API.get('/stats/quality'),
+      API.get('/stats/fpy').catch(() => ({})),
+      API.get('/stats/quality_trend').catch(() => []),
+    ]);
     const lv = {}; (st.open_by_level || []).forEach((x) => { lv[x.level] = x.c; });
     const pareto = (st.pareto || []).map((x) => ({ name: x.name, qty: x.qty, unit: ' 件' }));
     const procs = (st.by_process || []).filter((x) => x.chk);
+    const trendRows = (trend || []).map((r) => Object.assign({}, r, {
+      pass_rate_pct: r.pass_rate != null ? Math.round(r.pass_rate * 1000) / 10 : 0,
+    }));
     el.innerHTML = `
       <div class="grid g4" style="margin-bottom:14px">
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--danger)"></i>未闭环异常</div>
@@ -322,6 +450,21 @@ Views.quality = {
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--primary)"></i>平均响应时长</div>
           <div class="stat-v">${st.avg_claim_minutes == null ? '—' : st.avg_claim_minutes}</div>
           <div class="stat-s">从开单到认领（分钟）</div></div>
+      </div>
+
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--primary)"></i>直通率 FPY</div>
+          <div class="stat-v" style="color:${fpy.fpy == null ? 'inherit' : fpy.fpy >= 0.95 ? 'var(--ok)' : fpy.fpy >= 0.85 ? 'var(--warn)' : 'var(--danger)'}">${fpy.fpy == null ? '—' : UI.f1(fpy.fpy * 100) + '%'}</div>
+          <div class="stat-s">终检一次合格 ${fpy.first_pass || 0} / 受检工单 ${fpy.total || 0}（返工越少越高）</div></div>
+        <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--danger)"></i>报废合计</div>
+          <div class="stat-v">${st.scrap_qty ? UI.n2(st.scrap_qty) : '0'}</div>
+          <div class="stat-s">异常单登记的报废数量（件）</div></div>
+        <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--warn)"></i>损失金额</div>
+          <div class="stat-v">${st.loss_amount ? '¥ ' + UI.n2(st.loss_amount) : '¥ 0'}</div>
+          <div class="stat-s">异常单登记的估计损失</div></div>
+        <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--ok)"></i>检验判定</div>
+          <div class="stat-v">${(trendRows || []).reduce((a, r) => a + (r.insp_n || 0), 0)}</div>
+          <div class="stat-s">近 12 个月检验单累计</div></div>
       </div>
 
       <div class="grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px">
@@ -347,6 +490,29 @@ Views.quality = {
         </div>
       </div>
 
+      <div class="grid" style="grid-template-columns:1.4fr 1fr;margin-bottom:14px">
+        <div class="card">
+          <div class="card-h"><h3>质量月度趋势</h3><span class="small muted">检验合格率与异常开单数</span></div>
+          <div class="card-b">${trendRows.length
+            ? UI.lineChart(trendRows, [
+                { key: 'pass_rate_pct', label: '检验合格率 %', color: '#0f9d58' },
+                { key: 'issue_n', label: '异常开单数', color: '#d93b3b' },
+              ], { title: '质量月度趋势' })
+            : `<div class="empty">${UI.icon('empty')}<div>暂无趋势数据</div></div>`}</div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>FPY 按产品</h3><span class="small muted">一次合格率最低前 10</span></div>
+          <div class="card-b tight">
+            ${UI.table([
+              { t: '产品', f: (r) => UI.esc(r.name || '—') },
+              { t: '受检工单', align: 'right', f: (r) => `<span class="mono">${UI.n2(r.total)}</span>` },
+              { t: '一次合格', align: 'right', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.pass)}</span>` },
+              { t: 'FPY', align: 'right', f: (r) => r.fpy == null ? '—' : `<b class="mono" style="color:${r.fpy >= 0.95 ? 'var(--ok)' : r.fpy >= 0.85 ? 'var(--warn)' : 'var(--danger)'}">${UI.f1(r.fpy * 100)}%</b>` },
+            ], fpy.by_product || [], { emptyText: '暂无终检数据' })}
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-h"><h3>超期未闭环异常</h3><span class="small muted">按处理期限升序</span></div>
         <div class="card-b tight">
@@ -367,6 +533,12 @@ Views.quality = {
   async renderSetup(el) {
     let cfg = {};
     try { cfg = await API.get('/quality/settings'); } catch (e) { /* 忽略 */ }
+    this.settings = cfg;
+    let checklists = [];
+    let processes = [];
+    try { [checklists, processes] = await Promise.all([API.get('/checklists'), API.get('/meta').then((m) => m.processes || [])]); } catch (e) { /* 忽略 */ }
+    this.checklists = checklists;
+    this.processes = processes;
     const isAdmin = App.user && App.user.role === 'admin';
     el.innerHTML = `
       <div class="card" style="margin-bottom:14px">
@@ -383,9 +555,25 @@ Views.quality = {
               <input class="input" id="wh" placeholder="企业微信/钉钉群机器人地址，留空则仅站内待办" value="${UI.esc(cfg.webhook_url || '')}" ${isAdmin ? '' : 'disabled'}>
               <span class="small muted">支持企业微信（文本）与钉钉（markdown）机器人</span></label>
           </div>
+          <div class="grid g2" style="margin-top:10px">
+            <label class="field"><span>重大异常判定占比（%）</span>
+              <input class="input" type="number" min="1" max="100" id="critRatio" value="${cfg.critical_ratio != null ? cfg.critical_ratio : 20}" ${isAdmin ? '' : 'disabled'}>
+              <span class="small muted">不合格占比 ≥ 该值 或 终检不合格 → 致命异常（自动开单+暂停工单）</span></label>
+            <label class="field"><span>轻微异常上限占比（%）</span>
+              <input class="input" type="number" min="0" max="50" id="minorRatio" value="${cfg.minor_ratio != null ? cfg.minor_ratio : 5}" ${isAdmin ? '' : 'disabled'}>
+              <span class="small muted">不合格占比 ≤ 该值 → 轻微异常（不惊动管理层，返工闭环）</span></label>
+          </div>
           ${isAdmin ? '<button class="btn btn-primary" id="save">保存设置</button>'
             : '<div class="small muted">仅管理员可修改，可查看当前配置。</div>'}
         </div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>检验项目模板（Checklist）</h3>
+          <span class="small muted">绑定工序后，质检台待检自动带出，逐项 OK/NG</span>
+          <div class="spacer"></div>
+          ${isAdmin || (App.user && App.user.role === 'technician') ? `<button class="btn btn-sm btn-primary" id="newCl">${UI.icon('plus')}新建模板</button>` : ''}</div>
+        <div class="card-b tight" id="clList"></div>
       </div>
 
       <div class="card" style="margin-bottom:14px">
@@ -401,7 +589,8 @@ Views.quality = {
             </ul>
             <div style="margin-top:10px">报工流程：员工报工 → 该工序落「<span class="ins-mark waiting">待检</span>」→ 质检员在「待检队列」判定
               → 合格/让步放行；不合格自动开「质量异常单」，推送给该工序<b>指派班组的技术员</b>跟踪处理，超时自动催办/升级。</div>
-            <div style="margin-top:10px" class="muted">严重异常（终检不合格或不合格占比 ≥ 20%）会暂停工单后续流转并禁止入库，需在异常单里「验证关闭」后放行。</div>
+            <div style="margin-top:10px" class="muted">不是所有工单都需要检验：在「工单详情 → 检验点」可将任意工序改回「不检验」，
+              即使已报工、处于待检或不合格状态也可取消检验（按普通工序放行流转）。</div>
           </div>
         </div>
       </div>
@@ -416,11 +605,33 @@ Views.quality = {
         await API.post('/quality/settings', {
           remind_minutes: Number(el.querySelector('#remind').value) || 30,
           escalate_minutes: Number(el.querySelector('#esc').value) || 240,
+          critical_ratio: Number(el.querySelector('#critRatio').value) || 20,
+          minor_ratio: Number(el.querySelector('#minorRatio').value) || 5,
           webhook_url: el.querySelector('#wh').value.trim(),
         });
         UI.toast('设置已保存', 'ok');
       } catch (e) { UI.toast(e.message, 'err'); }
     };
+    const nc = el.querySelector('#newCl');
+    if (nc) nc.onclick = () => this.clForm();
+    // 模板列表
+    const clList = el.querySelector('#clList');
+    clList.innerHTML = UI.table([
+      { t: '模板名称', f: (r) => `<b>${UI.esc(r.name)}</b>` },
+      { t: '绑定工序', f: (r) => r.process_name ? UI.esc(r.process_name) : '<span class="muted">通用（不绑定）</span>' },
+      { t: '项目数', align: 'right', f: (r) => `<span class="mono">${(r.items || []).length}</span>` },
+      { t: '项目预览', f: (r) => `<span class="small muted">${UI.esc((r.items || []).map((x) => x.name).join('、'))}</span>` },
+      { t: '操作', align: 'right', f: (r) => `${isAdmin || (App.user && App.user.role === 'technician') ? `<button class="btn btn-sm" data-cledit="${r.id}">编辑</button>` : ''}${isAdmin ? ` <button class="btn btn-sm btn-ghost" data-cldel="${r.id}">删除</button>` : ''}` },
+    ], checklists, { emptyText: '还没有检验项目模板，点「新建模板」创建（如：机加终检：外观 / 尺寸 / 螺纹）' });
+    clList.querySelectorAll('[data-cledit]').forEach((b) => b.onclick = () => {
+      const it = checklists.find((x) => x.id == b.dataset.cledit);
+      if (it) this.clForm(it);
+    });
+    clList.querySelectorAll('[data-cldel]').forEach((b) => b.onclick = async () => {
+      if (!(await UI.confirm('删除后绑定该模板的工序待检将不再带出检查表。确定删除？', '删除模板'))) return;
+      try { await API.del('/checklists/' + b.dataset.cldel); UI.toast('已删除', 'ok'); this.render(el.closest('#view') || document.getElementById('view')); }
+      catch (e) { UI.toast(e.message, 'err'); }
+    });
     try {
       const users = await API.get('/users');
       const qcs = users.filter((u) => u.role === 'inspector');
@@ -436,22 +647,95 @@ Views.quality = {
     }
   },
 
+  // 检验项目模板 新建/编辑弹窗
+  clForm(it) {
+    const isNew = !it;
+    it = it || { name: '', process_id: null, items: [{ name: '', standard: '' }] };
+    const rowHtml = (item) => `<div class="row cl-row" style="gap:8px;margin:6px 0;flex-wrap:nowrap">
+      <input class="input cl-name" placeholder="项目名（如：外观无划伤）" value="${UI.esc(item.name || '')}" style="flex:1">
+      <input class="input cl-std" placeholder="标准（选填，如：目视）" value="${UI.esc(item.standard || '')}" style="flex:1">
+      <button class="btn btn-sm btn-ghost cl-del" title="删除该行">✕</button></div>`;
+    UI.modal({
+      title: isNew ? '新建检验项目模板' : '编辑检验项目模板',
+      size: 'lg',
+      body: `<div class="grid g2">
+          <label class="field"><span>模板名称 <b style="color:var(--danger)">*</b></span>
+            <input class="input" id="clName" placeholder="如：机加终检" value="${UI.esc(it.name || '')}"></label>
+          <label class="field"><span>绑定工序（绑定后该工序待检自动带出）</span>
+            <select class="input" id="clProc"><option value="">通用（不绑定）</option>
+              ${(this.processes || []).map((p) => `<option value="${p.id}"${it.process_id === p.id ? ' selected' : ''}>${UI.esc(p.name)}</option>`).join('')}
+            </select></label>
+        </div>
+        <label class="field"><span>检验项目（至少一项）</span></label>
+        <div id="clRows">${(it.items || []).map(rowHtml).join('')}</div>
+        <button class="btn btn-sm" id="clAdd">${UI.icon('plus')}加一项</button>`,
+      onMount: (mask) => {
+        const bindDel = () => mask.querySelectorAll('.cl-del').forEach((d) => d.onclick = () => {
+          if (mask.querySelectorAll('.cl-row').length <= 1) return UI.toast('至少保留一项', 'err');
+          d.closest('.cl-row').remove();
+        });
+        bindDel();
+        mask.querySelector('#clAdd').onclick = () => {
+          mask.querySelector('#clRows').insertAdjacentHTML('beforeend', rowHtml({}));
+          bindDel();
+        };
+      },
+      onOk: async (mask) => {
+        const name = mask.querySelector('#clName').value.trim();
+        const items = [...mask.querySelectorAll('.cl-row')]
+          .map((r) => ({ name: r.querySelector('.cl-name').value.trim(), standard: r.querySelector('.cl-std').value.trim() }))
+          .filter((x) => x.name);
+        if (!name) throw new Error('请填写模板名称');
+        if (!items.length) throw new Error('至少填写一个检验项目');
+        const procId = mask.querySelector('#clProc').value;
+        const payload = { name, items, process_id: procId ? Number(procId) : null };
+        if (isNew) await API.post('/checklists', payload);
+        else await API.put('/checklists/' + it.id, payload);
+        UI.toast('模板已保存', 'ok');
+        this.render(document.getElementById('view'));
+      },
+    });
+  },
+
   /* ------------------------------ 判定提交 ------------------------------ */
   judge(stepId) {
     const card = document.getElementById('insp' + stepId);
     if (!card) return;
     const r = (this.pending || []).find((x) => String(x.order_step_id) === String(stepId)) || {};
     const g = (k) => { const e2 = card.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
-    const qtyPass = Number(g('qty_pass')) || 0;
+    const mode = g('inspect_mode') === 'sample' ? 'sample' : 'full';
     const qtyFail = Number(g('qty_fail')) || 0;
+    let sampleQty = 0;
+    let qtyPass = Number(g('qty_pass')) || 0;
+    if (mode === 'sample') {
+      sampleQty = Number(g('sample_qty')) || 0;
+      if (sampleQty <= 0) return UI.toast('抽检时请填写样本数', 'err');
+      if (qtyFail > sampleQty) return UI.toast('不合格数不能大于样本数', 'err');
+      qtyPass = sampleQty - qtyFail;
+    }
     let conclusion = g('conclusion');
     if (conclusion === 'pass' && qtyFail > 0) conclusion = qtyFail >= qtyPass ? 'fail' : 'concession';
     if (conclusion !== 'pass' && qtyFail <= 0) return UI.toast('判定不合格/让步接收时须填写不合格数', 'err');
 
+    // 检查表 NG 项联动：有 NG 且结论为合格 → 自动改判不合格
+    const checklist = [...card.querySelectorAll('.cl-item')].map((ci) => ({
+      name: ci.dataset.cname || '',
+      standard: ci.dataset.cstd || '',
+      result: ci.querySelector('[data-cres]').value,
+      qty: Number(ci.querySelector('[data-cqty]').value) || 0,
+    }));
+    const cl = (r.checklist || []).map((it, i) => Object.assign({ name: it.name, standard: it.standard || '' }, checklist[i] || {}));
+    const ngNames = cl.filter((c) => c.result === 'ng' && c.qty > 0).map((c) => c.name);
+    if (ngNames.length && conclusion === 'pass') {
+      conclusion = 'fail';
+      UI.toast(`检验项 NG（${ngNames.join('、')}），结论已自动改为不合格`, 'warn');
+    }
+
     const isFinal = String(r.inspect_type) === 'fqc';
     const willBe = conclusion === 'pass' ? '放行完工' : conclusion === 'concession' ? '让步接收并放行（入库单备注特采）' : '生成质量异常单并暂停/挂起';
+    const critThreshold = (this.settings && this.settings.critical_ratio) || 20;
     const ask = conclusion === 'fail'
-      ? `判定「不合格」将：① 该工序挂起；② 自动生成质量异常单推送给责任管理人员；③ ${(isFinal || (qtyPass + qtyFail > 0 && qtyFail / (qtyPass + qtyFail) >= 0.2)) ? '因属严重异常，暂停工单后续流转并禁止入库。' : '继续等待处理结果。'}\n\n受检 ${qtyPass} 件 / 不合格 ${qtyFail} 件。确定提交？`
+      ? `判定「不合格」将：① 该工序挂起；② 自动生成质量异常单推送给责任管理人员；③ ${(isFinal || (qtyPass + qtyFail > 0 && qtyFail / (qtyPass + qtyFail) >= critThreshold / 100)) ? '因属严重异常，暂停工单后续流转并禁止入库。' : '继续等待处理结果。'}\n\n受检 ${qtyPass} 件 / 不合格 ${qtyFail} 件。确定提交？`
       : `判定「${conclusion === 'pass' ? '合格' : '让步接收'}」将${willBe}${isFinal ? '，末道工序同时自动成品入库' : ''}。受检 ${qtyPass} 件。确定提交？`;
     if (!confirm(ask)) return;
 
@@ -463,12 +747,15 @@ Views.quality = {
         bad_reason_detail: det ? det.value.trim() : '',
       };
     }).filter((x) => x.qty > 0);
-    if (conclusion !== 'pass' && !defects.length && !confirm('未选择具体不良原因，将以「未分类不良」登记异常。确定继续？')) return;
+    if (conclusion !== 'pass' && !defects.length && !ngNames.length && !confirm('未选择具体不良原因，将以「未分类不良」登记异常。确定继续？')) return;
 
-    API.post('/inspections', {
-      order_step_id: Number(stepId), qty_pass: qtyPass, qty_fail: qtyFail,
+    const payload = {
+      order_step_id: Number(stepId), qty_fail: qtyFail,
       conclusion, defects, remark: g('remark'),
-    }).then((res) => {
+      inspect_mode: mode, checklist: cl,
+    };
+    if (mode === 'sample') payload.sample_qty = sampleQty; else payload.qty_pass = qtyPass;
+    API.post('/inspections', payload).then((res) => {
       const auto = res && res.autoFinishIn;
       UI.toast(`判定已提交：${(this.CONCLUSION[res.conclusion] || [res.conclusion])[0]}`
         + (auto ? `，末道已自动入库 ${UI.n2(auto.qty)} 件` : ''), auto ? 'ok' : '');
@@ -512,6 +799,8 @@ Views.quality = {
             ${it.cause ? `<dt>原因分析</dt><dd>${UI.esc(it.cause)}</dd>` : ''}
             ${it.action ? `<dt>处理措施</dt><dd>${UI.esc(it.action)}</dd>` : ''}
             ${it.disposition ? `<dt>处置方式</dt><dd><span class="chip chip-info">${UI.esc(this.DISPOSITION[it.disposition] || it.disposition)}</span></dd>` : ''}
+            ${it.loss_qty != null && it.loss_qty !== '' ? `<dt>报废数量</dt><dd><b class="mono" style="color:var(--danger)">${UI.n2(it.loss_qty)}</b> 件</dd>` : ''}
+            ${it.loss_amount != null && it.loss_amount !== '' ? `<dt>损失金额</dt><dd><b class="mono">¥ ${UI.n2(it.loss_amount)}</b></dd>` : ''}
             ${it.status === 'cancelled' ? `<dt>作废说明</dt><dd>${UI.esc(it.cause || '误报')}</dd>` : ''}
           </dl>
         </div>
@@ -546,6 +835,10 @@ Views.quality = {
                 <option value="">未定</option>
                 ${Object.entries(this.DISPOSITION).map(([k, v]) => `<option value="${k}"${it.disposition === k ? ' selected' : ''}>${v}</option>`).join('')}
               </select></label>
+            <label class="field"><span>报废数量（处置=报废时填写）</span>
+              <input class="input" type="number" min="0" id="fLossQty" value="${it.loss_qty != null ? it.loss_qty : ''}" placeholder="选填，默认=影响数量"></label>
+            <label class="field"><span>估计损失金额（元）</span>
+              <input class="input" type="number" min="0" step="0.01" id="fLossAmt" value="${it.loss_amount != null ? it.loss_amount : ''}" placeholder="选填"></label>
           </div>
           <div class="row">
             ${it.status === 'open' ? `<button class="btn btn-primary" id="claim">认领该异常</button>` : ''}
@@ -577,6 +870,8 @@ Views.quality = {
       cause: el.querySelector('#fCause').value.trim(),
       action: el.querySelector('#fAction').value.trim(),
       disposition: el.querySelector('#fDisp').value || null,
+      loss_qty: el.querySelector('#fLossQty').value === '' ? null : Number(el.querySelector('#fLossQty').value),
+      loss_amount: el.querySelector('#fLossAmt').value === '' ? null : Number(el.querySelector('#fLossAmt').value),
     }, '已提交处理，等待验证关闭');
     const cb = el.querySelector('#close');
     if (cb) cb.onclick = async () => {

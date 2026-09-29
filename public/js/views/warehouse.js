@@ -143,7 +143,7 @@ Views.warehouse = {
           { k: 'batch', t: '批次/批号' },
           { k: 'order_id', t: '关联工单', type: 'select', opts: ordersOpts },
           { k: 'inspector', t: '检验员' },
-          { k: 'result', t: '检验结论', type: 'select', opts: resultOpts, def: 'qualified', hint: '不合格不计入库存' },
+          { k: 'result', t: '检验结论', type: 'select', opts: resultOpts, def: 'pending', hint: '选「待检」暂不入库，质检员在「质量→来料检验」判定合格后自动入库；不合格不计库存' },
           { k: 'remark', t: '备注' },
         ],
       },

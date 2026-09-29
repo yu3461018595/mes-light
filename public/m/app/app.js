@@ -633,16 +633,27 @@
       </div></div>
       ${list.length ? list.map((s) => {
         const isFinal = String(s.inspect_type) === 'fqc';
+        const cl = Array.isArray(s.checklist) ? s.checklist : [];
         return `<div class="card insp" data-s="${s.order_step_id}"><div class="card-b">
           <div class="ocode" style="font-size:16px">${esc(s.order_code)} · 第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}
             <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span></div>
           <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
           <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>
           <div style="margin-top:12px">
+            <div class="field" style="margin-bottom:10px"><span>检验方式</span>
+              <select class="ipt qi-mode"><option value="full">全检</option><option value="sample">抽检</option></select></div>
+            <div class="field qi-sample-wrap" style="margin-bottom:10px" hidden><span>样本数</span>
+              <input class="ipt qi-sample" type="number" inputmode="numeric" min="1" value="${s.qty_good}"></div>
             <div class="field" style="margin-bottom:10px"><span>本次受检数（合格）</span>
               <input class="ipt qi-pass" type="number" inputmode="numeric" min="0" value="${s.qty_good}"></div>
             <div class="field" style="margin-bottom:10px"><span>不合格数</span>
               <input class="ipt qi-fail" type="number" inputmode="numeric" min="0" value="0"></div>
+            ${cl.length ? `<div class="field" style="margin-bottom:10px"><span>检验项目${s.checklist_name ? '（' + esc(s.checklist_name) + '）' : ''}</span>
+              ${cl.map((it, i) => `<div class="cl-item" data-ci="${i}" data-cname="${esc(it.name)}" style="display:flex;gap:8px;align-items:center;margin:4px 0">
+                <span style="flex:1">${esc(it.name)}${it.standard ? `<span class="t3" style="margin-left:4px">${esc(it.standard)}</span>` : ''}</span>
+                <select class="ipt qi-cres" style="width:84px"><option value="skip">未检</option><option value="ok">OK</option><option value="ng">NG</option></select>
+                <input class="ipt qi-cqty" type="number" inputmode="numeric" min="0" placeholder="NG数" style="width:70px" hidden>
+              </div>`).join('')}</div>` : ''}
             <div class="field" style="margin-bottom:6px"><span>不良明细（不合格时必填）</span>
               <div class="badrows" data-rows="${s.order_step_id}" id="br${s.order_step_id}"></div></div>
           </div>
@@ -657,16 +668,43 @@
       <div style="height:10px"></div>`;
     bindBadRows();
     list.forEach((s) => { S.vals[s.order_step_id] = { badRows: [{ reason: '', qty: '', detail: '' }] }; renderBadRows(s.order_step_id); });
+    $view.querySelectorAll('.qi-mode').forEach((sel) => sel.onchange = () => {
+      const card = sel.closest('.insp');
+      const wrap = card.querySelector('.qi-sample-wrap');
+      if (wrap) wrap.hidden = sel.value !== 'sample';
+    });
+    $view.querySelectorAll('.qi-cres').forEach((sel) => sel.onchange = () => {
+      const q = sel.closest('.cl-item').querySelector('.qi-cqty');
+      if (q) q.hidden = sel.value !== 'ng';
+    });
     $view.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => submitInspect(b.dataset.judge, b.dataset.cc));
   }
 
   async function submitInspect(stepId, conclusion) {
     const card = $view.querySelector('.insp[data-s="' + stepId + '"]');
     if (!card) return;
-    const qtyPass = Math.max(0, Math.floor(num(card.querySelector('.qi-pass').value)));
+    const mode = card.querySelector('.qi-mode').value === 'sample' ? 'sample' : 'full';
     const qtyFail = Math.max(0, Math.floor(num(card.querySelector('.qi-fail').value)));
+    let sampleQty = null;
+    let qtyPass = Math.max(0, Math.floor(num(card.querySelector('.qi-pass').value)));
+    if (mode === 'sample') {
+      sampleQty = Math.max(0, Math.floor(num(card.querySelector('.qi-sample').value)));
+      if (!sampleQty) return toast('抽检时请填写样本数');
+      if (qtyFail > sampleQty) return toast('不合格数不能大于样本数');
+      qtyPass = sampleQty - qtyFail;
+    }
     if (conclusion === 'pass' && qtyFail > 0) return toast('合格放行时不合格数须为 0');
     if (conclusion !== 'pass' && qtyFail <= 0) return toast('请填写不合格数');
+    // 检查表：NG 项存在时自动改判不合格
+    const checklist = [...card.querySelectorAll('.cl-item')].map((ci) => ({
+      name: ci.dataset.cname || '',
+      result: ci.querySelector('.qi-cres').value,
+      qty: Math.max(0, Math.floor(num(ci.querySelector('.qi-cqty').value))),
+    }));
+    if (conclusion === 'pass' && checklist.some((c) => c.result === 'ng' && c.qty > 0)) {
+      conclusion = 'fail';
+      toast('检验项 NG，结论已自动改为不合格');
+    }
     const label = conclusion === 'pass' ? '合格放行' : conclusion === 'concession' ? '让步接收' : '不合格';
     if (!confirm(`判定「${label}」：受检 ${qtyPass} 件 / 不合格 ${qtyFail} 件。确定提交？`)) return;
     const defects = [...card.querySelectorAll('.badrows .brow')].map((br) => {
@@ -674,7 +712,9 @@
       return { bad_reason_id: num(br.querySelector('.brow-reason').value), qty: num(br.querySelector('.brow-qty').value), bad_reason_detail: det ? det.value.trim() : '' };
     }).filter((x) => x.qty > 0);
     try {
-      const r = await post('/api/app/inspections', { order_step_id: stepId, qty_pass: qtyPass, qty_fail: qtyFail, conclusion, defects, remark: '' });
+      const payload = { order_step_id: num(stepId), qty_fail: qtyFail, conclusion, defects, remark: '', inspect_mode: mode, checklist };
+      if (mode === 'sample') payload.sample_qty = sampleQty; else payload.qty_pass = qtyPass;
+      const r = await post('/api/app/inspections', payload);
       okMask('判定已提交', [
         r && r.autoFinishIn ? `末道工序已自动入库 ${r.autoFinishIn.qty} 件` : '',
         r && r.issue ? `已生成重大质量异常单 ${r.issue.code}，责任人 ${r.issue.assignee_name || '—'} 与管理层已收到待办` : (r && r.conclusion === 'fail' ? '一般不合格：工序已转待返工，返修后重新报工送检' : ''),

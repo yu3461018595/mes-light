@@ -245,6 +245,37 @@ async function api(method, url, body, token) {
     chk('工人不能退料', !wRet.ok, JSON.stringify(wRet));
     const wDel = await api('DELETE', '/api/material_issues/' + wPick.data.id, null, wtok);
     chk('工人不能删单', !wDel.ok, JSON.stringify(wDel));
+
+    // 来料 IQC 闭环：待检不计库存 → 判定合格入库 / 判定不合格开异常单
+    const sumM1 = async () => (await H('GET', '/api/inventory')).data
+      .filter((r) => r.material_id === m1.id).reduce((a, r) => a + Number(r.qty), 0);
+    const iqcBase = await sumM1();
+    const iqcAdd = await H('POST', '/api/incoming_materials', {
+      code: 'LM-IQC-1', incoming_date: '2026-09-25', supplier: 'IQ测试供应商',
+      material_id: m1.id, warehouse_id: m1.warehouse_id, material_name: '45#圆钢',
+      qty: 30, unit: 'kg', batch: 'BIQC1', result: 'pending', inspector: '测试员',
+    });
+    chk('录待检来料单成功', iqcAdd.ok, JSON.stringify(iqcAdd));
+    const iqcInv0 = await sumM1();
+    chk('待检来料暂不计库存', iqcInv0 === iqcBase, '期望 ' + iqcBase + ' 实际 ' + iqcInv0);
+    const iqcFail = await H('POST', '/api/incoming_inspections', { id: iqcAdd.data.id, conclusion: 'fail', qty_fail: 10, bad_summary: '尺寸超差' });
+    chk('IQC 判定不合格成功', iqcFail.ok && iqcFail.data.issue && iqcFail.data.issue.code, JSON.stringify(iqcFail));
+    chk('不合格自动开异常单（含供应商）', iqcFail.data.issue.process_name.indexOf('IQ测试供应商') >= 0, iqcFail.data.issue);
+    const iqcInv1 = await sumM1();
+    chk('不合格不入库', iqcInv1 === iqcBase, '实际 ' + iqcInv1);
+    const iqcAdd2 = await H('POST', '/api/incoming_materials', {
+      code: 'LM-IQC-2', incoming_date: '2026-09-26', supplier: 'IQ测试供应商',
+      material_id: m1.id, warehouse_id: m1.warehouse_id, material_name: '45#圆钢',
+      qty: 20, unit: 'kg', batch: 'BIQC2', result: 'pending',
+    });
+    const iqcPass = await H('POST', '/api/incoming_inspections', { id: iqcAdd2.data.id, conclusion: 'pass', qty_fail: 0 });
+    chk('IQC 判定合格成功', iqcPass.ok && iqcPass.data.result === 'qualified', JSON.stringify(iqcPass));
+    const iqcInv2 = await sumM1();
+    chk('合格后自动入库 +20', iqcInv2 === iqcBase + 20, '实际 ' + iqcInv2);
+    const dupIqc = await H('POST', '/api/incoming_inspections', { id: iqcAdd2.data.id, conclusion: 'pass', qty_fail: 0 });
+    chk('已检单不能重复判定', !dupIqc.ok, JSON.stringify(dupIqc));
+    const sq = await H('GET', '/api/stats/supplier_quality');
+    chk('供应商质量统计含测试供应商', sq.ok && sq.data.some((r) => r.name === 'IQ测试供应商' && r.rejected > 0), JSON.stringify(sq.data && sq.data.slice(0, 3)));
   } catch (e) {
     fail++;
     console.log('  EXCEPTION  ' + e.message);

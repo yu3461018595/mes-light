@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], issue_notifications: [], settings: [], stock_alerts: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -551,13 +551,32 @@
     if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整检验点');
     const st = find('order_steps', m[1]);
     if (!st || st.order_id !== o.id) return fail('工序不存在', 404);
-    const hasRep = T('reports').some((r) => r.order_step_id === st.id) || num(st.qty_good) || num(st.qty_bad);
-    if (hasRep) return fail('该工序已有报工记录，不能修改检验点');
-    if (st.inspect_status) return fail('该工序已在检验流程中，不能修改检验点');
     const t = String((b || {}).inspect_type || '').trim();
     if (t && !['iqc', 'ipqc', 'fqc'].includes(t)) return fail('无效的检验类型');
+    // 取消检验：待检/不合格也可取消，视同普通工序放行流转
+    if (!t) {
+      const was = String(st.inspect_status || '');
+      if (was === 'waiting' || was === 'failed') {
+        const fin = num(st.qty_good) >= num(st.qty_plan);
+        update('order_steps', st.id, { inspect_type: '', inspect_status: null, status: fin ? 'done' : 'running', finish_time: fin ? nowISO() : null });
+        if (fin) {
+          const nx = T('order_steps').filter((x) => x.order_id === o.id && x.status === 'pending').sort((a, b2) => a.seq - b2.seq)[0];
+          if (nx) update('order_steps', nx.id, { status: 'running' });
+        }
+        const left = T('order_steps').filter((x) => x.order_id === o.id && x.status !== 'done').length;
+        if (left === 0) update('orders', o.id, { status: 'done', finish_time: nowISO() });
+        else if (o.status === 'paused') update('orders', o.id, { status: 'running' });
+      } else {
+        update('order_steps', st.id, { inspect_type: '' });
+      }
+      writeLog(actor(), '取消工序检验', o.code + ' 工序#' + st.id + ' 已按普通工序放行流转');
+      return ok({ inspect_type: '' });
+    }
+    const hasRep = T('reports').some((r) => r.order_step_id === st.id) || num(st.qty_good) || num(st.qty_bad);
+    if (hasRep) return fail('该工序已有报工记录，不能设置检验点');
+    if (st.inspect_status) return fail('该工序已在检验流程中，不能设置检验点');
     update('order_steps', st.id, { inspect_type: t });
-    writeLog(actor(), '工单设置检验点', o.code + ' → ' + (t || '取消检验点'));
+    writeLog(actor(), '工单设置检验点', o.code + ' → ' + t);
     return ok({ inspect_type: t });
   });
 
@@ -1545,20 +1564,36 @@
     if (!order) throw new Error('工单不存在');
     if (String(step.inspect_status || '') !== 'waiting') throw new Error('该工序当前不在待检状态，无需检验');
 
-    const qtyPass = Math.max(0, Math.floor(num(b.qty_pass)));
+    // 检验方式：sample 抽检（受检数=样本数）
+    const mode = String(b.inspect_mode || '') === 'sample' ? 'sample' : 'full';
+    let qtyPass = Math.max(0, Math.floor(num(b.qty_pass)));
     const qtyFail = Math.max(0, Math.floor(num(b.qty_fail)));
+    let sampleQty = null;
+    if (mode === 'sample') {
+      sampleQty = num(b.sample_qty) > 0 ? Math.floor(num(b.sample_qty)) : qtyPass + qtyFail;
+      if (qtyFail > sampleQty) throw new Error('不合格数不能大于样本数');
+      qtyPass = sampleQty - qtyFail;
+    }
     let conclusion = String(b.conclusion || '').trim();
     if (!['pass', 'fail', 'concession'].includes(conclusion)) conclusion = qtyFail > 0 ? 'fail' : 'pass';
     if (conclusion === 'pass' && qtyFail > 0) throw new Error('判定合格时不合格数必须为 0');
     if (conclusion !== 'pass' && qtyFail <= 0) throw new Error('判定不合格/让步接收时须填写不合格数');
+    // 检查表 NG 项并入不良明细
+    const clResults = (Array.isArray(b.checklist) ? b.checklist : [])
+      .filter((c) => String(c.name || '').trim())
+      .map((c) => ({ name: String(c.name || '').trim(), standard: String(c.standard || '').trim(),
+        result: ['ok', 'ng', 'skip'].includes(c.result) ? c.result : 'skip', qty: Math.max(0, Math.floor(num(c.qty))), remark: '' }));
+    const ngItems = clResults.filter((c) => c.result === 'ng' && c.qty > 0);
+    if (conclusion === 'pass' && ngItems.length) throw new Error('存在 NG 检验项，不能判定合格');
 
     const insCode = genCode('QC');
     const inspId = insert('inspections', {
       id: nextId('inspections'), code: insCode, order_id: order.id, order_step_id: step.id,
       report_id: num(b.report_id) || null, process_name: step.process_name || (find('processes', step.process_id) || {}).name || null,
       inspector_id: act.id, inspector: act.name,
-      qty_check: qtyPass + qtyFail, qty_pass: qtyPass, qty_fail: qtyFail,
-      conclusion, remark: b.remark || '', created_at: nowISO(),
+      qty_check: mode === 'sample' ? sampleQty : qtyPass + qtyFail, qty_pass: qtyPass, qty_fail: qtyFail,
+      conclusion, remark: b.remark || '', inspect_mode: mode, sample_qty: sampleQty,
+      checklist_result: clResults.length ? JSON.stringify(clResults) : null, created_at: nowISO(),
     });
     const defects = Array.isArray(b.defects) ? b.defects : [];
     const summary = [];
@@ -1577,12 +1612,18 @@
       summary.push(name + '×' + q);
     }
     if (conclusion !== 'pass' && !summary.length) summary.push((b.bad_summary || '未分类不良') + '×' + qtyFail);
+    for (const c of ngItems) {
+      insert('inspection_defects', { id: nextId('inspection_defects'), inspection_id: inspId, bad_reason_id: null, bad_reason: c.name, bad_reason_detail: c.remark || '', qty: c.qty });
+      summary.push(c.name + '×' + c.qty);
+    }
 
     const ratio = (qtyPass + qtyFail) > 0 ? qtyFail / (qtyPass + qtyFail) : 0;
     const isFinal = String(step.inspect_type) === 'fqc';
+    const criticalRatio = Math.min(100, Math.max(1, num(getSetting('critical_ratio', 20), 20))) / 100;
+    const minorRatio = Math.min(50, Math.max(0, num(getSetting('minor_ratio', 5), 5))) / 100;
     let level = 'major';
-    if (conclusion === 'fail' && (isFinal || ratio >= 0.2)) level = 'critical';
-    else if (ratio > 0 && ratio <= 0.05) level = 'minor';
+    if (conclusion === 'fail' && (isFinal || ratio >= criticalRatio)) level = 'critical';
+    else if (ratio > 0 && ratio <= minorRatio) level = 'minor';
 
     const result = { inspection_id: inspId, code: insCode, conclusion, qty_pass: qtyPass, qty_fail: qtyFail, issue: null, autoFinishIn: null };
     const product = find('products', order.product_id) || {};
@@ -1713,7 +1754,10 @@
     const it = find('quality_issues', m[0]);
     if (!it) return fail('异常单不存在', 404);
     if (['closed', 'cancelled'].includes(it.status)) return fail('该异常单已关闭');
-    update('quality_issues', it.id, { status: 'verifying', cause: b.cause || null, action: b.action || null, disposition: b.disposition || null, claimed_at: it.claimed_at || nowISO() });
+    update('quality_issues', it.id, { status: 'verifying', cause: b.cause || null, action: b.action || null, disposition: b.disposition || null,
+      loss_qty: (b.loss_qty !== undefined && b.loss_qty !== null && b.loss_qty !== '') ? num(b.loss_qty) : (b.disposition === 'scrap' && it.loss_qty == null ? it.qty_affected : (it.loss_qty != null ? it.loss_qty : null)),
+      loss_amount: (b.loss_amount !== undefined && b.loss_amount !== null && b.loss_amount !== '') ? num(b.loss_amount) : (it.loss_amount != null ? it.loss_amount : null),
+      claimed_at: it.claimed_at || nowISO() });
     // 抄送原上报人：他关心自己报的异常处理到哪一步了
     const owners = it.assignee_user_id ? [{ id: it.assignee_user_id, name: it.assignee_name }] : [];
     const reporter = it.created_by ? T('users').filter((u) => u.id === it.created_by && u.active) : [];
@@ -1842,6 +1886,8 @@
       webhook_url: getSetting('webhook_url', ''),
       escalate_minutes: num(getSetting('escalate_minutes', 240), 240),
       remind_minutes: num(getSetting('remind_minutes', 30), 30),
+      critical_ratio: num(getSetting('critical_ratio', 20), 20),
+      minor_ratio: num(getSetting('minor_ratio', 5), 5),
     });
   });
   R('POST', '/quality/settings', (_p, b) => {
@@ -1849,6 +1895,8 @@
     if (b.webhook_url !== undefined) setSetting('webhook_url', b.webhook_url || '');
     if (b.escalate_minutes !== undefined) setSetting('escalate_minutes', num(b.escalate_minutes, 240));
     if (b.remind_minutes !== undefined) setSetting('remind_minutes', num(b.remind_minutes, 30));
+    if (b.critical_ratio !== undefined) setSetting('critical_ratio', Math.min(100, Math.max(1, num(b.critical_ratio, 20))));
+    if (b.minor_ratio !== undefined) setSetting('minor_ratio', Math.min(50, Math.max(0, num(b.minor_ratio, 5))));
     writeLog(actor(), '修改质量设置', JSON.stringify(b));
     save();
     return ok(true);
@@ -1874,6 +1922,7 @@
     const avg = claimed.length
       ? Math.round(claimed.reduce((s, x) => s + (new Date(String(x.claimed_at).replace(' ', 'T')) - new Date(String(x.created_at).replace(' ', 'T'))) / 60000, 0) / claimed.length)
       : null;
+    const lossRows = T('quality_issues').filter((x) => x.status !== 'cancelled');
     return ok({
       total_open: openRows.length,
       total_closed: T('quality_issues').filter((x) => x.status === 'closed').length,
@@ -1882,7 +1931,122 @@
       by_process: Object.values(procMap).sort((a, b) => b.fail - a.fail).slice(0, 10),
       overdue: openRows.filter((x) => x.due_at && x.due_at < nowISO()).slice(0, 20),
       avg_claim_minutes: avg,
+      scrap_qty: lossRows.reduce((s, x) => s + (num(x.loss_qty) || 0), 0),
+      loss_amount: lossRows.reduce((s, x) => s + (num(x.loss_amount) || 0), 0),
     });
+  });
+
+  /* ---------- 检验项目模板 / 来料检验 IQC / 供应商质量 / FPY / 趋势（静态镜像） ---------- */
+  R('GET', '/checklists', () => ok(T('quality_checklists').slice().sort((a, b) => b.id - a.id).map((c) => {
+    let items = [];
+    try { items = JSON.parse(c.items || '[]'); } catch (e) { /* 忽略 */ }
+    const p = c.process_id ? find('processes', c.process_id) : null;
+    return Object.assign({}, c, { items: Array.isArray(items) ? items : [], process_name: p ? p.name : null });
+  })));
+  R('POST', '/checklists', (_p, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const name = String(b.name || '').trim();
+    const items = (Array.isArray(b.items) ? b.items : []).map((it) => ({ name: String(it.name || '').trim(), standard: String(it.standard || '').trim() })).filter((x) => x.name);
+    if (!name) return fail('请填写模板名称');
+    if (!items.length) return fail('至少填写一个检验项目');
+    const id = insert('quality_checklists', { id: nextId('quality_checklists'), name, process_id: num(b.process_id) || null, items: JSON.stringify(items), created_at: nowISO() });
+    save();
+    return ok({ id });
+  });
+  R('PUT', '/checklists/(\\d+)', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const it = find('quality_checklists', m[0]);
+    if (!it) return fail('模板不存在', 404);
+    const items = (Array.isArray(b.items) ? b.items : []).map((x) => ({ name: String(x.name || '').trim(), standard: String(x.standard || '').trim() })).filter((x) => x.name);
+    if (!String(b.name || '').trim()) return fail('请填写模板名称');
+    if (!items.length) return fail('至少填写一个检验项目');
+    update('quality_checklists', it.id, { name: String(b.name).trim(), process_id: num(b.process_id) || null, items: JSON.stringify(items) });
+    save();
+    return ok(true);
+  });
+  R('DELETE', '/checklists/(\\d+)', (m) => {
+    if (requireRole('admin')) return fail('无权限', 403);
+    const it = find('quality_checklists', m[0]);
+    if (!it) return fail('模板不存在', 404);
+    DB.quality_checklists = T('quality_checklists').filter((x) => x.id !== it.id);
+    save();
+    return ok(true);
+  });
+  R('POST', '/incoming_inspections', (_p, b) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const rec = find('incoming_materials', num(b.id));
+    if (!rec) return fail('来料单不存在', 404);
+    if (rec.result !== 'pending') return fail('该来料单已完成检验，无需重复判定');
+    const conclusion = ['pass', 'fail', 'concession'].includes(b.conclusion) ? b.conclusion : 'pass';
+    const qtyFail = Math.max(0, Math.floor(num(b.qty_fail)));
+    if (conclusion === 'pass' && qtyFail > 0) return fail('判定合格时不合格数必须为 0');
+    if (conclusion !== 'pass' && qtyFail <= 0) return fail('判定不合格/让步接收时须填写不合格数');
+    update('incoming_materials', rec.id, {
+      result: conclusion === 'fail' ? 'rejected' : 'qualified', inspector: actor().name,
+      remark: ((b.remark || '').trim() + (conclusion === 'concession' ? '（让步接收）' : '')).trim() || rec.remark,
+    });
+    save();
+    return ok({ id: rec.id, result: conclusion === 'fail' ? 'rejected' : 'qualified', qty_fail: qtyFail, issue: null });
+  });
+  R('GET', '/stats/supplier_quality', () => {
+    const map = {};
+    T('incoming_materials').forEach((i) => {
+      const k = i.supplier || '未知供应商';
+      if (!map[k]) map[k] = { name: k, total: 0, qualified: 0, rejected: 0, pending: 0 };
+      map[k].total += num(i.qty);
+      if (i.result === 'qualified') map[k].qualified += num(i.qty);
+      else if (i.result === 'rejected') map[k].rejected += num(i.qty);
+      else if (i.result === 'pending') map[k].pending += num(i.qty);
+    });
+    return ok(Object.values(map).sort((a, b) => b.total - a.total).map((r) => {
+      const judged = r.qualified + r.rejected;
+      return Object.assign(r, { pass_rate: judged > 0 ? r.qualified / judged : null });
+    }));
+  });
+  R('GET', '/stats/fpy', () => {
+    const fqcMap = {};
+    T('inspections').forEach((i) => {
+      const st = find('order_steps', i.order_step_id);
+      if (!st || String(st.inspect_type || '') !== 'fqc') return;
+      if (!fqcMap[i.order_id] || i.id < fqcMap[i.order_id].id) fqcMap[i.order_id] = i;
+    });
+    const rows = Object.values(fqcMap);
+    if (!rows.length) return ok({ total: 0, first_pass: 0, fpy: null, by_product: [], by_month: [] });
+    const byProduct = {}; const byMonth = {};
+    let firstPass = 0;
+    rows.forEach((i) => {
+      const o = find('orders', i.order_id) || {};
+      const p = o.product_id ? find('products', o.product_id) : null;
+      const pass = i.conclusion === 'pass' ? 1 : 0;
+      firstPass += pass;
+      const pk = p ? p.name : '未命名产品';
+      if (!byProduct[pk]) byProduct[pk] = { name: pk, total: 0, pass: 0 };
+      byProduct[pk].total++; byProduct[pk].pass += pass;
+      const ym = String(i.created_at || '').slice(0, 7);
+      if (ym) { if (!byMonth[ym]) byMonth[ym] = { name: ym, total: 0, pass: 0 }; byMonth[ym].total++; byMonth[ym].pass += pass; }
+    });
+    const rate = (o) => Object.assign(o, { fpy: o.total > 0 ? o.pass / o.total : null });
+    return ok({
+      total: rows.length, first_pass: firstPass, fpy: firstPass / rows.length,
+      by_product: Object.values(byProduct).map(rate).sort((a, b) => a.fpy - b.fpy).slice(0, 10),
+      by_month: Object.values(byMonth).map(rate).sort((a, b) => a.name.localeCompare(b.name)),
+    });
+  });
+  R('GET', '/stats/quality_trend', () => {
+    const map = {};
+    T('inspections').forEach((i) => {
+      const ym = String(i.created_at || '').slice(0, 7);
+      if (!ym) return;
+      if (!map[ym]) map[ym] = { name: ym, chk: 0, pass: 0, insp_n: 0, issue_n: 0, avg_close_h: null };
+      map[ym].chk += num(i.qty_check); map[ym].pass += num(i.qty_pass); map[ym].insp_n++;
+    });
+    T('quality_issues').forEach((x) => {
+      const ym = String(x.created_at || '').slice(0, 7);
+      if (!ym) return;
+      if (!map[ym]) map[ym] = { name: ym, chk: 0, pass: 0, insp_n: 0, issue_n: 0, avg_close_h: null };
+      map[ym].issue_n++;
+    });
+    return ok(Object.values(map).sort((a, b) => a.name.localeCompare(b.name)).map((r) => Object.assign(r, { pass_rate: r.chk > 0 ? r.pass / r.chk : null })));
   });
 
   /* 会话恢复（静态版：令牌形如 static-<userId>） */

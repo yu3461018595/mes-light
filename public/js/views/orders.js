@@ -239,7 +239,7 @@ Views.orders = {
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
                 ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}
-                ${canEdit && stepEditable ? `<button class="btn btn-sm" data-inspect="${r.id}" ${busy(r) ? 'disabled title="已有报工，不能修改检验点"' : ''} title="设置/取消检验点">检验点</button>` : ''}
+                ${canEdit && stepEditable ? `<button class="btn btn-sm" data-inspect="${r.id}" title="设置/取消检验点（已报工/待检也可取消检验）">检验点</button>` : ''}
                 ${canEdit && stepEditable ? `<button class="btn btn-sm btn-ghost" data-delstep="${r.id}" ${busy(r) ? 'disabled title="已有报工，需先撤销报工记录"' : ''}>删除</button>` : ''}` },
           ], o.steps)}
         </div>
@@ -447,6 +447,8 @@ Views.orders = {
       const st = o.steps.find((x) => x.id == b.dataset.inspect);
       if (!st) return;
       const cur = String(st.inspect_type || '').trim();
+      const hasReports = Number(st.qty_good) > 0 || Number(st.qty_bad) > 0
+        || ['waiting', 'failed'].includes(String(st.inspect_status || ''));
       UI.modal({
         title: '检验点 · 第 ' + (st.seq_no || st.seq) + ' 道 ' + st.process_name,
         body: `<label class="field"><span>检验类型</span>
@@ -456,10 +458,15 @@ Views.orders = {
               <option value="ipqc"${cur === 'ipqc' ? ' selected' : ''}>过程检 IPQC（过程中抽检把关）</option>
               <option value="fqc"${cur === 'fqc' ? ' selected' : ''}>终检 FQC（完工最终检验）</option>
             </select></label>
-          <div class="small muted">设为检验点后：该工序报工完成 → 状态「待检」，由质检员在「质量」页判定；合格放行，重大不合格自动开异常单并暂停工单。已有报工或已进入检验流程的工序不能修改。</div>`,
+          <div class="small muted">设为检验点后：该工序报工完成 → 状态「待检」，由质检员在「质量」页判定；合格放行，重大不合格自动开异常单并暂停工单。<b>取消检验</b>：不是所有工单都需要首检/终检——已报工、待检甚至不合格的工序也可改回「不检验」，取消后按普通工序放行流转，暂停的工单自动恢复。</div>`,
         onOk: async (mask) => {
-          await API.put('/orders/' + id + '/steps/' + st.id + '/inspect', { inspect_type: mask.querySelector('#iType').value });
-          UI.toast('检验点已更新', 'ok');
+          const val = mask.querySelector('#iType').value;
+          if (!val && cur && hasReports) {
+            const okc = await UI.confirm('取消检验后：该工序不再送检，按当前合格数放行流转（待检自动出队、不合格视同放行、暂停工单恢复）。确定取消检验？', '取消检验');
+            if (!okc) return;
+          }
+          await API.put('/orders/' + id + '/steps/' + st.id + '/inspect', { inspect_type: val });
+          UI.toast(val ? '检验点已设置' : '已取消检验，工序按普通工序流转', 'ok');
           App.render();
         },
       });

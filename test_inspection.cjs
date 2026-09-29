@@ -198,6 +198,68 @@ async function api(m, u, b, t) {
     const allOrders = await H('GET', '/api/orders');
     const noInsp = (allOrders.data || []).filter((o) => o.status === 'running' || o.status === 'released');
     chk('存在工单可正常处理', allOrders.ok, (allOrders.data || []).length);
+
+    console.log('\n--- 14) 质量v2：检查表 / 抽检 / 阈值配置 / 取消检验 ---');
+    // 14.1 检验项目模板 CRUD + 绑定工序
+    const clItems = [{ name: '外观无划伤', standard: '目视' }, { name: '关键尺寸', standard: 'φ20±0.05' }];
+    const cl1 = await H('POST', '/api/checklists', { name: '终检模板-' + sfx, items: clItems });
+    chk('新建检查表模板', cl1.ok && cl1.data.id, cl1);
+    const clBind = await H('PUT', '/api/checklists/' + cl1.data.id, { name: '终检模板-' + sfx, process_id: p2.data.id, items: clItems });
+    chk('模板绑定工序', clBind.ok, clBind);
+    const clList = await H('GET', '/api/checklists');
+    chk('模板列表可读', clList.ok && clList.data.some((c) => c.id === cl1.data.id && c.process_name), clList.data && clList.data.length);
+
+    // 14.2 新工单 → 报工 → 待检队列带出检查表
+    const ordv = await H('POST', '/api/orders', { code: 'MO-V2-' + sfx, product_id: prod.data.id, route_id: rt.data.id, qty_plan: 10 });
+    chk('建V2工单', ordv.ok, ordv);
+    const relv = await H('PATCH', '/api/orders/' + ordv.data.id + '/status', { status: 'released' });
+    chk('下发V2工单', relv.ok, relv);
+    const vsteps = (await H('GET', '/api/orders/' + ordv.data.id)).data.steps;
+    const repv1 = await H('POST', '/api/reports', { order_id: ordv.data.id, order_step_id: vsteps[0].id, qty_good: 10, qty_bad: 0, work_min: 5 });
+    chk('V2首道报工', repv1.ok, repv1);
+    const repv2 = await H('POST', '/api/reports', { order_id: ordv.data.id, order_step_id: vsteps[1].id, qty_good: 10, qty_bad: 0, work_min: 5 });
+    chk('V2终道报工落待检', repv2.ok, repv2);
+    const pv = (await H('GET', '/api/inspections/pending')).data.find((r) => r.order_step_id === vsteps[1].id);
+    chk('待检队列带出检查表', pv && Array.isArray(pv.checklist) && pv.checklist.length === 2, pv && pv.checklist);
+
+    // 14.3 阈值配置：critical_ratio 调成 50（让 20% 占比不触发致命）
+    const setR = await H('POST', '/api/quality/settings', { critical_ratio: 50, minor_ratio: 5 });
+    chk('配置定级阈值', setR.ok, setR);
+    const getR = await H('GET', '/api/quality/settings');
+    chk('阈值读取一致', getR.ok && Number(getR.data.critical_ratio) === 50, getR.data);
+
+    // 14.4 抽检 + 检查表 NG 判不合格（占比 20% → major，不开单）
+    const insv = await H('POST', '/api/inspections', {
+      order_step_id: vsteps[1].id, inspect_mode: 'sample', sample_qty: 5, qty_fail: 1, conclusion: 'fail',
+      checklist: [{ name: '外观无划伤', result: 'ng', qty: 1 }, { name: '关键尺寸', result: 'ok', qty: 0 }],
+    });
+    chk('抽检+检查表判定成功', insv.ok, insv);
+    chk('受检数=样本数', insv.data.qty_pass === 4 && insv.data.qty_fail === 1, insv.data);
+    const insvD = await H('GET', '/api/inspections/' + insv.data.inspection_id);
+    chk('NG 项并入不良明细', insvD.ok && (insvD.data.defects || []).some((d) => d.bad_reason === '外观无划伤' && d.qty === 1), insvD.data && insvD.data.defects);
+    chk('终检不合格触发致命开单（fqc 规则优先于阈值）', insv.ok && insv.data.issue && insv.data.issue.level === 'critical', insv.data.issue);
+    const vst1 = (await H('GET', '/api/orders/' + ordv.data.id)).data.steps;
+    chk('终道置 failed', vst1[1].inspect_status === 'failed', vst1[1].inspect_status);
+
+    // 14.5 取消检验：已报工且不合格状态的工序也可取消检验（按普通工序放行）
+    const cancelInsp = await H('PUT', '/api/orders/' + ordv.data.id + '/steps/' + vsteps[1].id + '/inspect', { inspect_type: '' });
+    chk('取消检验成功', cancelInsp.ok, cancelInsp);
+    chk('返回已放行标记', cancelInsp.data.released === true, cancelInsp.data);
+    const vst2 = (await H('GET', '/api/orders/' + ordv.data.id)).data.steps;
+    chk('取消后工序完工放行', vst2[1].inspect_type === '' && vst2[1].inspect_status == null && vst2[1].status === 'done', vst2[1]);
+    const odv = await H('GET', '/api/orders/' + ordv.data.id);
+    chk('工单随之完工', odv.data.status === 'done', odv.data.status);
+
+    // 14.6 检查表 NG 不允许判定合格
+    const repv3 = await H('POST', '/api/reports', { order_id: ord3.data.id, order_step_id: stm[0].id, qty_good: 1, qty_bad: 0, work_min: 2 });
+    const pend3 = (await H('GET', '/api/inspections/pending')).data.find((r) => r.order_step_id === stm[0].id);
+    if (pend3) {
+      const bad = await H('POST', '/api/inspections', {
+        order_step_id: stm[0].id, qty_fail: 1, conclusion: 'pass',
+        checklist: [{ name: '外观NG项', result: 'ng', qty: 1 }],
+      });
+      chk('NG 项不允许判合格', !bad.ok, bad);
+    }
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));

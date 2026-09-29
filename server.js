@@ -598,20 +598,44 @@ route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req
   ok(res, true);
 });
 
-// 设置/取消工序检验点：inspect_type 传 '' 取消；要求无报工且未进入检验流程
+// 设置/取消工序检验点：inspect_type 传 '' 取消检验。
+// 取消检验放宽限制：即使工序已有报工、正处于「待检/不合格」也可取消——
+// 取消时视同普通工序放行：按当前合格数判定完工并流转后续工序，暂停工单自动恢复，等待中的检验自动出队。
 route('PUT', '/api/orders/(\\d+)/steps/(\\d+)/inspect', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
   if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整检验点');
   const st = get('SELECT s.*, p.name pname FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=? AND s.order_id=?', [m[2], m[1]]);
   if (!st) return fail(res, '工序不存在', 404);
-  const rc = get('SELECT COUNT(*) c FROM reports WHERE order_step_id=?', [m[2]]).c;
-  if (rc) return fail(res, '该工序已有 ' + rc + ' 条报工记录，不能修改检验点');
-  if (st.inspect_status) return fail(res, '该工序已在检验流程中，不能修改检验点');
   const t = String(b.inspect_type || '').trim();
   if (t && !INSPECT_LABEL[t]) return fail(res, '无效的检验类型（可选：iqc 首检 / ipqc 过程检 / fqc 终检）');
+
+  // 取消检验：待检/不合格状态也可取消（该工序不再送检，按普通工序处理）
+  if (!t) {
+    const was = String(st.inspect_status || '');
+    tx(() => {
+      if (was === 'waiting' || was === 'failed') {
+        const fin = num(st.qty_good) >= num(st.qty_plan);
+        run("UPDATE order_steps SET inspect_type='', inspect_status=NULL, status=?, finish_time=? WHERE id=?",
+          [fin ? 'done' : 'running', fin ? now() : null, st.id]);
+        if (fin) run("UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')", [o.id]);
+        const left = get("SELECT COUNT(*) c FROM order_steps WHERE order_id=? AND status<>'done'", [o.id]).c;
+        if (left === 0) run("UPDATE orders SET status='done', finish_time=? WHERE id=?", [now(), o.id]);
+        else if (o.status === 'paused') run("UPDATE orders SET status='running' WHERE id=?", [o.id]);
+      } else {
+        run("UPDATE order_steps SET inspect_type='' WHERE id=?", [st.id]);
+      }
+    });
+    writeLog(u, '取消工序检验', o.code + '「' + (st.pname || '#' + m[2]) + '」原状态 ' + (was || '未检') + '，已按普通工序放行流转');
+    return ok(res, { inspect_type: '', released: was === 'waiting' || was === 'failed' });
+  }
+
+  // 设置检验点：要求无报工且未进入检验流程（保证检验数据一致）
+  const rc = get('SELECT COUNT(*) c FROM reports WHERE order_step_id=?', [m[2]]).c;
+  if (rc) return fail(res, '该工序已有 ' + rc + ' 条报工记录，不能设置检验点');
+  if (st.inspect_status) return fail(res, '该工序已在检验流程中，不能设置检验点');
   run('UPDATE order_steps SET inspect_type=? WHERE id=?', [t, m[2]]);
-  writeLog(u, '工单设置检验点', o.code + '「' + (st.pname || '#' + m[2]) + '」→ ' + (t ? INSPECT_LABEL[t] : '取消检验点'));
+  writeLog(u, '工单设置检验点', o.code + '「' + (st.pname || '#' + m[2]) + '」→ ' + INSPECT_LABEL[t]);
   ok(res, { inspect_type: t });
 });
 
@@ -1596,14 +1620,14 @@ function createQualityIssue(opt) {  const ts = now();
   const order = opt.order_id ? get('SELECT * FROM orders WHERE id=?', [opt.order_id]) : null;
   const assignee = resolveIssueAssignee(step, order);
   const id = insert(`INSERT INTO quality_issues(code,level,source,order_id,order_step_id,inspection_id,product_id,product_name,order_code,process_name,
-      qty_affected,bad_summary,status,assignee_user_id,assignee_name,claimed_at,due_at,escalated,cause,action,disposition,verifier,closed_at,created_by,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,NULL,?,0,NULL,NULL,NULL,NULL,NULL,?,?)`,
+      qty_affected,bad_summary,status,assignee_user_id,assignee_name,claimed_at,due_at,escalated,cause,action,disposition,verifier,closed_at,created_by,created_at,supplier)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,NULL,?,0,NULL,NULL,NULL,NULL,NULL,?,?,?)`,
     [code, opt.level || 'major', opt.source || 'inspect', opt.order_id || null, opt.order_step_id || null, opt.inspection_id || null,
       opt.product_id || null, opt.product_name || null, order ? order.code : null, opt.process_name || null,
       num(opt.qty_affected), opt.bad_summary || null,
       assignee.id, assignee.name,
       ts.slice(0, 19), // due_at 由扫描器按等级计算；此处占位
-      opt.created_by || null, ts]);
+      opt.created_by || null, ts, opt.supplier || null]);
   const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
   const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
   const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
@@ -1631,8 +1655,16 @@ function doInspection(b, actor) {
   if (!order) throw new Error('工单不存在');
   if (String(step.inspect_status || '') !== 'waiting') throw new Error('该工序当前不在待检状态，无需检验');
 
-  const qtyPass = Math.max(0, Math.floor(num(b.qty_pass)));
+  // 检验方式：full 全检（默认）/ sample 抽检（受检数=样本数，合格样本数=样本数-不合格数）
+  const mode = String(b.inspect_mode || '') === 'sample' ? 'sample' : 'full';
+  let qtyPass = Math.max(0, Math.floor(num(b.qty_pass)));
   const qtyFail = Math.max(0, Math.floor(num(b.qty_fail)));
+  let sampleQty = null;
+  if (mode === 'sample') {
+    sampleQty = num(b.sample_qty) > 0 ? Math.floor(num(b.sample_qty)) : qtyPass + qtyFail;
+    if (qtyFail > sampleQty) throw new Error('不合格数不能大于样本数');
+    qtyPass = sampleQty - qtyFail;
+  }
   let conclusion = String(b.conclusion || '').trim();
   if (!['pass', 'fail', 'concession'].includes(conclusion)) {
     conclusion = qtyFail > 0 ? 'fail' : 'pass';
@@ -1640,11 +1672,27 @@ function doInspection(b, actor) {
   if (conclusion === 'pass' && qtyFail > 0) throw new Error('判定合格时不合格数必须为 0');
   if (conclusion !== 'pass' && qtyFail <= 0) throw new Error('判定不合格/让步接收时须填写不合格数');
 
+  // 检验项目检查表（可选，来自绑定工序的模板）：逐项 OK/NG/未检，NG 项并入不良明细
+  const clResults = [];
+  for (const c of (Array.isArray(b.checklist) ? b.checklist : [])) {
+    const nm = String(c.name || '').trim();
+    if (!nm) continue;
+    clResults.push({ name: nm, standard: String(c.standard || '').trim(),
+      result: ['ok', 'ng', 'skip'].includes(c.result) ? c.result : 'skip',
+      qty: Math.max(0, Math.floor(num(c.qty))), remark: String(c.remark || '').trim() });
+  }
+  const ngItems = clResults.filter((c) => c.result === 'ng');
+  if (conclusion === 'pass' && ngItems.some((c) => c.qty > 0)) {
+    throw new Error('存在 NG 检验项（' + ngItems.filter((c) => c.qty > 0).map((c) => c.name).join('、') + '），不能判定合格');
+  }
+
   const insCode = genCode('QC');
-  const inspId = insert(`INSERT INTO inspections(code,order_id,order_step_id,report_id,process_name,inspector_id,inspector,qty_check,qty_pass,qty_fail,conclusion,remark,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  const qtyCheck = mode === 'sample' ? sampleQty : qtyPass + qtyFail;
+  const inspId = insert(`INSERT INTO inspections(code,order_id,order_step_id,report_id,process_name,inspector_id,inspector,qty_check,qty_pass,qty_fail,conclusion,remark,inspect_mode,sample_qty,checklist_result,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [insCode, order.id, step.id, num(b.report_id) || null, step.process_name || null, actor.id, actor.name,
-      qtyPass + qtyFail, qtyPass, qtyFail, conclusion, b.remark || '', now()]);
+      qtyCheck, qtyPass, qtyFail, conclusion, b.remark || '', mode, sampleQty,
+      clResults.length ? JSON.stringify(clResults) : null, now()]);
 
   // 不良明细（可多种）
   const defects = Array.isArray(b.defects) ? b.defects : [];
@@ -1666,12 +1714,22 @@ function doInspection(b, actor) {
   }
   if (conclusion !== 'pass' && !summary.length) summary.push((b.bad_summary || '未分类不良') + '×' + qtyFail);
 
-  // 定级：终检不合格或不合格占比高 → critical；占比低 → minor；其余 major
+  // 检查表 NG 项并入不良明细（不良原因=项目名，数量按各项 NG 数）
+  for (const c of ngItems) {
+    if (c.qty <= 0) continue;
+    insert('INSERT INTO inspection_defects(inspection_id,bad_reason_id,bad_reason,bad_reason_detail,qty) VALUES(?,?,?,?,?)',
+      [inspId, null, c.name, c.remark || '', c.qty]);
+    summary.push(c.name + '×' + c.qty);
+  }
+
+  // 定级：终检不合格或不合格占比高 → critical；占比低 → minor（阈值可在「检验设置」配置，默认 20% / 5%）
   const ratio = (qtyPass + qtyFail) > 0 ? qtyFail / (qtyPass + qtyFail) : 0;
   const isFinal = String(step.inspect_type) === 'fqc';
+  const criticalRatio = Math.min(100, Math.max(1, num(getSetting('critical_ratio', 20)))) / 100;
+  const minorRatio = Math.min(50, Math.max(0, num(getSetting('minor_ratio', 5)))) / 100;
   let level = 'major';
-  if (conclusion === 'fail' && (isFinal || ratio >= 0.2)) level = 'critical';
-  else if (ratio > 0 && ratio <= 0.05) level = 'minor';
+  if (conclusion === 'fail' && (isFinal || ratio >= criticalRatio)) level = 'critical';
+  else if (ratio > 0 && ratio <= minorRatio) level = 'minor';
 
   const result = { inspection_id: inspId, code: insCode, conclusion, qty_pass: qtyPass, qty_fail: qtyFail, issue: null, autoFinishIn: null };
   const product = get('SELECT * FROM products WHERE id=?', [order.product_id]);
@@ -1734,16 +1792,30 @@ function doInspection(b, actor) {
 }
 
 /* ---- 检验接口 ---- */
+// 为待检行附加绑定的检验项目模板（按工序档案绑定，一条工序至多一个模板）
+function attachChecklist(rows) {
+  if (!rows || !rows.length) return;
+  const cls = all('SELECT id,name,process_id,items FROM quality_checklists');
+  if (!cls.length) return;
+  for (const r of rows) {
+    const t = cls.find((c) => c.process_id && c.process_id === r.process_id);
+    if (t) {
+      try { r.checklist = JSON.parse(t.items || '[]'); r.checklist_id = t.id; r.checklist_name = t.name; } catch (e) { /* 忽略 */ }
+    }
+  }
+}
 // 待检队列（质检台）
 route('GET', '/api/inspections/pending', ['admin', 'technician', 'inspector'], (req, res) => {
-  ok(res, all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
+  const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.process_id, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
       p.name process_name, o.code order_code, o.status order_status, od.name product_name, s.start_time,
       (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN orders o ON o.id=s.order_id
     LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
     WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed')
-    ORDER BY s.id DESC LIMIT 200`));
+    ORDER BY s.id DESC LIMIT 200`);
+  attachChecklist(rows);
+  ok(res, rows);
 });
 // 检验记录列表
 route('GET', '/api/inspections', [], (req, res, _m, _b, _u, query) => {
@@ -1767,7 +1839,7 @@ route('POST', '/api/inspections', ['admin', 'technician', 'inspector'], (req, re
 });
 // 质检台队列（APP 质检员扫码登录后进入）——与公开扫码入口同口径，但走登录态
 route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (req, res, _m, _b, u) => {
-  const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
+  const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.process_id, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
       s.assignee_team, p.name process_name, o.code order_code, od.name product_name,
       (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
@@ -1775,6 +1847,7 @@ route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (re
     LEFT JOIN processes p ON p.id=s.process_id LEFT JOIN products od ON od.id=o.product_id
     WHERE s.inspect_status='waiting' AND o.status<>'closed'
     ORDER BY s.id DESC LIMIT 200`);
+  attachChecklist(rows);
   ok(res, { worker: { id: u.id, name: u.name, team: u.team, role: u.role }, steps: rows, badReasons: all('SELECT id,name FROM bad_reasons ORDER BY id') });
 });
 
@@ -1821,8 +1894,15 @@ route('POST', '/api/quality_issues/(\\d+)/handle', ['admin', 'technician', 'insp
   if (!it) return fail(res, '异常单不存在', 404);
   if (['closed', 'cancelled'].includes(it.status)) return fail(res, '该异常单已关闭');
   tx(() => {
-    run("UPDATE quality_issues SET status='verifying', cause=?, action=?, disposition=?, claimed_at=IFNULL(claimed_at,?) WHERE id=?",
-      [b.cause || null, b.action || null, b.disposition || null, now(), it.id]);
+    // 报废/损失登记：处置=报废未填数量时默认取影响数量；金额选填
+    const lossQty = (b.loss_qty !== undefined && b.loss_qty !== '' && b.loss_qty !== null)
+      ? num(b.loss_qty)
+      : (b.disposition === 'scrap' && it.loss_qty == null ? it.qty_affected : (it.loss_qty != null ? it.loss_qty : null));
+    const lossAmt = (b.loss_amount !== undefined && b.loss_amount !== '' && b.loss_amount !== null)
+      ? num(b.loss_amount)
+      : (it.loss_amount != null ? it.loss_amount : null);
+    run("UPDATE quality_issues SET status='verifying', cause=?, action=?, disposition=?, loss_qty=?, loss_amount=?, claimed_at=IFNULL(claimed_at,?) WHERE id=?",
+      [b.cause || null, b.action || null, b.disposition || null, lossQty, lossAmt, now(), it.id]);
     // 抄送原上报人：他关心自己报的异常处理到哪一步了
     const reporter = it.created_by ? get('SELECT id,name FROM users WHERE id=? AND active=1', [it.created_by]) : null;
     const owners = it.assignee_user_id ? [{ id: it.assignee_user_id, name: it.assignee_name }] : [];
@@ -1903,6 +1983,45 @@ route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req,
   ok(res, it);
 });
 
+/* ---- 检验项目模板（Checklist）---- */
+const clParse = (raw) => { try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+const clNorm = (raw) => (Array.isArray(raw) ? raw : [])
+  .map((it) => ({ name: String(it.name || '').trim(), standard: String(it.standard || '').trim() }))
+  .filter((it) => it.name);
+route('GET', '/api/checklists', [], (req, res) => {
+  ok(res, all('SELECT c.*, p.name process_name FROM quality_checklists c LEFT JOIN processes p ON p.id=c.process_id ORDER BY c.id DESC')
+    .map((c) => Object.assign(c, { items: clParse(c.items) })));
+});
+route('POST', '/api/checklists', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const name = String(b.name || '').trim();
+  if (!name) return fail(res, '请填写模板名称');
+  const items = clNorm(b.items);
+  if (!items.length) return fail(res, '至少填写一个检验项目（如：外观无划伤 / 关键尺寸）');
+  const id = insert('INSERT INTO quality_checklists(name,process_id,items,created_at) VALUES(?,?,?,?)',
+    [name, num(b.process_id) || null, JSON.stringify(items), now()]);
+  writeLog(u, '新建检验项目模板', name + '（' + items.length + ' 项）');
+  ok(res, { id });
+});
+route('PUT', '/api/checklists/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const it = get('SELECT * FROM quality_checklists WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '模板不存在', 404);
+  const name = String(b.name || '').trim();
+  if (!name) return fail(res, '请填写模板名称');
+  const items = clNorm(b.items);
+  if (!items.length) return fail(res, '至少填写一个检验项目');
+  run('UPDATE quality_checklists SET name=?, process_id=?, items=? WHERE id=?',
+    [name, num(b.process_id) || null, JSON.stringify(items), m[1]]);
+  writeLog(u, '修改检验项目模板', name + '（' + items.length + ' 项）');
+  ok(res, true);
+});
+route('DELETE', '/api/checklists/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  const it = get('SELECT name FROM quality_checklists WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '模板不存在', 404);
+  run('DELETE FROM quality_checklists WHERE id=?', [m[1]]);
+  writeLog(u, '删除检验项目模板', it.name);
+  ok(res, true);
+});
+
 /* ---- 消息中心（APP 通知）---- */
 route('GET', '/api/notifications', [], (req, res, _m, _b, u, query) => {
   if (!u) return ok(res, []);
@@ -1965,6 +2084,8 @@ route('GET', '/api/quality/settings', ['admin', 'technician'], (req, res) => {
     webhook_url: getSetting('webhook_url', ''),
     escalate_minutes: num(getSetting('escalate_minutes', 240)),
     remind_minutes: num(getSetting('remind_minutes', 30)),
+    critical_ratio: num(getSetting('critical_ratio', 20)),
+    minor_ratio: num(getSetting('minor_ratio', 5)),
   });
 });
 route('POST', '/api/quality/settings', ['admin'], (req, res, _m, b, u) => {
@@ -1976,6 +2097,8 @@ route('POST', '/api/quality/settings', ['admin'], (req, res, _m, b, u) => {
   if (b.webhook_url !== undefined) setKV('webhook_url', b.webhook_url || '');
   if (b.escalate_minutes !== undefined) setKV('escalate_minutes', num(b.escalate_minutes, 240));
   if (b.remind_minutes !== undefined) setKV('remind_minutes', num(b.remind_minutes, 30));
+  if (b.critical_ratio !== undefined) setKV('critical_ratio', Math.min(100, Math.max(1, num(b.critical_ratio, 20))));
+  if (b.minor_ratio !== undefined) setKV('minor_ratio', Math.min(50, Math.max(0, num(b.minor_ratio, 5))));
   writeLog(u, '修改质量设置', JSON.stringify(b));
   ok(res, true);
 });
@@ -1996,11 +2119,78 @@ route('GET', '/api/stats/quality', [], (req, res) => {
     AND IFNULL(due_at,'')<>'' AND due_at < ? ORDER BY due_at LIMIT 20`, [now()]);
   // 平均响应时长（创建→认领，单位分钟）
   const resp = get(`SELECT AVG((julianday(claimed_at)-julianday(created_at))*24*60) m FROM quality_issues WHERE claimed_at IS NOT NULL`);
+  // 报废与损失（处置=报废的数量 + 登记的损失金额）
+  const loss = get(`SELECT COALESCE(SUM(loss_qty),0) q, COALESCE(SUM(loss_amount),0) a FROM quality_issues WHERE status<>'cancelled'`);
   ok(res, {
     total_open: totalOpen, total_closed: totalClosed,
     open_by_level: openByLevel, pareto, by_process: byProcess,
     overdue: overdue, avg_claim_minutes: resp && resp.m ? Math.round(resp.m) : null,
+    scrap_qty: loss.q, loss_amount: loss.a,
   });
+});
+
+// 供应商来料质量：来料合格率（合格÷已检，待检不计入分母）
+route('GET', '/api/stats/supplier_quality', [], (req, res, _m, _b, _u, q) => {
+  const w = []; const p = [];
+  if (q.start) { w.push('i.incoming_date>=?'); p.push(q.start); }
+  if (q.end) { w.push('i.incoming_date<=?'); p.push(q.end); }
+  const rows = all(`SELECT i.supplier name,
+      SUM(i.qty) total,
+      SUM(CASE WHEN i.result='qualified' THEN i.qty ELSE 0 END) qualified,
+      SUM(CASE WHEN i.result='rejected' THEN i.qty ELSE 0 END) rejected,
+      SUM(CASE WHEN i.result='pending' THEN i.qty ELSE 0 END) pending
+    FROM incoming_materials i ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+    GROUP BY i.supplier ORDER BY total DESC LIMIT 50`, p);
+  ok(res, rows.map((r) => {
+    const judged = (Number(r.qualified) || 0) + (Number(r.rejected) || 0);
+    return Object.assign(r, { pass_rate: judged > 0 ? (Number(r.qualified) || 0) / judged : null });
+  }));
+});
+
+// 直通率 FPY（一次合格率）：每张工单取终检(fqc)首次判定，一次判定即合格（无返工/让步）计为一次合格
+route('GET', '/api/stats/fpy', [], (req, res, _m, _b, _u, q) => {
+  const rows = all(`WITH first_insp AS (
+      SELECT i.order_id, MIN(i.id) fid
+      FROM inspections i JOIN order_steps s ON s.id=i.order_step_id
+      WHERE IFNULL(s.inspect_type,'')='fqc'
+      GROUP BY i.order_id)
+    SELECT fi.order_id, i.conclusion, substr(i.created_at,1,7) ym, o.product_id, p.name product_name
+    FROM first_insp fi
+    JOIN inspections i ON i.id=fi.fid
+    JOIN orders o ON o.id=fi.order_id LEFT JOIN products p ON p.id=o.product_id`);
+  if (!rows.length) return ok(res, { total: 0, first_pass: 0, fpy: null, by_product: [], by_month: [] });
+  const byProduct = {}; const byMonth = {};
+  let firstPass = 0;
+  for (const r of rows) {
+    const pass = r.conclusion === 'pass' ? 1 : 0;
+    firstPass += pass;
+    const pk = r.product_name || '未命名产品';
+    byProduct[pk] = byProduct[pk] || { name: pk, total: 0, pass: 0 };
+    byProduct[pk].total++; byProduct[pk].pass += pass;
+    byMonth[r.ym] = byMonth[r.ym] || { name: r.ym, total: 0, pass: 0 };
+    byMonth[r.ym].total++; byMonth[r.ym].pass += pass;
+  }
+  const rate = (o) => Object.assign(o, { fpy: o.total > 0 ? o.pass / o.total : null });
+  ok(res, {
+    total: rows.length, first_pass: firstPass, fpy: firstPass / rows.length,
+    by_product: Object.values(byProduct).map(rate).sort((a, b) => a.fpy - b.fpy).slice(0, 10),
+    by_month: Object.values(byMonth).map(rate).sort((a, b) => a.name.localeCompare(b.name)).slice(-12),
+  });
+});
+
+// 质量趋势（按月）：检验合格率、异常开单数、平均闭环时长（小时）
+route('GET', '/api/stats/quality_trend', [], (req, res) => {
+  const insp = all(`SELECT substr(created_at,1,7) ym, COUNT(*) n, SUM(qty_check) chk, SUM(qty_pass) pass
+    FROM inspections GROUP BY ym ORDER BY ym DESC LIMIT 12`);
+  const issues = all(`SELECT substr(created_at,1,7) ym, COUNT(*) n,
+      AVG(CASE WHEN closed_at IS NOT NULL THEN (julianday(closed_at)-julianday(created_at))*24 END) avg_close_h
+    FROM quality_issues WHERE status<>'cancelled' GROUP BY ym ORDER BY ym DESC LIMIT 12`);
+  const map = {};
+  for (const r of insp) map[r.ym] = Object.assign({ name: r.ym, chk: r.chk || 0, pass_rate: r.chk > 0 ? (r.pass || 0) / r.chk : null, insp_n: r.n, issue_n: 0, avg_close_h: null }, map[r.ym] || {});
+  for (const r of issues) {
+    map[r.ym] = Object.assign({ name: r.ym, chk: 0, pass_rate: null, insp_n: 0, issue_n: r.n, avg_close_h: r.avg_close_h != null ? Math.round(r.avg_close_h * 10) / 10 : null }, map[r.ym] || {});
+  }
+  ok(res, Object.values(map).sort((a, b) => a.name.localeCompare(b.name)));
 });
 
 // 超时扫描：未认领 → 抄送；长时间未处理 → 升级。每分钟执行。
@@ -2049,31 +2239,38 @@ route('POST', '/api/incoming_materials', ['admin', 'technician'], (req, res, _m,
   if (get('SELECT id FROM incoming_materials WHERE code=?', [code])) return fail(res, '该来料单号已存在');
   const mid = resolveMaterialId(b);
   fillFromMaterial(b, mid);
+  // 检验结论：pending 待检（默认，暂不计库存，由质检员判定后入库）/ qualified 合格（直接入库）/ rejected 不合格
+  const iqcResult = ['pending', 'qualified', 'rejected'].includes(b.result) ? b.result : 'pending';
   let id;
   tx(() => {
     id = insert(`INSERT INTO incoming_materials(code,incoming_date,supplier,material_id,warehouse_id,material_code,material_name,material_spec,qty,unit,batch,order_id,inspector,result,remark,created_by,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [code, b.incoming_date || today(), b.supplier || null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
         b.material_code || null, b.material_name, b.material_spec || null,
-        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'qualified', b.remark || null, u.id, now()]);
-    if (mid && b.result !== 'rejected') {
+        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, iqcResult, b.remark || null, u.id, now()]);
+    if (mid && iqcResult === 'qualified') {
       applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: 'in_incoming',
         ref_type: 'incoming_materials', ref_id: id, ref_code: code, order_id: b.order_id, operator: u.name, tx_date: b.incoming_date || today(), remark: '来料入库 ' + code });
     }
   });
-  writeLog(u, '新增来料记录', code + ' ' + (b.material_name || ''));
+  writeLog(u, '新增来料记录', code + ' ' + (b.material_name || '') + (iqcResult === 'pending' ? '（待检）' : ''));
   ok(res, { id, code });
 });
 route('PUT', '/api/incoming_materials/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const old = get('SELECT * FROM incoming_materials WHERE id=?', [m[1]]);
+  if (!old) return fail(res, '来料记录不存在', 404);
   const mid = resolveMaterialId(b);
   fillFromMaterial(b, mid);
+  const iqcResult = ['pending', 'qualified', 'rejected'].includes(b.result)
+    ? b.result
+    : (['pending', 'qualified', 'rejected'].includes(old.result) ? old.result : 'pending');
   tx(() => {
     revertStock('incoming_materials', Number(m[1]), u.name);
     run(`UPDATE incoming_materials SET code=?,incoming_date=?,supplier=?,material_id=?,warehouse_id=?,material_code=?,material_name=?,material_spec=?,qty=?,unit=?,batch=?,order_id=?,inspector=?,result=?,remark=? WHERE id=?`,
       [b.code || '', b.incoming_date || today(), b.supplier || null, mid, b.warehouse_id ? num(b.warehouse_id) : null,
         b.material_code || null, b.material_name, b.material_spec || null,
-        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, b.result || 'qualified', b.remark || null, m[1]]);
-    if (mid && b.result !== 'rejected') {
+        num(b.qty), b.unit || '件', b.batch || null, b.order_id ? num(b.order_id) : null, b.inspector || null, iqcResult, b.remark || null, m[1]]);
+    if (mid && iqcResult === 'qualified') {
       applyStock({ material_id: mid, warehouse_id: b.warehouse_id, batch: b.batch, qty: num(b.qty), tx_type: 'in_incoming',
         ref_type: 'incoming_materials', ref_id: Number(m[1]), ref_code: b.code || '', order_id: b.order_id, operator: u.name, tx_date: b.incoming_date || today(), remark: '来料入库 ' + (b.code || '') });
     }
@@ -2088,6 +2285,44 @@ route('DELETE', '/api/incoming_materials/(\\d+)', ['admin'], (req, res, m, _b, u
   });
   writeLog(u, '删除来料记录', '#' + m[1]);
   ok(res, true);
+});
+
+// 来料检验判定（IQC）：待检单 → 合格/让步自动入库；不合格不入库并自动开异常单（source=iqc，按供应商留痕）
+route('POST', '/api/incoming_inspections', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {
+  const rec = get('SELECT * FROM incoming_materials WHERE id=?', [num(b.id)]);
+  if (!rec) return fail(res, '来料单不存在', 404);
+  if (rec.result !== 'pending') return fail(res, '该来料单已完成检验，无需重复判定');
+  let conclusion = String(b.conclusion || 'pass').trim();
+  if (!['pass', 'fail', 'concession'].includes(conclusion)) conclusion = 'pass';
+  const total = Math.max(0, num(rec.qty));
+  const qtyFail = Math.max(0, Math.floor(num(b.qty_fail)));
+  const qtyPass = Math.max(0, total - qtyFail);
+  if (conclusion === 'pass' && qtyFail > 0) return fail(res, '判定合格时不合格数必须为 0');
+  if (conclusion !== 'pass' && qtyFail <= 0) return fail(res, '判定不合格/让步接收时须填写不合格数');
+  const criticalRatio = Math.min(100, Math.max(1, num(getSetting('critical_ratio', 20)))) / 100;
+  const ratio = total > 0 ? qtyFail / total : 0;
+  const level = conclusion === 'fail' && ratio >= criticalRatio ? 'critical' : 'major';
+  let issue = null;
+  tx(() => {
+    run('UPDATE incoming_materials SET result=?, inspector=?, remark=? WHERE id=?',
+      [conclusion === 'fail' ? 'rejected' : 'qualified', u.name,
+        ((b.remark || '').trim() + (conclusion === 'concession' ? '（让步接收）' : '')).trim() || rec.remark, rec.id]);
+    if (conclusion !== 'fail' && rec.material_id) {
+      applyStock({ material_id: rec.material_id, warehouse_id: rec.warehouse_id, batch: rec.batch, qty: total, tx_type: 'in_incoming',
+        ref_type: 'incoming_materials', ref_id: rec.id, ref_code: rec.code, order_id: rec.order_id, operator: u.name,
+        tx_date: rec.incoming_date || today(), remark: 'IQC 合格入库 ' + rec.code });
+    }
+    if (conclusion === 'fail') {
+      issue = createQualityIssue({
+        level, source: 'iqc', order_id: rec.order_id || null,
+        process_name: '来料检验·' + (rec.material_name || '') + '（' + (rec.supplier || '未知供应商') + '）',
+        qty_affected: qtyFail, bad_summary: (b.bad_summary || '来料检验不合格').trim(),
+        supplier: rec.supplier || null, created_by: u.id,
+      });
+    }
+  });
+  writeLog(u, '来料检验判定', rec.code + ' ' + (conclusion === 'fail' ? '不合格' : conclusion === 'concession' ? '让步接收' : '合格') + ' 合格' + qtyPass + '/不合格' + qtyFail);
+  ok(res, { id: rec.id, result: conclusion === 'fail' ? 'rejected' : 'qualified', qty_pass: qtyPass, qty_fail: qtyFail, issue });
 });
 
 // 成品入库

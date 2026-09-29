@@ -21,7 +21,8 @@ for (const f of files) {
   const t0 = Date.now();
   const r = spawnSync(process.execPath, [path.join(ROOT, f)], {
     cwd: ROOT, encoding: 'utf8', timeout: 300000,
-    env: Object.assign({}, process.env, { PATH: '/usr/bin:/bin:' + (process.env.PATH || '') }),
+    // Windows 下保持原 PATH（覆盖成 Unix 路径会导致 node 子进程无法启动）
+    env: Object.assign({}, process.env, process.platform === 'win32' ? {} : { PATH: '/usr/bin:/bin:' + (process.env.PATH || '') }),
   });
   const ms = Date.now() - t0;
   const log = (r.stdout || '') + (r.stderr || '');
