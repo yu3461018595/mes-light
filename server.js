@@ -209,6 +209,11 @@ route('GET', '/api/meta', [], (req, res) => {
     processes: all('SELECT * FROM processes ORDER BY code'),
     workCenters: all('SELECT * FROM work_centers ORDER BY code'),
     customers: all('SELECT id,code,name FROM customers ORDER BY code'),
+    // 供应商快照：历史来料单出现过的供应商（免建档案，下拉建议用）+ 客户档案名称合并去重
+    suppliers: [...new Set([
+      ...all("SELECT DISTINCT supplier FROM incoming_materials WHERE supplier IS NOT NULL AND supplier<>'' ORDER BY supplier").map((r) => r.supplier),
+      ...all('SELECT name FROM customers ORDER BY name').map((r) => r.name),
+    ])],
     badReasons: all('SELECT * FROM bad_reasons ORDER BY id'),
     workers: all("SELECT id,name,team,work_center_id FROM users WHERE role='worker' AND active=1 ORDER BY name"),
     inspectors: all("SELECT id,name,team,username FROM users WHERE role='inspector' AND active=1 ORDER BY name"),
@@ -2152,8 +2157,20 @@ route('GET', '/api/material_issues', [], (req, res, _m, _b, _u, q) => {
     ${w} ORDER BY i.id DESC`, ps));
 });
 
-route('POST', '/api/material_issues', ['admin', 'technician'], (req, res, _m, b, u) => {
-  const type = b.type === 'return' ? 'return' : 'pick';
+route('POST', '/api/material_issues', ['admin', 'technician', 'worker'], (req, res, _m, b, u) => {
+  let type = b.type === 'return' ? 'return' : 'pick';
+  // 工人手机端领料：只能领料（不能退料/改单/删单），且只能为「本班组在制或未指派」的工单领料
+  if (u.role === 'worker') {
+    if (b.type === 'return') return fail(res, '工人账号只能领料，退料请联系技术员在电脑端办理');
+    type = 'pick';
+    if (!b.order_id) return fail(res, '请选择要领料的工单');
+    const o = get('SELECT id,status FROM orders WHERE id=?', [num(b.order_id)]);
+    if (!o) return fail(res, '工单不存在', 404);
+    if (['closed', 'cancelled'].includes(o.status)) return fail(res, '该工单已结束，不能领料');
+    const allowed = get(`SELECT id FROM order_steps WHERE order_id=? AND (assignee_team IS NULL OR assignee_team='' OR assignee_team=?) LIMIT 1`,
+      [num(b.order_id), u.team || '']);
+    if (!allowed) return fail(res, '该工单未指派给你的班组，无权领料');
+  }
   const qty = num(b.qty);
   if (!(qty > 0)) return fail(res, '数量必须大于 0');
   if (type === 'pick' && !b.order_id) return fail(res, '领料必须关联工单（退料可选）');
@@ -2545,6 +2562,82 @@ route('GET', '/api/stats/inventory_summary', [], (req, res, _m, _b, _u, q) => {
     })
     .filter((r) => r.opening || r.in_qty || r.out_qty || r.closing);
   ok(res, { start, end, rows });
+});
+
+/* ------------------------------ 产品单耗（简易 BOM） ------------------------------ */
+route('GET', '/api/boms', [], (_req, res) => {
+  ok(res, all(`SELECT b.*, p.name product_name, p.code product_code, m.name material_name, m.code material_code, m.unit
+    FROM product_boms b JOIN products p ON p.id=b.product_id JOIN materials m ON m.id=b.material_id
+    ORDER BY p.code, m.code`));
+});
+
+// 全量替换某产品的 BOM（items: [{material_id, qty_per_unit, loss_rate}]）
+route('PUT', '/api/products/(\\d+)/bom', ['admin', 'technician'], (req, res, m, b, u) => {
+  const pid = num(m[1]);
+  if (!get('SELECT id FROM products WHERE id=?', [pid])) return fail(res, '产品不存在', 404);
+  const items = Array.isArray(b.items) ? b.items : [];
+  for (const it of items) {
+    if (!num(it.material_id)) return fail(res, 'BOM 项缺少物料');
+    if (!(num(it.qty_per_unit) > 0)) return fail(res, '单耗必须大于 0');
+    if (num(it.loss_rate) < 0 || num(it.loss_rate) > 100) return fail(res, '损耗率需在 0~100 之间');
+  }
+  const seen = new Set();
+  for (const it of items) {
+    if (seen.has(num(it.material_id))) return fail(res, '同一物料不能重复添加');
+    seen.add(num(it.material_id));
+  }
+  tx(() => {
+    run('DELETE FROM product_boms WHERE product_id=?', [pid]);
+    for (const it of items) {
+      insert('INSERT INTO product_boms(product_id,material_id,qty_per_unit,loss_rate,created_at) VALUES(?,?,?,?,?)',
+        [pid, num(it.material_id), num(it.qty_per_unit), num(it.loss_rate), now()]);
+    }
+  });
+  writeLog(u, '配置产品单耗', '产品#' + pid + ' 共 ' + items.length + ' 项材料');
+  ok(res, true);
+});
+
+/* ------------------------------ 材料损耗率分析（口径 B） ------------------------------
+ * 应耗 = 成品入库合格数 × 单耗 × (1 + 损耗率%)；实领 = 领料 − 退料；损耗率 = (实领 − 应耗) ÷ 应耗 */
+route('GET', '/api/stats/material_loss', [], (req, res, _m, _b, _u, q) => {
+  const d = new Date();
+  const start = q.start || d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+  const end = q.end || today();
+  const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+  // 期间内各工单成品入库合格数
+  const fin = all(`SELECT order_id, SUM(qty) qty FROM finished_goods_in
+    WHERE result='qualified' AND order_id IS NOT NULL AND in_date>=? AND in_date<=? GROUP BY order_id`, [start, end]);
+  // 期间内各工单×物料净领料（领料为正、退料为负）
+  const picks = all(`SELECT order_id, material_id, SUM(CASE WHEN type='pick' THEN qty ELSE -qty END) qty
+    FROM material_issues WHERE order_id IS NOT NULL AND issue_date>=? AND issue_date<=? GROUP BY order_id, material_id`, [start, end]);
+  const bomRows = all(`SELECT b.*, m.name material_name, m.code material_code, m.unit,
+      p.name product_name, p.code product_code
+    FROM product_boms b JOIN materials m ON m.id=b.material_id JOIN products p ON p.id=b.product_id`);
+  const finMap = new Map(fin.map((r) => [num(r.order_id), num(r.qty)]));
+  const pickMap = new Map(picks.map((r) => [r.order_id + ':' + r.material_id, num(r.qty)]));
+  const orderIds = new Set([...finMap.keys()]);
+  const rows = [];
+  const ordersInfo = new Map(all('SELECT id, code, qty_plan, product_id FROM orders').map((o) => [o.id, o]));
+  for (const oid of orderIds) {
+    const finQty = finMap.get(oid);
+    if (!(finQty > 0)) continue;
+    const o = ordersInfo.get(oid) || {};
+    for (const b of bomRows) {
+      if (num(b.product_id) !== num(o.product_id)) continue;
+      const should = r2(finQty * num(b.qty_per_unit) * (1 + num(b.loss_rate) / 100));
+      const actual = r2(pickMap.get(oid + ':' + b.material_id) || 0);
+      const loss = should > 0 ? Math.round(((actual - should) / should) * 1000) / 10 : null;
+      rows.push({
+        order_id: oid, order_code: o.code, product_name: b.product_name, qty_plan: num(o.qty_plan),
+        material_id: b.material_id, material_code: b.material_code, material_name: b.material_name, unit: b.unit,
+        qty_per_unit: num(b.qty_per_unit), loss_rate_std: num(b.loss_rate),
+        finished_qty: r2(finQty), should_use: should, actual_pick: actual,
+        loss_rate: loss === null ? null : loss,        // 正=超耗，负=节约
+      });
+    }
+  }
+  rows.sort((a, b2) => (a.order_code < b2.order_code ? -1 : 1));
+  ok(res, { start, end, rows, hint: rows.length ? null : '未配置产品单耗或期间内无成品入库' });
 });
 
 /* ------------------------------ 请求分发 ------------------------------ */

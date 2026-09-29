@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], issue_notifications: [], settings: [], stock_alerts: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], issue_notifications: [], settings: [], stock_alerts: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -387,6 +387,7 @@
   R('GET', '/meta', () => ok({
     products: T('products'), processes: T('processes'), workCenters: T('work_centers'),
     customers: T('customers').map((r) => ({ id: r.id, code: r.code, name: r.name })),
+    suppliers: [...new Set(T('incoming_materials').map((r) => r.supplier).filter(Boolean).concat(T('customers').map((r) => r.name)))],
     badReasons: T('bad_reasons'),
     workers: T('users').filter((u) => u.role === 'worker' && u.active).map((r) => ({ id: r.id, name: r.name, team: r.team, work_center_id: r.work_center_id })),
     inspectors: T('users').filter((u) => u.role === 'inspector' && u.active).map((r) => ({ id: r.id, name: r.name, team: r.team, username: r.username })),
@@ -745,6 +746,55 @@
     return ok({ period: months === 0 ? 'all' : (q.period || 'month'), start, include_pending: q.include_pending === '1',
       summary: { incoming_qty: incTotal, finished_qty: finTotal, ratio: incTotal > 0 ? r2(finTotal / incTotal * 100) : null, orders_count: ids.length, public_incoming: incPublic },
       monthly, orders });
+  });
+  /* 产品单耗（简易 BOM）镜像 */
+  R('GET', '/boms', () => ok(T('product_boms').map((b) => {
+    const p = find('products', b.product_id) || {}, m = find('materials', b.material_id) || {};
+    return Object.assign({}, b, { product_name: p.name, product_code: p.code, material_name: m.name, material_code: m.code, unit: m.unit });
+  })));
+  R('PUT', '/products/(\\d+)/bom', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const pid = num(m[1]);
+    if (!find('products', pid)) return fail('产品不存在', 404);
+    const items = Array.isArray(b.items) ? b.items : [];
+    const seen = new Set();
+    for (const it of items) {
+      if (!num(it.material_id) || !(num(it.qty_per_unit) > 0)) return fail('BOM 项无效');
+      if (seen.has(num(it.material_id))) return fail('同一物料不能重复添加');
+      seen.add(num(it.material_id));
+    }
+    const bomArr = T('product_boms');
+    bomArr.splice(0, bomArr.length, ...bomArr.filter((x) => x.product_id !== pid));
+    items.forEach((it) => insert('product_boms', { id: 0, product_id: pid, material_id: num(it.material_id), qty_per_unit: num(it.qty_per_unit), loss_rate: num(it.loss_rate), created_at: nowISO() }));
+    writeLog(actor(), '配置产品单耗', '产品#' + pid + ' 共 ' + items.length + ' 项材料');
+    return ok(true);
+  });
+  /* 材料损耗率分析镜像（口径与后端一致：应耗 = 成品入库 × 单耗 × (1+损耗率)） */
+  R('GET', '/stats/material_loss', (_p, _b, q) => {
+    const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+    const d = new Date();
+    const start = q.start || d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-01';
+    const end = q.end || today();
+    const finBy = {};
+    T('finished_goods_in').forEach((r) => { if (r.result === 'qualified' && r.order_id && r.in_date >= start && r.in_date <= end) finBy[r.order_id] = (finBy[r.order_id] || 0) + num(r.qty); });
+    const pickBy = {};
+    T('material_issues').forEach((r) => { if (r.order_id && r.issue_date >= start && r.issue_date <= end) pickBy[r.order_id + ':' + r.material_id] = (pickBy[r.order_id + ':' + r.material_id] || 0) + (r.type === 'pick' ? num(r.qty) : -num(r.qty)); });
+    const rows = [];
+    T('product_boms').forEach((b) => {
+      const prod = find('products', b.product_id) || {};
+      T('orders').filter((o) => o.product_id === b.product_id && finBy[o.id] > 0).forEach((o) => {
+        const finQty = finBy[o.id];
+        const should = r2(finQty * num(b.qty_per_unit) * (1 + num(b.loss_rate) / 100));
+        const actual = r2(pickBy[o.id + ':' + b.material_id] || 0);
+        const mat = find('materials', b.material_id) || {};
+        rows.push({ order_id: o.id, order_code: o.code, product_name: prod.name, qty_plan: num(o.qty_plan),
+          material_id: b.material_id, material_code: mat.code, material_name: mat.name, unit: mat.unit,
+          qty_per_unit: num(b.qty_per_unit), loss_rate_std: num(b.loss_rate), finished_qty: r2(finQty), should_use: should, actual_pick: actual,
+          loss_rate: should > 0 ? Math.round((actual - should) / should * 1000) / 10 : null });
+      });
+    });
+    rows.sort((a, b) => (a.order_code < b.order_code ? -1 : 1));
+    return ok({ start, end, rows, hint: rows.length ? null : '未配置产品单耗或期间内无成品入库' });
   });
   R('GET', '/stats/inventory_summary', (_p, _b, q) => {
     const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;

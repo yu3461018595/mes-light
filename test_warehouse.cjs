@@ -210,6 +210,41 @@ async function api(method, url, body, token) {
     chk('汇总 m1 期末与台账合计一致', sRow1 && Number(sRow1.closing) === invA, JSON.stringify({ closing: sRow1 && sRow1.closing, inv: invA }));
     const sRow2 = sm.data.rows.find((r) => r.material_id === m2.id);
     chk('汇总 m2 期末与台账合计一致', sRow2 && Number(sRow2.closing) === m2Qty3, JSON.stringify({ closing: sRow2 && sRow2.closing, inv: m2Qty3 }));
+
+    // ============ 12. P3：产品单耗(BOM) + 供应商快照 + 材料损耗率 ============
+    const bomPut = await H('PUT', '/api/products/' + rt.product_id + '/bom', { items: [{ material_id: m1.id, qty_per_unit: 2, loss_rate: 5 }] });
+    chk('BOM 保存成功', bomPut.ok, JSON.stringify(bomPut));
+    const bomGet = await H('GET', '/api/boms');
+    const bomRow = bomGet.data.find((x) => Number(x.product_id) === Number(rt.product_id) && Number(x.material_id) === m1.id);
+    chk('BOM 查询返回（单耗2 损耗5%）', bomRow && Number(bomRow.qty_per_unit) === 2 && Number(bomRow.loss_rate) === 5, JSON.stringify(bomRow));
+    const bomDup = await H('PUT', '/api/products/' + rt.product_id + '/bom', { items: [{ material_id: m1.id, qty_per_unit: 1 }, { material_id: m1.id, qty_per_unit: 2 }] });
+    chk('BOM 同物料重复被拒', !bomDup.ok && /重复/.test(bomDup.msg || ''), JSON.stringify(bomDup));
+    const bomBad = await H('PUT', '/api/products/' + rt.product_id + '/bom', { items: [{ material_id: m1.id, qty_per_unit: 0 }] });
+    chk('BOM 单耗必须大于 0', !bomBad.ok && /大于 0/.test(bomBad.msg || ''), JSON.stringify(bomBad));
+
+    const meta2 = await H('GET', '/api/meta');
+    chk('meta 返回供应商快照数组', meta2.ok && Array.isArray(meta2.data.suppliers), JSON.stringify(meta2.data.suppliers));
+    chk('快照包含历史来料供应商「瑞泰机械有限公司」', (meta2.data.suppliers || []).includes('瑞泰机械有限公司'), JSON.stringify(meta2.data.suppliers));
+
+    // 损耗率：nOid 成品入库 40 件 × 单耗 2 × 1.05 = 应耗 84；此前该工单无领料，现领 90 → 损耗率 ≈ 7.1%
+    const lpick = await H('POST', '/api/material_issues', { type: 'pick', order_id: nOid, material_id: m1.id, qty: 90, reason: '损耗率测试' });
+    chk('损耗率测试领料成功', lpick.ok, JSON.stringify(lpick));
+    const ml = await H('GET', '/api/stats/material_loss?start=2000-01-01&end=2099-12-31');
+    const mlRow = ml.data.rows.find((x) => Number(x.order_id) === Number(nOid) && Number(x.material_id) === m1.id);
+    chk('损耗分析：应耗 = 40×2×1.05 = 84', mlRow && Number(mlRow.should_use) === 84, JSON.stringify(mlRow));
+    chk('损耗分析：实领 90、损耗率 ≈ 7.1%', mlRow && Number(mlRow.actual_pick) === 90 && Math.abs(Number(mlRow.loss_rate) - 7.1) < 0.06, JSON.stringify(mlRow));
+    chk('无 BOM 的产品不出现在损耗分析', !ml.data.rows.some((x) => Number(x.product_id) === Number(prods[1].id) && Number(prods[1].id) !== Number(rt.product_id)), '');
+
+    // 工人领料：可为本班组/未指派工单领料，不能退料
+    const wlg = await api('POST', '/api/login', { username: 'worker1', password: '123456' });
+    const wtok = wlg.data && wlg.data.token;
+    chk('工人登录', !!wtok, JSON.stringify(wlg));
+    const wPick = await api('POST', '/api/material_issues', { type: 'pick', order_id: nOid, material_id: m1.id, qty: 1, reason: '工人手机领料' }, wtok);
+    chk('工人可为未指派工单领料', wPick.ok && /^LL/.test(wPick.data.code), JSON.stringify(wPick));
+    const wRet = await api('POST', '/api/material_issues', { type: 'return', order_id: nOid, material_id: m1.id, qty: 1 }, wtok);
+    chk('工人不能退料', !wRet.ok, JSON.stringify(wRet));
+    const wDel = await api('DELETE', '/api/material_issues/' + wPick.data.id, null, wtok);
+    chk('工人不能删单', !wDel.ok, JSON.stringify(wDel));
   } catch (e) {
     fail++;
     console.log('  EXCEPTION  ' + e.message);

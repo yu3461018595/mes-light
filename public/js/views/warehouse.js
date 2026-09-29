@@ -234,7 +234,7 @@ Views.warehouse = {
         fields: [
           { k: 'code', t: '出库单号', hint: '留空自动生成（CK+日期+序号）' },
           { k: 'ship_date', t: '出库日期', type: 'date', def: UI.today() },
-          { k: 'customer', t: '客户', list: 'supList', placeholder: '可输入或从下拉选择' },
+          { k: 'customer', t: '客户', list: 'custList', placeholder: '可输入或从下拉选择' },
           { k: 'order_id', t: '关联工单', type: 'select', opts: ordersOpts },
           { k: 'sale_ref', t: '销售单号' },
           { k: 'material_id', t: '物料档案', type: 'select', opts: matOpts, hint: '选择后自动带出编码/名称/单位/仓库' },
@@ -319,7 +319,7 @@ Views.warehouse = {
           <div style="display:flex;gap:8px;align-items:center">
             <span id="tbStat" class="small muted"></span>
             ${c.export && !txSummary ? `<button class="btn btn-sm" id="exp">导出 CSV</button>` : ''}
-            ${(this.tab === 'materials' && canEdit) ? `<button class="btn btn-sm" id="imp">从产品导入</button>` : ''}
+            ${(this.tab === 'materials' && canEdit) ? `<button class="btn btn-sm" id="imp">从产品导入</button><button class="btn btn-sm" id="bom">产品单耗(BOM)</button>` : ''}
             ${(this.tab === 'stock' && canEdit) ? `<button class="btn btn-sm" id="adjustBtn">${UI.icon('edit')}盘点调整</button>` : ''}
             ${(this.tab === 'tx') ? `<button class="btn btn-sm" id="sumBtn">${txSummary ? '← 返回明细' : '收发存汇总'}</button>` : ''}
             ${showAdd ? `<button class="btn btn-primary btn-sm" id="add">${UI.icon('plus')}新增</button>` : ''}
@@ -339,8 +339,63 @@ Views.warehouse = {
       try { const r = await API.post('/materials/import_products', {}); UI.toast(`已导入 ${r.imported} 条成品物料`, 'ok'); this.render(el); }
       catch (e) { UI.toast(e.message, 'err'); }
     };
+    const bomBtn = el.querySelector('#bom');
+    if (bomBtn) bomBtn.onclick = () => this.bomModal(el);
     if (txSummary) { el.querySelector('#tbTitle').textContent = '收发存汇总'; await this.renderTxSummary(el); return; }
     await this.loadTable(el);
+  },
+
+  /* ------------------------------ 产品单耗（简易 BOM）编辑 ------------------------------ */
+  async bomModal(el) {
+    const M = this.meta || {};
+    const products = M.products || [];
+    if (!products.length) return UI.toast('暂无产品档案，请先在「基础数据 → 产品」中创建', 'err');
+    let pid = products[0].id;
+    const loadRows = async () => {
+      const boms = await API.get('/boms');
+      return (boms || []).filter((x) => String(x.product_id) === String(pid));
+    };
+    const matOpts = (M.materials || []).map((x) => `<option value="${x.id}">${UI.esc(x.code + ' ' + x.name)}${x.unit ? '（' + UI.esc(x.unit) + '）' : ''}</option>`).join('');
+    const paint = (mask, rows) => {
+      const box = mask.querySelector('#bomRows');
+      box.innerHTML = rows.length ? rows.map((r, i) => `
+        <div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:nowrap" data-bomrow="${i}">
+          <select class="input" data-b="material_id" style="flex:2">${matOpts.replace(`value="${r.material_id}"`, `value="${r.material_id}" selected`)}</select>
+          <input class="input" data-b="qty_per_unit" type="number" step="0.0001" min="0" value="${r.qty_per_unit}" style="flex:1" title="单耗（每件成品消耗量）">
+          <input class="input" data-b="loss_rate" type="number" step="0.1" min="0" max="100" value="${r.loss_rate || 0}" style="flex:1" title="损耗率（%）">
+          <button class="icon-btn" data-brm>${UI.icon('close')}</button>
+        </div>`).join('') : '<div class="small muted" style="padding:8px 0">暂无材料，点击下方「添加材料」配置单耗。</div>';
+      box.querySelectorAll('[data-brm]').forEach((b) => b.onclick = () => b.closest('[data-bomrow]').remove());
+    };
+    const collect = (mask) => [...mask.querySelectorAll('[data-bomrow]')].map((r) => ({
+      material_id: Number(r.querySelector('[data-b=material_id]').value),
+      qty_per_unit: Number(r.querySelector('[data-b=qty_per_unit]').value) || 0,
+      loss_rate: Number(r.querySelector('[data-b=loss_rate]').value) || 0,
+    }));
+    UI.modal({
+      title: '产品单耗（简易 BOM）', size: 'lg',
+      body: `
+        <label class="field"><span>产品</span>
+          <select class="input" id="bomProd">${products.map((p) => `<option value="${p.id}">${UI.esc(p.code + ' ' + p.name)}</option>`).join('')}</select>
+          <span class="small muted">每件成品消耗的材料数量与损耗率；保存后用于领料建议用量与材料损耗率分析。</span></label>
+        <div class="row small muted" style="gap:8px;margin:8px 0 6px"><span style="flex:2">材料</span><span style="flex:1">单耗/件</span><span style="flex:1">损耗率%</span><span style="width:32px"></span></div>
+        <div id="bomRows">加载中…</div>
+        <button class="btn btn-sm" id="bomAdd" style="margin-top:6px">${UI.icon('plus')}添加材料</button>`,
+      onMount: async (mask) => {
+        paint(mask, await loadRows());
+        mask.querySelector('#bomProd').onchange = async (e) => { pid = Number(e.target.value); paint(mask, await loadRows()); };
+        mask.querySelector('#bomAdd').onclick = () => {
+          const rows = collect(mask);
+          rows.push({ material_id: (M.materials[0] || {}).id, qty_per_unit: 1, loss_rate: 0 });
+          paint(mask, rows);
+        };
+      },
+      onOk: async (mask) => {
+        await API.put('/products/' + pid + '/bom', { items: collect(mask) });
+        UI.toast('产品单耗已保存', 'ok');
+        Views.warehouse.render(document.getElementById('view'));
+      },
+    });
   },
 
   /* ------------------------------ 盘点调整（账面 → 实盘差异流水） ------------------------------ */
@@ -476,8 +531,38 @@ Views.warehouse = {
       <div class="card">
         <div class="card-h"><h3>按工单明细</h3><span class="small muted">来料 / 成品入库按单据关联工单汇总；未关联工单的来料计入「公共来料」</span></div>
         <div class="card-b" id="rOrders">加载中…</div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>材料损耗分析</h3><span class="small muted">应耗 = 成品入库 × 单耗 × (1+损耗率)；实领超应耗 10% 标红 · 需先配置「产品单耗(BOM)」</span></div>
+        <div class="card-b" id="rLoss">加载中…</div>
       </div>`;
     el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
+    const periodStart = (p) => {
+      const d = new Date();
+      if (p === 'month') return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+      if (p === 'quarter') { const q = new Date(d); q.setMonth(q.getMonth() - 2); q.setDate(1); return q.toISOString().slice(0, 10); }
+      if (p === 'year') { const y = new Date(d); y.setFullYear(y.getFullYear() - 1); return y.toISOString().slice(0, 10); }
+      return '2000-01-01';
+    };
+    const loadLoss = async () => {
+      const box = el.querySelector('#rLoss');
+      if (!box) return;
+      try {
+        const r = await API.get(`/stats/material_loss?start=${periodStart(this.ratioPeriod)}&end=${UI.today()}`);
+        const rows = r.rows || [];
+        if (!rows.length) { box.innerHTML = `<div class="empty"><p>${UI.esc(r.hint || '期间内暂无成品入库')}</p></div>`; return; }
+        box.innerHTML = UI.table([
+          { t: '工单号', f: (x) => `<b>${UI.esc(x.order_code)}</b>` },
+          { t: '产品', f: (x) => UI.esc(x.product_name || '—') },
+          { t: '材料', f: (x) => `${UI.esc(x.material_name)}<span class="small muted"> ${UI.esc(x.material_code || '')}</span>` },
+          { t: '成品入库', align: 'right', f: (x) => `<span class="mono">${UI.n2(x.finished_qty)}</span>` },
+          { t: '单耗/件', align: 'right', f: (x) => `<span class="mono">${x.qty_per_unit}${Number(x.loss_rate_std) ? `<span class="small muted"> +${x.loss_rate_std}%</span>` : ''}</span>` },
+          { t: '应耗', align: 'right', f: (x) => `<span class="mono">${UI.n2(x.should_use)}</span>` },
+          { t: '实领', align: 'right', f: (x) => `<span class="mono" style="color:${x.actual_pick > x.should_use ? 'var(--danger)' : 'var(--ok)'}">${UI.n2(x.actual_pick)}</span>` },
+          { t: '损耗率', align: 'right', f: (x) => x.loss_rate === null ? '<span class="muted">—</span>' : `<b style="color:${x.loss_rate > 10 ? 'var(--danger)' : x.loss_rate >= 0 ? 'var(--warn)' : 'var(--ok)'}">${x.loss_rate > 0 ? '+' : ''}${x.loss_rate}%</b>` },
+        ], rows);
+      } catch (e) { box.innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`; }
+    };
     const load = async () => {
       try {
         this.yield = await API.get(`/stats/yield?period=${this.ratioPeriod}&include_pending=${el.querySelector('#rPending').checked ? '1' : '0'}`);
@@ -486,10 +571,11 @@ Views.warehouse = {
         el.querySelector('#rBody').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
       }
     };
-    el.querySelector('#rPeriod').onchange = () => { this.ratioPeriod = el.querySelector('#rPeriod').value; load(); };
+    el.querySelector('#rPeriod').onchange = () => { this.ratioPeriod = el.querySelector('#rPeriod').value; load(); loadLoss(); };
     el.querySelector('#rPending').onchange = load;
     el.querySelector('#rExp').onclick = () => this.exportYield();
     await load();
+    await loadLoss();
   },
 
   paintRatio(el) {
@@ -619,7 +705,8 @@ Views.warehouse = {
           <input class="input" data-k="${f.k}" type="date" value="${UI.esc(v)}" ${f.req ? 'required' : ''}></label>`;
       }
       if (f.list) {
-        const list = (f.list === 'supList' ? (M.customers || []) : []).map((s) => `<option value="${UI.esc(s.name)}">`).join('');
+        const src = f.list === 'supList' ? (M.suppliers || []) : (f.list === 'custList' ? (M.customers || []) : []);
+        const list = src.map((s) => `<option value="${UI.esc(s.name || s)}">`).join('');
         return `<label class="field"><span class="${f.req ? 'label-req' : ''}">${UI.esc(f.t)}</span>
           <input class="input" data-k="${f.k}" list="${f.list}" value="${UI.esc(v)}" ${f.req ? 'required' : ''} placeholder="${f.placeholder || ''}">
           <datalist id="${f.list}">${list}</datalist></label>`;
@@ -627,9 +714,36 @@ Views.warehouse = {
       return `<label class="field"><span class="${f.req ? 'label-req' : ''}">${UI.esc(f.t)}</span>
         <input class="input" data-k="${f.k}" type="${f.type === 'number' ? 'number' : 'text'}" value="${UI.esc(v)}" ${f.req ? 'required' : ''} ${f.type === 'number' ? 'step="0.01"' : ''}>
         ${f.hint ? `<span class="small muted">${UI.esc(f.hint)}</span>` : ''}</label>`;
-    }).join('') + `</div>`;
+    }).join('') + `</div>` + (this.tab === 'issues' ? `<div id="pickSug" style="margin-top:10px"></div>` : '');
 
     const bind = (mask) => {
+      // 领料单：选中关联工单后按「产品单耗」计算建议领料量（计划数 × 单耗 × (1+损耗率)），点击即填入
+      if (this.tab === 'issues') {
+        const osel = mask.querySelector('[data-k="order_id"]');
+        const sug = mask.querySelector('#pickSug');
+        const loadSug = async () => {
+          if (!sug) return;
+          if (!osel || !osel.value) { sug.innerHTML = ''; return; }
+          try {
+            const [o, boms] = await Promise.all([API.get('/orders/' + osel.value), API.get('/boms')]);
+            const plan = Number(o.qty_plan) || 0;
+            const items = (boms || []).filter((x) => String(x.product_id) === String(o.product_id));
+            if (!items.length) { sug.innerHTML = '<span class="small muted">该产品未配置产品单耗（物料档案 → 产品单耗(BOM)），无法计算建议用量。</span>'; return; }
+            sug.innerHTML = '<div class="small" style="margin-bottom:4px"><b>建议领料</b>（计划 ' + plan + ' × 单耗 × (1+损耗率)，点击填入）：</div>' + items.map((x) => {
+              const q = Math.round(plan * (Number(x.qty_per_unit) || 0) * (1 + (Number(x.loss_rate) || 0) / 100) * 100) / 100;
+              return `<span class="chip chip-gray" style="margin:2px 6px 2px 0;cursor:pointer" data-fill="${x.material_id}" data-q="${q}">${UI.esc(x.material_name)} ≈ ${q} ${UI.esc(x.unit || '')}${Number(x.loss_rate) ? '（含损耗' + x.loss_rate + '%）' : ''}</span>`;
+            }).join('');
+            sug.querySelectorAll('[data-fill]').forEach((ch) => ch.onclick = () => {
+              const ms = mask.querySelector('[data-k="material_id"]');
+              if (ms) { ms.value = ch.dataset.fill; ms.dispatchEvent(new Event('change')); }
+              const qe = mask.querySelector('[data-k="qty"]');
+              if (qe) qe.value = ch.dataset.q;
+            });
+          } catch (e) { sug.innerHTML = ''; }
+        };
+        if (osel) osel.addEventListener('change', loadSug);
+        loadSug();
+      }
       // 选中关联工单后，自动带出产品编码/名称/规格（仅当对应字段为空时填充）
       if (this.tab === 'finished') {
         const osel = mask.querySelector('[data-k="order_id"]');

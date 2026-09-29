@@ -128,6 +128,7 @@
   const TITLES = {
     home: '工作台', messages: '消息', mine: '我的', order: '报工', inspect: '质检台',
     quality: '质量异常', issue: '异常详情', stocks: '库存预警', profile: '个人资料', password: '修改密码',
+    pick: '领料申请', stocktake: '扫码盘点',
   };
   function nav(hash, replace) {
     if (replace) location.replace(hash); else location.hash = hash;
@@ -148,7 +149,7 @@
     $tabbar.hidden = !['home', 'messages', 'mine'].includes(name);
     $view.className = $tabbar.hidden ? '' : 'has-tab';
     $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
-    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password'].includes(name);
+    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake'].includes(name);
     $title.textContent = TITLES[name] || '智工';
     $view.innerHTML = '<div class="loading">加载中…</div>';
 
@@ -162,6 +163,8 @@
         case 'quality': return await renderQuality();
         case 'issue': return await renderIssue(args[0]);
         case 'stocks': return await renderStocks();
+        case 'pick': return await renderPick();
+        case 'stocktake': return await renderStocktake();
         case 'profile': return await renderProfile();
         case 'password': return await renderPassword();
         default: return void okMask('页面不存在', '即将返回工作台', [{ text: '返回', onClick: () => nav('#/home', true) }]);
@@ -348,6 +351,15 @@
       }).join('') : `<div class="empty" style="padding:26px 16px"><p>暂无在制工单</p>
         <p class="tiny">工单下发并指派到「${esc(me.team || '你的班组')}」后会出现在这里</p></div>`}
       </div></div>`);
+
+    // 仓储快捷入口：工人/技术员/管理员可领料；管理员/技术员可盘点
+    if (me.role !== 'inspector') {
+      blocks.push(`<div class="card"><div class="card-h"><h3>仓储快捷</h3></div>
+        <div class="card-b" style="display:flex;gap:8px;padding:10px 12px">
+          <button class="btn ghost sm" data-go="pick" style="flex:1">🧰 领料申请</button>
+          ${isManager ? `<button class="btn ghost sm" data-go="stocktake" style="flex:1">📋 扫码盘点</button>` : ''}
+        </div></div>`);
+    }
 
     if (isManager) {
       blocks.push(`<div class="card"><div class="card-h"><h3>管理快捷入口</h3></div>
@@ -817,6 +829,158 @@
         refreshUnread(); renderStocks();
       } catch (e) { toast(e.message); }
     };
+  }
+
+  /* ---------------- 页面：领料申请（工人/技术员/管理员，限本班组工单） ---------------- */
+  async function renderPick() {
+    const me = await ensureMe();
+    if (me.role === 'inspector') return renderError('质检员账号无需领料');
+    const [ordersRes, materials] = await Promise.all([
+      get('/api/app/my_orders').catch(() => ({ orders: [] })),
+      get('/api/materials').catch(() => []),
+    ]);
+    const orders = (ordersRes.orders || []).filter((o) => !['closed', 'cancelled'].includes(o.status));
+    const mats = materials || [];
+    $view.innerHTML = `<div class="card"><div class="card-b">
+      <div class="field"><span>关联工单</span>
+        <select class="ipt" id="pkOrder">${orders.length ? orders.map((o) => `<option value="${o.id}">${esc(o.code)} · ${esc(o.product_name || '')}</option>`).join('') : '<option value="">暂无可领料的在制工单</option>'}</select></div>
+      <div class="field"><span>物料</span>
+        <select class="ipt" id="pkMat">${mats.map((m) => `<option value="${m.id}">${esc(m.code + ' ' + m.name)}${m.unit ? '（' + esc(m.unit) + '）' : ''}</option>`).join('')}</select></div>
+      <div id="pkSug"></div>
+      <div class="field"><span>领料数量</span><input class="ipt" id="pkQty" type="number" min="0" step="0.01" placeholder="0"></div>
+      <div class="field"><span>用途 / 备注</span><input class="ipt" id="pkReason" placeholder="如：首件生产用料"></div>
+      <button class="btn" id="pkGo" style="margin-top:6px">提交领料</button>
+      <div class="tiny" style="margin-top:10px">提交即从仓库扣减库存，库存不足会被拒绝；退料请联系技术员在电脑端办理。</div>
+    </div></div>`;
+
+    const sug = $view.querySelector('#pkSug');
+    const loadSug = async () => {
+      const oid = $view.querySelector('#pkOrder').value;
+      if (!oid) { sug.innerHTML = ''; return; }
+      try {
+        const [o, boms] = await Promise.all([get('/api/orders/' + oid), get('/api/boms')]);
+        const plan = num(o.qty_plan);
+        const items = (boms || []).filter((x) => String(x.product_id) === String(o.product_id));
+        if (!items.length) { sug.innerHTML = ''; return; }
+        sug.innerHTML = '<div class="tiny" style="margin-bottom:6px">建议领料（计划 ' + plan + ' × 单耗 × (1+损耗率)，点击填入）：</div>'
+          + items.map((x) => {
+            const q = Math.round(plan * num(x.qty_per_unit) * (1 + num(x.loss_rate) / 100) * 100) / 100;
+            return `<span class="chip" data-fill="${x.material_id}" data-q="${q}" style="display:inline-block;margin:2px 6px 6px 0;padding:4px 10px;background:#eef2fb;border-radius:12px;font-size:12px;cursor:pointer">${esc(x.material_name)} ≈ ${q}${esc(x.unit || '')}</span>`;
+          }).join('');
+        sug.querySelectorAll('[data-fill]').forEach((ch) => ch.onclick = () => {
+          $view.querySelector('#pkMat').value = ch.dataset.fill;
+          $view.querySelector('#pkQty').value = ch.dataset.q;
+        });
+      } catch (e) { sug.innerHTML = ''; }
+    };
+    $view.querySelector('#pkOrder').onchange = loadSug;
+    loadSug();
+
+    $view.querySelector('#pkGo').onclick = async () => {
+      const order_id = $view.querySelector('#pkOrder').value;
+      const material_id = $view.querySelector('#pkMat').value;
+      const qty = num($view.querySelector('#pkQty').value);
+      const reason = $view.querySelector('#pkReason').value.trim();
+      if (!order_id) return toast('暂无可领料的在制工单');
+      if (!material_id) return toast('请选择物料');
+      if (!(qty > 0)) return toast('请填写领料数量');
+      const btn = $view.querySelector('#pkGo');
+      btn.disabled = true; btn.textContent = '提交中…';
+      try {
+        const r = await post('/api/material_issues', { type: 'pick', order_id: Number(order_id), material_id: Number(material_id), qty, reason });
+        okMask('领料成功', '单号 ' + esc(r.code || '') + '，已从仓库扣减库存。', [
+          { text: '继续领料', cls: 'ghost', onClick: () => renderPick() },
+          { text: '返回工作台', onClick: () => nav('#/home') },
+        ]);
+      } catch (e) {
+        btn.disabled = false; btn.textContent = '提交领料';
+        toast(e.message);
+      }
+    };
+  }
+
+  /* ---------------- 页面：扫码盘点（管理员/技术员） ---------------- */
+  async function renderStocktake() {
+    const me = await ensureMe();
+    if (me.role !== 'admin' && me.role !== 'technician') return renderError('仅管理员 / 技术员可盘点');
+    const [mats, inv] = await Promise.all([
+      get('/api/materials').catch(() => []),
+      get('/api/inventory').catch(() => []),
+    ]);
+    const byMat = {};
+    (inv || []).forEach((r) => { (byMat[r.material_id] = byMat[r.material_id] || []).push(r); });
+    let kw = '';
+
+    const matList = () => (mats || [])
+      .filter((m) => !kw || (m.code + ' ' + m.name).toLowerCase().includes(kw))
+      .sort((a, b) => ((byMat[b.id] ? 1 : 0) - (byMat[a.id] ? 1 : 0)));
+    const whName = (r) => (r.warehouse_name || (r.warehouse_id ? '仓库#' + r.warehouse_id : '默认仓库')) + (r.batch ? ' · 批次 ' + r.batch : '') + (!r.batch && !r.warehouse_id ? ' · 无批次' : '');
+
+    $view.innerHTML = `<div class="card"><div class="card-b">
+      <div class="field"><span>物料编码 / 名称（可扫物料二维码后粘贴）</span>
+        <input class="ipt" id="skKw" placeholder="如 WL-001 或 铝板"></div>
+      <div id="skList"></div>
+    </div></div>
+    <div id="skDetail"></div>`;
+
+    const paintList = () => {
+      const box = $view.querySelector('#skList');
+      const items = matList().slice(0, 30);
+      box.innerHTML = items.length ? items.map((m) => {
+        const lines = byMat[m.id] || [];
+        const tot = lines.reduce((s, r) => s + num(r.qty), 0);
+        return `<div class="item" data-mat="${m.id}">
+          <div class="avatar" style="background:#eef7f0">📦</div>
+          <div class="body"><div class="t1">${esc(m.code)} ${esc(m.name)}</div>
+          <div class="t2">账面合计 ${tot} ${esc(m.unit || '')}${lines.length ? ' · ' + lines.length + ' 个批次行' : ' · 暂无台账行'}</div></div>
+          <div class="chev">›</div></div>`;
+      }).join('') : '<div class="tiny" style="padding:10px 0">未找到匹配物料</div>';
+      box.querySelectorAll('[data-mat]').forEach((el) => el.onclick = () => showDetail(Number(el.dataset.mat)));
+    };
+    const showDetail = (mid) => {
+      const m = (mats || []).find((x) => Number(x.id) === mid);
+      if (!m) return;
+      const lines = (byMat[mid] || []).map((r) => ({ warehouse_id: r.warehouse_id, batch: r.batch || '', qty: num(r.qty), warehouse_name: r.warehouse_name, whLabel: whName(r) }));
+      if (!lines.length) lines.push({ warehouse_id: null, batch: '', qty: 0, whLabel: '新建台账行（账面 0）' });
+      $view.querySelector('#skDetail').innerHTML = `<div class="card"><div class="card-h"><h3>${esc(m.code)} ${esc(m.name)}</h3>
+        <button class="inline-link" id="skBack">返回</button></div><div class="card-b">
+        ${lines.map((ln, i) => `
+          <div class="field" style="padding:10px;background:#f7f9fc;border-radius:10px;margin-bottom:10px">
+            <div class="tiny" style="margin-bottom:6px">${esc(ln.whLabel)} · 账面 <b>${ln.qty}</b> ${esc(m.unit || '')}</div>
+            <div style="display:flex;gap:8px">
+              <input class="ipt" id="skQty${i}" type="number" min="0" step="0.01" placeholder="实盘数" style="flex:1">
+              <button class="btn" data-adj="${i}" style="flex:0 0 auto">提交盘点</button>
+            </div>
+          </div>`).join('')}
+        <div class="tiny">录入实盘数提交后自动生成盘点差异流水，可在电脑端「收发明细」按 adjust 类型审计。</div>
+      </div></div>`;
+      $view.querySelector('#skBack').onclick = () => { $view.querySelector('#skDetail').innerHTML = ''; };
+      $view.querySelectorAll('[data-adj]').forEach((btn) => btn.onclick = async () => {
+        const i = Number(btn.dataset.adj);
+        const ln = lines[i];
+        const physRaw = $view.querySelector('#skQty' + i).value;
+        const phys = num(physRaw);
+        if (physRaw === '' || phys < 0) return toast('请输入有效的实盘数量');
+        btn.disabled = true; btn.textContent = '提交中…';
+        try {
+          const r = await post('/api/inventory/adjust', {
+            material_id: mid, warehouse_id: ln.warehouse_id || null, batch: ln.batch || null,
+            physical_qty: phys, remark: '手机端盘点',
+          });
+          toast('盘点完成，差异 ' + r.diff + '，已生成流水');
+          // 更新本地账面并刷新该行
+          ln.qty = phys;
+          const src = (byMat[mid] || []).find((x) => String(x.warehouse_id || '') === String(ln.warehouse_id || '') && String(x.batch || '') === String(ln.batch || ''));
+          if (src) src.qty = phys;
+          showDetail(mid);
+        } catch (e) {
+          btn.disabled = false; btn.textContent = '提交盘点';
+          toast(e.message);
+        }
+      });
+    };
+    $view.querySelector('#skKw').oninput = (e) => { kw = e.target.value.trim().toLowerCase(); paintList(); };
+    paintList();
   }
 
   /* ---------------- 页面：消息中心 ---------------- */
