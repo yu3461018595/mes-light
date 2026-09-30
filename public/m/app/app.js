@@ -34,7 +34,7 @@
   const ROLE_LABEL = { admin: '管理员', technician: '技术员', inspector: '质检员', worker: '操作工' };
   const BADGE = { created: ['待处理', 'b-released'], released: ['已下发', 'b-released'], running: ['生产中', 'b-running'],
     paused: ['已暂停', 'b-paused'], done: ['已完成', 'b-done'], closed: ['已关闭', 'b-closed'] };
-  const LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
+  const LEVEL_LABEL = { pending: '待定级', minor: '轻微', major: '严重', critical: '致命' };
   const ISSUE_STATUS = { open: '待处理', processing: '处理中', verifying: '待验证', closed: '已闭环', cancelled: '已作废' };
   const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
   const SRC_ICON = { quality: '⚠️', stock: '📦', assign: '🧰', system: '🔔' };
@@ -877,6 +877,7 @@
       ${isOpen && canHandle ? `<div class="card"><div class="card-b">
         ${it.status === 'open' ? '<button class="btn" id="actClaim">认领并开始处理</button>' : ''}
         ${it.status === 'processing' ? '<button class="btn" id="actHandle">提交处理结果</button>' : ''}
+        ${(me.role === 'inspector' || me.role === 'admin') ? `<button class="btn warn" id="actGrade">检验员定级</button>` : ''}
         ${it.status === 'verifying' && (me.role === 'admin' || me.role === 'technician') ? '<button class="btn ok" id="actClose">验证通过并闭环</button>' : ''}
         ${it.status === 'verifying' && me.role !== 'admin' && me.role !== 'technician' ? '<div class="tiny center muted">已提交处理，等待管理员验证闭环</div>' : ''}
       </div></div>` : ''}
@@ -890,6 +891,22 @@
     if (close) close.onclick = async () => {
       if (!confirm('确认异常已处理完成并恢复工单流转？')) return;
       try { await post('/api/quality_issues/' + id + '/close', { release: true }); toast('已闭环'); renderIssue(id); } catch (e) { toast(e.message); }
+    };
+    const grade = $view.querySelector('#actGrade');
+    if (grade) grade.onclick = () => {
+      const mask = sheet(`<h3>检验员定级</h3><div class="sub">${esc(it.code)} · 严重等级由质检员判定</div>
+        <div class="field"><span>严重等级</span><select class="ipt" id="gLv">
+          <option value="minor">轻微</option>
+          <option value="major"${it.level === 'major' ? ' selected' : ''}>严重</option>
+          <option value="critical"${it.level === 'critical' ? ' selected' : ''}>致命（暂停工单）</option>
+        </select></div>
+        ${it.level === 'pending' ? '<div class="tiny muted">当前：待定级</div>' : ''}
+        <button class="btn" id="gSubmit">确定定级</button>`);
+      mask.querySelector('#gSubmit').onclick = async () => {
+        const lv = mask.querySelector('#gLv').value;
+        try { await post('/api/quality_issues/' + id + '/level', { level: lv }); mask.remove(); toast('已定级：' + (LEVEL_LABEL[lv] || lv)); renderIssue(id); }
+        catch (e) { toast(e.message); }
+      };
     };
     const handle = $view.querySelector('#actHandle');
     if (handle) handle.onclick = () => {

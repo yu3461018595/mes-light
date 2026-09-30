@@ -11,7 +11,7 @@ Views.quality = {
   tab: 'pending',
 
   INSPECT_LABEL: { iqc: '首检', ipqc: '过程检', fqc: '终检' },
-  LEVEL: { minor: ['轻微', 'chip-minor'], major: ['严重', 'chip-major'], critical: ['致命', 'chip-critical'] },
+  LEVEL: { pending: ['待定级', 'chip-gray'], minor: ['轻微', 'chip-minor'], major: ['严重', 'chip-major'], critical: ['致命', 'chip-critical'] },
   ISSUE_STATUS: {
     open: ['待认领', 'chip-danger'], processing: ['处理中', 'chip-warn'],
     verifying: ['待验证', 'chip-info'], closed: ['已闭环', 'chip-ok'], cancelled: ['已作废', 'chip-gray'],
@@ -343,23 +343,23 @@ Views.quality = {
       size: 'lg',
       body: `<div class="grid g2">
         <label class="field"><span>关联工单</span><select class="input" data-k="order_id">${UI.options(opts.map(([id, n]) => ({ id, name: n })), null, 'name')}</select></label>
-        <label class="field"><span>异常等级</span><select class="input" data-k="level">
-          <option value="minor">轻微</option><option value="major" selected>严重</option><option value="critical">致命（暂停工单）</option></select></label>
+        <label class="field"><span>异常等级</span><div class="input" style="background:#f5f7fa;color:#6b7682">待检验员判定</div></label>
         <label class="field"><span>工序 / 环节</span><input class="input" data-k="process_name" placeholder="如：车削 / 来料 / 装配"></label>
         <label class="field"><span>影响数量</span><input class="input" type="number" min="0" data-k="qty_affected" value="0"></label>
       </div>
       <label class="field"><span>问题描述 <b style="color:var(--danger)">*</b></span>
-        <input class="input" data-k="bad_summary" placeholder="如：来料圆钢表面锈蚀，影响下料质量"></label>`,
+        <input class="input" data-k="bad_summary" placeholder="如：来料圆钢表面锈蚀，影响下料质量"></label>
+      <p class="small muted" style="margin-top:6px">提示：报工上报的异常默认「待定级」，严重等级由质检员在异常单中判定，不会直接推送厂部管理层。</p>`,
       onOk: async (mask) => {
         const g = (k) => { const e2 = mask.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
         if (!g('bad_summary').trim()) throw new Error('请填写问题描述');
         await API.post('/quality_issues', {
           order_id: g('order_id') ? Number(g('order_id')) : null,
-          level: g('level'), source: 'report',
+          source: 'report',
           process_name: g('process_name'), qty_affected: Number(g('qty_affected')) || 0,
           bad_summary: g('bad_summary').trim(),
         });
-        UI.toast('异常已上报，责任人已收到待办', 'ok');
+        UI.toast('异常已上报（待检验员定级），责任人已收到待办', 'ok');
         this.render(document.getElementById('view'));
       },
     });
@@ -440,7 +440,7 @@ Views.quality = {
       <div class="grid g4" style="margin-bottom:14px">
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--danger)"></i>未闭环异常</div>
           <div class="stat-v" style="color:${st.total_open ? 'var(--danger)' : 'var(--ok)'}">${st.total_open || 0}</div>
-          <div class="stat-s">致命 ${lv.critical || 0} · 严重 ${lv.major || 0} · 轻微 ${lv.minor || 0}</div></div>
+          <div class="stat-s">致命 ${lv.critical || 0} · 严重 ${lv.major || 0} · 轻微 ${lv.minor || 0}${lv.pending ? ' · 待定级 ' + lv.pending : ''}</div></div>
         <div class="stat"><div class="stat-l"><i class="dot" style="background:var(--ok)"></i>已闭环</div>
           <div class="stat-v" style="color:var(--ok)">${st.total_closed || 0}</div>
           <div class="stat-s">形成「发现 → 处理 → 验证」完整痕迹</div></div>
@@ -787,6 +787,7 @@ Views.quality = {
           <div class="spacer"></div>
           <span class="small muted">${UI.esc(it.source === 'inspect' ? '检验发现' : it.source === 'report' ? '报工上报' : '巡检发现')}</span></div>
         <div class="card-b">
+          ${it.level === 'pending' ? `<div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fff8e6;border:1px solid #ffe2a8;color:#8a5a00;font-size:13px">⏳ 该异常为「待定级」：严重等级待质检员判定，期间不推送厂部管理层。</div>` : ''}
           <dl class="kv">
             <dt>工单 / 产品</dt><dd>${UI.esc(it.order_code || '—')} · ${UI.esc(it.product_name || '—')}</dd>
             <dt>工序</dt><dd>${UI.esc(it.process_name || '—')}</dd>
@@ -844,6 +845,7 @@ Views.quality = {
             ${it.status === 'open' ? `<button class="btn btn-primary" id="claim">认领该异常</button>` : ''}
             ${canHandle ? `<button class="btn" id="handle">提交处理 → 待验证</button>` : ''}
             ${canClose ? `<button class="btn btn-ok" id="close">验证关闭（放行）</button>` : ''}
+            ${(App.user && (App.user.role === 'inspector' || App.user.role === 'admin')) ? `<button class="btn btn-warn" id="grade">检验员定级</button>` : ''}
             ${App.isAdmin() ? `<button class="btn btn-danger" id="cancel">作废（误报）</button>` : ''}
             <span class="small muted">关闭后：该工序放行，因致命异常暂停的工单自动恢复流转。</span>
           </div>
@@ -855,7 +857,7 @@ Views.quality = {
         <div class="card-b">
           ${(it.timeline || []).length ? `<div class="tl">${it.timeline.map((n) => `
             <div class="tl-item">
-              <b>${UI.esc(n.title || '')}</b><span class="when">${UI.esc(n.sent_at || '')} · 收件人 ${UI.esc(n.to_name || '—')} · ${n.kind === 'created' ? '开单通知' : n.kind === 'remind' ? '催办' : n.kind === 'escalate' ? '升级' : '闭环回执'}</span>
+              <b>${UI.esc(n.title || '')}</b><span class="when">${UI.esc(n.sent_at || '')} · 收件人 ${UI.esc(n.to_name || '—')} · ${n.kind_label || (n.kind === 'created' ? '开单通知' : n.kind === 'remind' ? '催办' : n.kind === 'escalate' ? '升级' : n.kind === 'graded' ? '定级' : '闭环回执')}</span>
               <div class="small muted">${UI.esc(n.body || '')}</div>
             </div>`).join('')}</div>`
             : '<div class="muted small">暂无通知记录</div>'}
@@ -878,6 +880,8 @@ Views.quality = {
       if (!(await UI.confirm('验证关闭后该异常单闭环，受阻工序将放行、暂停工单恢复流转。确定关闭？', '验证关闭'))) return;
       this.issueAction(it.id, 'close', { release: true }, '异常已闭环');
     };
+    const gb = el.querySelector('#grade');
+    if (gb) gb.onclick = () => this.gradeIssue(it.id, it.level);
     const xb = el.querySelector('#cancel');
     if (xb) xb.onclick = async () => {
       const reason = prompt('作废原因（如：误报 / 重复开单）', '误报');
@@ -894,6 +898,27 @@ Views.quality = {
         else this.render(document.getElementById('view'), 'issue');
       })
       .catch((e) => UI.toast(e.message, 'err'));
+  },
+  // 检验员定级：工人/现场报工上报的异常，严重等级由质检员判定
+  gradeIssue(id, cur) {
+    const cur0 = cur || 'pending';
+    UI.modal({
+      title: '检验员定级',
+      size: 'sm',
+      body: `<p class="small muted" style="margin-bottom:8px">工人/现场上报的异常，严重等级由质检员判定。</p>
+        <label class="field"><span>严重等级</span><select class="input" id="gLv">
+          <option value="minor">轻微</option>
+          <option value="major"${cur0 === 'major' ? ' selected' : ''}>严重</option>
+          <option value="critical"${cur0 === 'critical' ? ' selected' : ''}>致命（暂停工单）</option>
+        </select></label>
+        ${cur0 === 'pending' ? '<p class="small muted">当前状态：待定级</p>' : ''}`,
+      onOk: async (mask) => {
+        const lv = mask.querySelector('#gLv').value;
+        await API.put(`/quality_issues/${id}/level`, { level: lv });
+        UI.toast('已定级：' + (this.LEVEL[lv] || [lv])[0], 'ok');
+        this.render(document.getElementById('view'), 'issue');
+      },
+    });
   },
 };
 

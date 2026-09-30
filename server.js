@@ -1465,7 +1465,7 @@ function autoFinishIn(order, product, good, actor, stepId, reportId, remarkTag) 
  * 严重异常（critical）暂停工单后续工序流转并禁止成品入库，需管理员确认后放行。
  */
 const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
-const ISSUE_LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
+const ISSUE_LEVEL_LABEL = { pending: '待定级', minor: '轻微', major: '严重', critical: '致命' };
 const DISPOSITION_LABEL = { rework: '返工', repair: '返修', concession: '让步接收', scrap: '报废' };
 
 // 通知配置（可在 settings 表覆盖）：站内待办必发，webhook 留空则跳过外部推送
@@ -1890,7 +1890,8 @@ route('GET', '/api/quality_issues/(\\d+)', [], (req, res, m) => {
   if (!it) return fail(res, '异常单不存在', 404);
   it.inspection = it.inspection_id ? get('SELECT * FROM inspections WHERE id=?', [it.inspection_id]) : null;
   if (it.inspection) it.inspection.defects = all('SELECT * FROM inspection_defects WHERE inspection_id=?', [it.inspection.id]);
-  it.timeline = all('SELECT * FROM issue_notifications WHERE issue_id=? ORDER BY id', [m[1]]);
+  it.timeline = all('SELECT * FROM issue_notifications WHERE issue_id=? ORDER BY id', [m[1]])
+    .map((t) => Object.assign({}, t, { kind_label: ({ created: '开单通知', remind: '催办', escalate: '升级', graded: '定级', claim: '认领', handled: '处理中', closed: '闭环回执' })[t.kind] || t.kind }));
   if (it.order_step_id) {
     it.step = get(`SELECT s.id, s.seq, s.status, s.inspect_status, s.qty_plan, s.qty_good, s.qty_bad, s.assignee_team,
         p.name process_name FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?`, [it.order_step_id]);
@@ -1998,7 +1999,7 @@ route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u
 route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {  let it;
   tx(() => {
     it = createQualityIssue({
-      level: b.level || 'major', source: b.source || 'report',
+      level: b.source === 'report' ? 'pending' : (b.level || 'major'), source: b.source || 'report',
       order_id: num(b.order_id) || null, order_step_id: num(b.order_step_id) || null,
       product_name: b.product_name || null, process_name: b.process_name || null,
       qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: u.id,
@@ -2006,6 +2007,35 @@ route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req,
     writeLog(u, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
   });
   ok(res, it);
+});
+// 检验员定级：工人/现场报工上报的异常，严重等级交由检验员判定；
+// 判定为致命(critical)级时才上报厂部管理层（webhook 群 + 管理员站内升级），轻微/严重仅通知责任处理人
+route('PUT', '/api/quality_issues/(\\d+)/level', ['inspector', 'admin'], (req, res, m, b, u) => {
+  const it = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!it) return fail(res, '异常单不存在', 404);
+  const lv = b.level;
+  if (!['minor', 'major', 'critical'].includes(lv)) return fail(res, '等级必须是 minor/major/critical');
+  if (it.level === lv) return ok(res, it);
+  const prevLabel = ISSUE_LEVEL_LABEL[it.level] || it.level || '待定级';
+  tx(() => {
+    run('UPDATE quality_issues SET level=? WHERE id=?', [lv, it.id]);
+    const assignee = { id: it.assignee_user_id, name: it.assignee_name };
+    if (lv === 'critical') {
+      // 致命级：上报厂部管理层
+      notifyIssue(it, assignee, 'graded', `${it.code} 经 ${u.name} 判定为致命级`, `原等级 ${prevLabel}，现判定致命（${ISSUE_LEVEL_LABEL.critical}），请厂部关注并督促处理`, true);
+      const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => !assignee || a.id !== assignee.id);
+      pushMessage({
+        source: 'quality', toUsers: admins, kind: 'escalate', issue_id: it.id,
+        ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+        title: `重大质量异常（检验员判定）：${it.code}`,
+        body: `${it.order_code || ''} · ${it.process_name || ''} 不良${it.qty_affected}件，${u.name} 判定为致命级。`,
+      });
+    } else {
+      notifyIssue(it, assignee, 'graded', `${it.code} 等级更新为${ISSUE_LEVEL_LABEL[lv]}`, `由 ${u.name} 判定（原 ${prevLabel}）`, false);
+    }
+    writeLog(u, '质量异常定级', it.code + ' → ' + lv);
+  });
+  ok(res, get('SELECT * FROM quality_issues WHERE id=?', [it.id]));
 });
 
 /* ---- 检验项目模板（Checklist）---- */

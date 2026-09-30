@@ -1435,7 +1435,7 @@
 
   /* ==================== 检验与质量异常（一期 · 静态模式镜像 server.js） ==================== */
   const INSPECT_LABEL = { iqc: '首检', ipqc: '过程检', fqc: '终检' };
-  const ISSUE_LEVEL_LABEL = { minor: '轻微', major: '严重', critical: '致命' };
+  const ISSUE_LEVEL_LABEL = { pending: '待定级', minor: '轻微', major: '严重', critical: '致命' };
   const DISPOSITION_LABEL = { rework: '返工', repair: '返修', concession: '让步接收', scrap: '报废' };
   const canInspect = () => requireRole('admin', 'technician', 'inspector');
 
@@ -1470,7 +1470,7 @@
   }
   /* ---- 通用消息中心（APP 通知）：场景 quality 质量异常 | stock 库存预警 | assign 派工待办 | system 系统消息 ---- */
   const MSG_SOURCE_LABEL = { quality: '质量异常', stock: '库存预警', assign: '派工待办', system: '系统消息' };
-  const MSG_KIND_LABEL = { created: '新消息', remind: '催办', escalate: '升级', handled: '已处理', closed: '已闭环', cancelled: '已作废' };
+  const MSG_KIND_LABEL = { created: '新消息', remind: '催办', escalate: '升级', graded: '定级', handled: '已处理', closed: '已闭环', cancelled: '已作废' };
   function pushMessage(opt) {
     const ts = nowISO();
     const src = opt.source || 'system';
@@ -1841,13 +1841,34 @@
     if (canInspect()) return fail('无权限', 403);
     const act = actor();
     const it = createQualityIssue({
-      level: b.level || 'major', source: b.source || 'report',
+      level: b.source === 'report' ? 'pending' : (b.level || 'major'), source: b.source || 'report',
       order_id: num(b.order_id) || null, order_step_id: num(b.order_step_id) || null,
       product_name: b.product_name || null, process_name: b.process_name || null,
       qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: act.id,
     });
     writeLog(act, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
     return ok(it);
+  });
+  // 检验员定级：工人/现场上报的异常严重等级交由检验员判定；判定致命级时上报厂部管理层
+  R('PUT', '/quality_issues/(\\d+)/level', (m, b) => {
+    if (requireRole('inspector', 'admin')) return fail('无权限', 403);
+    const it = find('quality_issues', m[0]);
+    if (!it) return fail('异常单不存在', 404);
+    const lv = b.level;
+    if (!['minor', 'major', 'critical'].includes(lv)) return fail('等级必须是 minor/major/critical');
+    if (it.level === lv) return ok(it);
+    update('quality_issues', it.id, { level: lv });
+    const upd = find('quality_issues', it.id);
+    const assignee = { id: it.assignee_user_id, name: it.assignee_name };
+    if (lv === 'critical') {
+      notifyIssue(upd, assignee, 'graded', `${it.code} 经 ${actor().name} 判定为致命级`, `等级更新为致命，请厂部关注并督促处理`);
+      const admins = T('users').filter((u) => u.role === 'admin' && u.active);
+      pushMessage({ source: 'quality', toUsers: admins, kind: 'escalate', issue_id: it.id, ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id, title: `重大质量异常（检验员判定）：${it.code}`, body: `${it.order_code || ''} · ${it.process_name || ''} 不良${it.qty_affected}件，判定为致命级。` });
+    } else {
+      notifyIssue(upd, assignee, 'graded', `${it.code} 等级更新为${ISSUE_LEVEL_LABEL[lv]}`, `由 ${actor().name} 判定`);
+    }
+    writeLog(actor(), '质量异常定级', it.code + ' → ' + lv);
+    return ok(upd);
   });
 
   R('GET', '/notifications', (_p, _b, q) => {
