@@ -260,6 +260,43 @@ async function api(m, u, b, t) {
       });
       chk('NG 项不允许判合格', !bad.ok, bad);
     }
+    console.log('\n--- 15) 异常上报口径 + 完工工单取消检验 ---');
+    // 15.1 完工(done)工单也可取消检验（修复前 done/closed 状态后端直接拒绝）
+    const ordDone = await H('POST', '/api/orders', { code: 'MO-DONE-' + sfx, product_id: prod.data.id, route_id: rt.data.id, qty_plan: 8 });
+    chk('建完工测试工单', ordDone.ok, ordDone);
+    await H('PATCH', '/api/orders/' + ordDone.data.id + '/status', { status: 'released' });
+    const dSt = (await H('GET', '/api/orders/' + ordDone.data.id)).data.steps;
+    await H('POST', '/api/reports', { order_id: ordDone.data.id, order_step_id: dSt[0].id, qty_good: 8, qty_bad: 0, work_min: 4 });
+    await H('POST', '/api/reports', { order_id: ordDone.data.id, order_step_id: dSt[1].id, qty_good: 8, qty_bad: 0, work_min: 4 });
+    const pendD = (await H('GET', '/api/inspections/pending')).data.find((r) => r.order_step_id === dSt[1].id);
+    chk('末道 fqc 已待检', pendD && pendD.inspect_type === 'fqc', pendD);
+    const inspD = await H('POST', '/api/inspections', { order_step_id: dSt[1].id, qty_pass: 8, qty_fail: 0, conclusion: 'pass' });
+    chk('末道判定合格放行', inspD.ok, inspD);
+    const dDone = await H('GET', '/api/orders/' + ordDone.data.id);
+    chk('工单已完工(done)', dDone.data.status === 'done', dDone.data.status);
+    const cancelDone = await H('PUT', '/api/orders/' + ordDone.data.id + '/steps/' + dSt[1].id + '/inspect', { inspect_type: '' });
+    chk('完工工单仍可取消检验', cancelDone.ok, cancelDone);
+    const dSt2 = (await H('GET', '/api/orders/' + ordDone.data.id)).data.steps;
+    chk('取消后检验标记清空', dSt2[1].inspect_type === '', dSt2[1].inspect_type);
+
+    // 15.2 仅检验员上报的异常才提醒管理层（用技术员建工单，责任人为技术员，管理员才会被升级）
+    const tech = await api('POST', '/api/login', { username: 'tech1', password: '123456' }, lg.data.token);
+    chk('技术员 tech1 可登录', tech.ok && tech.data.user.role === 'technician', tech);
+    const ordTech = await api('POST', '/api/orders', { product_id: prod.data.id, route_id: rt.data.id, qty_plan: 5 }, tech.data.token);
+    chk('技术员建工单', ordTech.ok, ordTech);
+
+    const adminCrit = await H('POST', '/api/quality_issues', { order_id: ordTech.data.id, level: 'critical', source: 'report', qty_affected: 3, bad_summary: '管理员代报：批量尺寸超差' });
+    chk('管理员上报 critical 成功', adminCrit.ok, adminCrit);
+    const adminDet = await H('GET', '/api/quality_issues/' + adminCrit.data.id);
+    const adminKinds = (adminDet.data.timeline || []).map((n) => n.kind);
+    chk('管理员上报：仍通知责任人(created)', adminKinds.includes('created'), adminKinds);
+    chk('管理员上报：不升级管理层(无 escalate)', !adminKinds.includes('escalate'), adminKinds);
+
+    const qcCrit = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, level: 'critical', source: 'report', qty_affected: 2, bad_summary: '质检员发现材质不符' }, qc.data.token);
+    chk('质检员上报 critical 成功', qcCrit.ok, qcCrit);
+    const qcDet = await api('GET', '/api/quality_issues/' + qcCrit.data.id, null, null, qc.data.token);
+    const qcKinds = (qcDet.data.timeline || []).map((n) => n.kind);
+    chk('质检员上报：升级管理层(有 escalate)', qcKinds.includes('escalate'), qcKinds);
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));

@@ -548,12 +548,11 @@
     if (requireOrderMgr()) return fail('无权限', 403);
     const o = find('orders', m[0]);
     if (!o) return fail('工单不存在', 404);
-    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能调整检验点');
     const st = find('order_steps', m[1]);
     if (!st || st.order_id !== o.id) return fail('工序不存在', 404);
     const t = String((b || {}).inspect_type || '').trim();
     if (t && !['iqc', 'ipqc', 'fqc'].includes(t)) return fail('无效的检验类型');
-    // 取消检验：待检/不合格也可取消，视同普通工序放行流转
+    // 取消检验：任何状态都允许（含已完成/已关闭），仅清空检验标记；待检/不合格一并放行流转
     if (!t) {
       const was = String(st.inspect_status || '');
       if (was === 'waiting' || was === 'failed') {
@@ -572,6 +571,8 @@
       writeLog(actor(), '取消工序检验', o.code + ' 工序#' + st.id + ' 已按普通工序放行流转');
       return ok({ inspect_type: '' });
     }
+    // 设置新检验点：要求工单处于可编辑状态且无报工、未进入检验流程
+    if (!STEP_EDIT[o.status]) return fail('工单处于「' + (STATUS_LABEL2[o.status] || o.status) + '」状态，不能设置检验点');
     const hasRep = T('reports').some((r) => r.order_step_id === st.id) || num(st.qty_good) || num(st.qty_bad);
     if (hasRep) return fail('该工序已有报工记录，不能设置检验点');
     if (st.inspect_status) return fail('该工序已在检验流程中，不能设置检验点');

@@ -604,13 +604,13 @@ route('DELETE', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req
 route('PUT', '/api/orders/(\\d+)/steps/(\\d+)/inspect', ['admin', 'technician'], (req, res, m, b, u) => {
   const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能调整检验点');
   const st = get('SELECT s.*, p.name pname FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=? AND s.order_id=?', [m[2], m[1]]);
   if (!st) return fail(res, '工序不存在', 404);
   const t = String(b.inspect_type || '').trim();
   if (t && !INSPECT_LABEL[t]) return fail(res, '无效的检验类型（可选：iqc 首检 / ipqc 过程检 / fqc 终检）');
 
-  // 取消检验：待检/不合格状态也可取消（该工序不再送检，按普通工序处理）
+  // 取消检验：任何状态下都允许（含已完成/已关闭工单），仅清空检验标记；
+  // 待检/不合格时一并按当前合格数放行流转，暂停的工单自动恢复。设置新检验点仍要求工单处于可编辑状态且无报工。
   if (!t) {
     const was = String(st.inspect_status || '');
     tx(() => {
@@ -630,7 +630,8 @@ route('PUT', '/api/orders/(\\d+)/steps/(\\d+)/inspect', ['admin', 'technician'],
     return ok(res, { inspect_type: '', released: was === 'waiting' || was === 'failed' });
   }
 
-  // 设置检验点：要求无报工且未进入检验流程（保证检验数据一致）
+  // 设置检验点：要求工单处于可编辑状态且无报工、未进入检验流程（保证检验数据一致）
+  if (!STEP_EDIT_STATUS[o.status]) return fail(res, '工单处于「' + (ORDER_STATUS_LABEL[o.status] || o.status) + '」状态，不能设置检验点');
   const rc = get('SELECT COUNT(*) c FROM reports WHERE order_step_id=?', [m[2]]).c;
   if (rc) return fail(res, '该工序已有 ' + rc + ' 条报工记录，不能设置检验点');
   if (st.inspect_status) return fail(res, '该工序已在检验流程中，不能设置检验点');
@@ -1631,11 +1632,14 @@ function createQualityIssue(opt) {  const ts = now();
   const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
   const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
   const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
-  // 上报口径（2026-09-28）：仅重大异常（critical）立即推送管理层（webhook 群 + 管理员站内）；
-  // 一般异常只通知负责人站内待办，超时未处理由 scanOverdueIssues 逐级上报（remind → escalate）。
+  // 上报口径（2026-09-30 修正）：只有「检验员(inspector)」上报的异常才上报管理层（webhook 群 + 管理员站内升级）；
+  // 其余角色（操作工/技术员/管理员）上报的异常仅通知责任处理人（assignee）站内待办，不惊动管理层。
   const isCritical = issue.level === 'critical';
-  notifyIssue(issue, assignee, 'created', title, body, isCritical);
-  if (isCritical) {
+  const creator = opt.created_by ? get('SELECT id,role FROM users WHERE id=?', [opt.created_by]) : null;
+  const creatorIsInspector = !!(creator && creator.role === 'inspector');
+  const notifyMgmt = isCritical && creatorIsInspector;
+  notifyIssue(issue, assignee, 'created', title, body, notifyMgmt);
+  if (notifyMgmt) {
     const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => !assignee || a.id !== assignee.id);
     pushMessage({
       source: 'quality', toUsers: admins.filter((a) => !assignee || a.id !== assignee.id), kind: 'escalate', issue_id: issue.id,
@@ -2211,8 +2215,12 @@ function scanOverdueIssues() {
         }
       }
       if (!it.escalated && mins >= escMin) {
-        const admin = get("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
-        notifyIssue(it, admin, 'escalate', `质量异常超 ${Math.round(escMin / 60)} 小时未处理：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，责任人 ${it.assignee_name || '未指派'}`);
+        // 仅检验员上报的异常，超时未处理才升级管理层（webhook + 管理员）；其余仍保留责任处理人站内提醒
+        const creator = it.created_by ? get('SELECT role FROM users WHERE id=?', [it.created_by]) : null;
+        if (creator && creator.role === 'inspector') {
+          const admin = get("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
+          notifyIssue(it, admin, 'escalate', `质量异常超 ${Math.round(escMin / 60)} 小时未处理：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，责任人 ${it.assignee_name || '未指派'}`);
+        }
         run('UPDATE quality_issues SET escalated=1 WHERE id=?', [it.id]);
       }
     }
