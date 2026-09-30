@@ -180,6 +180,7 @@ Views.orders = {
         ${canEdit ? actions.map((a) => `<button class="btn ${a[2]}" data-status="${a[0]}">${a[1]}</button>`).join('') : ''}
         ${canEdit ? `<button class="btn btn-sm" id="qrOrder">${UI.icon('scan')}报工二维码</button>` : ''}
         ${canEdit ? `<button class="btn btn-sm" id="edit">编辑</button>` : ''}
+        ${canEdit ? `<button class="btn btn-sm" id="ownerBtn">${UI.icon('user')}指派负责人</button>` : ''}
         ${App.isAdmin() ? `<button class="btn btn-sm btn-danger" id="del">删除</button>` : ''}
       </div>
 
@@ -207,6 +208,7 @@ Views.orders = {
           <div class="small"><span class="muted">计划完工：</span>${UI.esc(o.plan_end)}</div>
           <div class="small"><span class="muted">实际开工：</span>${UI.esc(o.start_time || '—')}</div>
           <div class="small"><span class="muted">实际完工：</span>${UI.esc(o.finish_time || '—')}</div>
+          <div class="small"><span class="muted">负责人：</span>${o.owner_user_id ? `<b>${UI.esc(o.owner_name)}</b>` : '<span class="muted">未指定</span>'}</div>
           <div class="small"><span class="muted">备注：</span>${UI.esc(o.remark || '—')}</div>
           ${o.close_reason ? `<div class="small"><span class="muted">关闭原因：</span><span class="chip chip-gray">${UI.esc(o.close_reason)}</span></div>` : ''}
         </div>
@@ -496,6 +498,26 @@ Views.orders = {
     });
     const ed = el.querySelector('#edit');
     if (ed) ed.onclick = () => this.form(id);
+    const ownerBtn = el.querySelector('#ownerBtn');
+    if (ownerBtn) ownerBtn.onclick = async () => {
+      const users = await API.get('/users');
+      const opts = '<option value="">不指定（沿用系统定责）</option>'
+        + (users || []).filter((u) => u.active)
+          .map((u) => `<option value="${u.id}"${Number(o.owner_user_id) === Number(u.id) ? ' selected' : ''}>${UI.esc(u.name)}（${UI.esc(u.role)}${u.team ? '·' + UI.esc(u.team) : ''}）</option>`)
+          .join('');
+      UI.modal({
+        title: '指派工单负责人 · ' + o.code,
+        body: `<div class="small muted" style="margin-bottom:8px">负责人为该工单的 accountable 责任人；当检验反馈（首检/过程检/终检判定）产生质量异常时，将首条通知推送给此人处理。</div>
+          <label class="field"><span>负责人</span><select class="input" id="ownerSel">${opts}</select></label>`,
+        onOk: async (mask) => {
+          const v = mask.querySelector('#ownerSel').value;
+          const uid = v ? Number(v) : null;
+          await API.put('/orders/' + id + '/owner', { owner_user_id: uid });
+          UI.toast(uid ? '已指派负责人' : '已取消负责人', 'ok');
+          App.render();
+        },
+      });
+    };
     const dl = el.querySelector('#del');
     if (dl) dl.onclick = async () => {
       if (!(await UI.confirm('删除工单将同时删除其工序与报工记录，确定删除？', '删除工单'))) return;

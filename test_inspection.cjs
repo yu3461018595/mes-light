@@ -297,6 +297,55 @@ async function api(m, u, b, t) {
     const qcDet = await api('GET', '/api/quality_issues/' + qcCrit.data.id, null, null, qc.data.token);
     const qcKinds = (qcDet.data.timeline || []).map((n) => n.kind);
     chk('质检员上报：升级管理层(有 escalate)', qcKinds.includes('escalate'), qcKinds);
+
+    console.log('\n--- 16) 工单负责人 + 检验反馈异常首推负责人 ---');
+    const usersL = await H('GET', '/api/users');
+    const tech1u = (usersL.data || []).find((u) => u.username === 'tech1');
+    const tech1id = tech1u ? tech1u.id : null;
+    chk('找到技术员 tech1', !!tech1id, tech1u);
+
+    // 16.1 指定负责人后：检验反馈异常的责任人=负责人，首条通知推送给负责人
+    const sfx6 = String(Date.now() + 61).slice(-6);
+    const prod6 = await H('POST', '/api/products', { code: 'OW-' + sfx6, name: '负责人工单件' + sfx6, unit: '件', price: 10 });
+    const p6a = await H('POST', '/api/processes', { code: 'OWA-' + sfx6, name: '加工' + sfx6, std_time: 5, std_price: 1 });
+    const p6b = await H('POST', '/api/processes', { code: 'OWB-' + sfx6, name: '终检' + sfx6, std_time: 3, std_price: 1, inspect_type: 'fqc' });
+    const rt6 = await H('POST', '/api/routes', { code: 'RTW-' + sfx6, name: '负责路线' + sfx6, product_id: prod6.data.id, steps: [{ seq: 10, process_id: p6a.data.id }, { seq: 20, process_id: p6b.data.id }] });
+    const ord6 = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 20 });
+    chk('建负责人测试工单', ord6.ok, ord6);
+    await H('PATCH', '/api/orders/' + ord6.data.id + '/status', { status: 'released' });
+    const st6 = (await H('GET', '/api/orders/' + ord6.data.id)).data.steps;
+    await H('POST', '/api/reports', { order_id: ord6.data.id, order_step_id: st6[1].id, qty_good: 20, qty_bad: 0, work_min: 10 });
+    const own = await H('PUT', '/api/orders/' + ord6.data.id + '/owner', { owner_user_id: tech1id });
+    chk('指派负责人成功', own.ok && own.data.owner_user_id === tech1id, own.data);
+    const ord6d = await H('GET', '/api/orders/' + ord6.data.id);
+    chk('工单详情返回负责人', ord6d.data.owner_user_id === tech1id && ord6d.data.owner_name === '李伟', ord6d.data);
+    const insp6 = await api('POST', '/api/inspections', { order_step_id: st6[1].id, qty_pass: 16, qty_fail: 4, conclusion: 'fail', defects: [{ bad_reason: '尺寸超差', qty: 4 }] }, qc.data.token);
+    chk('终检不合格开异常单', insp6.ok && insp6.data.issue && insp6.data.issue.id, insp6.data && insp6.data.issue);
+    const iss6 = insp6.data.issue.id;
+    const iss6d = await H('GET', '/api/quality_issues/' + iss6);
+    chk('异常责任人=工单负责人(tech1)', iss6d.data.assignee_user_id === tech1id && iss6d.data.assignee_name === '李伟', iss6d.data);
+    const createdTo6 = (iss6d.data.timeline || []).filter((n) => n.kind === 'created').map((n) => n.to_user_id);
+    chk('首条通知推送给负责人(tech1)', createdTo6.includes(tech1id), createdTo6);
+
+    // 16.2 未指定负责人 → 沿用系统定责（责任人不是 tech1）
+    const sfx7 = String(Date.now() + 67).slice(-6);
+    const prod7 = await H('POST', '/api/products', { code: 'OWX-' + sfx7, name: '无负责人工单件' + sfx7, unit: '件', price: 10 });
+    const p7a = await H('POST', '/api/processes', { code: 'OWXA-' + sfx7, name: '加工X' + sfx7, std_time: 5, std_price: 1 });
+    const p7b = await H('POST', '/api/processes', { code: 'OWXB-' + sfx7, name: '终检X' + sfx7, std_time: 3, std_price: 1, inspect_type: 'fqc' });
+    const rt7 = await H('POST', '/api/routes', { code: 'RTWX-' + sfx7, name: '无负责路线' + sfx7, product_id: prod7.data.id, steps: [{ seq: 10, process_id: p7a.data.id }, { seq: 20, process_id: p7b.data.id }] });
+    const ord7 = await H('POST', '/api/orders', { product_id: prod7.data.id, route_id: rt7.data.id, qty_plan: 20 });
+    await H('PATCH', '/api/orders/' + ord7.data.id + '/status', { status: 'released' });
+    const st7 = (await H('GET', '/api/orders/' + ord7.data.id)).data.steps;
+    await H('POST', '/api/reports', { order_id: ord7.data.id, order_step_id: st7[1].id, qty_good:20, qty_bad: 0, work_min: 10 });
+    const insp7 = await api('POST', '/api/inspections', { order_step_id: st7[1].id, qty_pass: 16, qty_fail: 4, conclusion: 'fail', defects: [{ bad_reason: '尺寸超差', qty: 4 }] }, qc.data.token);
+    chk('无负责人：终检不合格仍开异常单', insp7.ok && insp7.data.issue && insp7.data.issue.id, insp7.data && insp7.data.issue);
+    const iss7 = insp7.data.issue.id;
+    const iss7d = await H('GET', '/api/quality_issues/' + iss7);
+    chk('无负责人：责任人回退（非 tech1、非空）', iss7d.data.assignee_user_id !== tech1id && iss7d.data.assignee_user_id != null, iss7d.data);
+
+    // 16.3 清空负责人
+    const clearOwn = await H('PUT', '/api/orders/' + ord6.data.id + '/owner', { owner_user_id: null });
+    chk('清空负责人成功', clearOwn.ok && clearOwn.data.owner_user_id == null, clearOwn.data);
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));

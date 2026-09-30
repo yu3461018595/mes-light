@@ -533,6 +533,23 @@ route('PATCH', '/api/orders/(\\d+)/status', ['admin', 'technician'], (req, res, 
   ok(res, true);
 });
 
+/* 指派工单负责人（accountable 责任人）：检验反馈异常首推此人处理；可清空 */
+route('PUT', '/api/orders/(\\d+)/owner', ['admin', 'technician'], (req, res, m, b, u) => {
+  const oid = num(m[1]);
+  const o = get('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return fail(res, '工单不存在', 404);
+  const uid = b.owner_user_id ? num(b.owner_user_id) : null;
+  let uname = null;
+  if (uid) {
+    const u = get('SELECT id,name,active FROM users WHERE id=?', [uid]);
+    if (!u || !u.active) return fail(res, '所选用户不存在或未启用', 400);
+    uname = u.name;
+  }
+  run('UPDATE orders SET owner_user_id=?, owner_name=? WHERE id=?', [uid, uname, oid]);
+  writeLog(u, '指派工单负责人', o.code + (uname ? ' → ' + uname : ' → 取消负责人'));
+  ok(res, { owner_user_id: uid, owner_name: uname });
+});
+
 route('PATCH', '/api/orders/(\\d+)/steps/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
   const allowReport = (b.allow_report === 0 || b.allow_report === '0' || b.allow_report === false) ? 0 : 1;
   run('UPDATE order_steps SET assignee_team=?, work_center_id=?, allow_report=? WHERE id=? AND order_id=?',
@@ -1619,7 +1636,9 @@ function createQualityIssue(opt) {  const ts = now();
   const code = genCode('QA');
   const step = opt.order_step_id ? get('SELECT * FROM order_steps WHERE id=?', [opt.order_step_id]) : null;
   const order = opt.order_id ? get('SELECT * FROM orders WHERE id=?', [opt.order_id]) : null;
-  const assignee = resolveIssueAssignee(step, order);
+  // 工单负责人优先：若工单指定了负责人，则该工单的检验反馈异常首推负责人处理；否则沿用原定责链路
+  const orderOwner = (order && order.owner_user_id) ? get('SELECT id,name FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+  const assignee = orderOwner || resolveIssueAssignee(step, order);
   const id = insert(`INSERT INTO quality_issues(code,level,source,order_id,order_step_id,inspection_id,product_id,product_name,order_code,process_name,
       qty_affected,bad_summary,status,assignee_user_id,assignee_name,claimed_at,due_at,escalated,cause,action,disposition,verifier,closed_at,created_by,created_at,supplier)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,NULL,?,0,NULL,NULL,NULL,NULL,NULL,?,?,?)`,

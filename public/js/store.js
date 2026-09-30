@@ -452,6 +452,21 @@
     writeLog(actor(), '修改工单', before.code);
     return ok(true);
   });
+  R('PUT', '/orders/(\\d+)/owner', (m, b) => {
+    if (requireOrderMgr()) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    const uid = b.owner_user_id ? num(b.owner_user_id) : null;
+    let uname = null;
+    if (uid) {
+      const u = find('users', uid);
+      if (!u || !u.active) return fail('所选用户不存在或未启用', 400);
+      uname = u.name;
+    }
+    update('orders', o.id, { owner_user_id: uid, owner_name: uname });
+    writeLog(actor(), '指派工单负责人', o.code + (uname ? ' → ' + uname : ' → 取消负责人'));
+    return ok({ owner_user_id: uid, owner_name: uname });
+  });
   R('PATCH', '/orders/(\\d+)/status', (m, b) => {
     if (requireOrderMgr()) return fail('无权限', 403);
     const o = find('orders', m[0]);
@@ -1540,7 +1555,9 @@
     const code = genCode('QA');
     const step = opt.order_step_id ? find('order_steps', opt.order_step_id) : null;
     const order = opt.order_id ? find('orders', opt.order_id) : null;
-    const assignee = resolveIssueAssignee(step, order);
+    // 工单负责人优先：若工单指定了负责人，则该工单的检验反馈异常首推负责人处理；否则沿用原定责链路
+    const orderOwner = (order && order.owner_user_id) ? find('users', num(order.owner_user_id)) : null;
+    const assignee = (orderOwner && orderOwner.active) ? { id: orderOwner.id, name: orderOwner.name } : resolveIssueAssignee(step, order);
     const id = insert('quality_issues', {
       id: nextId('quality_issues'), code, level: opt.level || 'major', source: opt.source || 'inspect',
       order_id: opt.order_id || null, order_step_id: opt.order_step_id || null, inspection_id: opt.inspection_id || null,
