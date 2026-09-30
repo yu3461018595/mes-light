@@ -326,6 +326,10 @@ async function api(m, u, b, t) {
     chk('异常责任人=工单负责人(tech1)', iss6d.data.assignee_user_id === tech1id && iss6d.data.assignee_name === '李伟', iss6d.data);
     const createdTo6 = (iss6d.data.timeline || []).filter((n) => n.kind === 'created').map((n) => n.to_user_id);
     chk('首条通知推送给负责人(tech1)', createdTo6.includes(tech1id), createdTo6);
+    // 工序名必须取真实工序名（回归：早期版本误写成「工序N·检验类型」或 NULL）
+    const realPn6 = st6[1].process_name;
+    chk('异常单工序名=真实工序名', iss6d.data.process_name === realPn6 && !/^工序/.test(iss6d.data.process_name || ''), iss6d.data.process_name);
+    chk('异常单来源检验单工序名=真实工序名', iss6d.data.inspection && iss6d.data.inspection.process_name === realPn6, iss6d.data.inspection && iss6d.data.inspection.process_name);
 
     // 16.2 未指定负责人 → 沿用系统定责（责任人不是 tech1）
     const sfx7 = String(Date.now() + 67).slice(-6);

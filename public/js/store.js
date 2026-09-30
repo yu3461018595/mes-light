@@ -1668,7 +1668,7 @@
         result.issue = createQualityIssue({
           level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
           product_id: order.product_id, product_name: product.name,
-          process_name: (step.process_name || (find('processes', step.process_id) || {}).name || ('工序' + stepOrd(step))) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+          process_name: step.process_name || (find('processes', step.process_id) || {}).name || ('工序' + stepOrd(step)),
           qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: act.id,
         });
         if (['running', 'released'].includes(order.status)) update('orders', order.id, { status: 'paused' });
@@ -1714,7 +1714,11 @@
       }).filter(Boolean).sort((a, b) => b.order_step_id - a.order_step_id));
   });
   R('GET', '/inspections', () => ok(T('inspections').slice().sort((a, b) => b.id - a.id).slice(0, 200)
-    .map((i) => Object.assign({}, i, { order_code: (find('orders', i.order_id) || {}).code || '' }))));
+    .map((i) => Object.assign({}, i, {
+      order_code: (find('orders', i.order_id) || {}).code || '',
+      defect_summary: T('inspection_defects').filter((d) => Number(d.inspection_id) === Number(i.id))
+        .map((d) => (d.bad_reason || '其他') + '×' + d.qty).join('；') || '',
+    }))));
   R('GET', '/inspections/(\\d+)', (m) => {
     const i = find('inspections', m[0]);
     if (!i) return fail('检验记录不存在', 404);

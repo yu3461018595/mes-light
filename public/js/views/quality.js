@@ -382,7 +382,7 @@ Views.quality = {
             { t: '不合格', align: 'right', f: (r) => `<span class="mono" style="color:${Number(r.qty_fail) ? 'var(--danger)' : 'var(--text3)'}">${UI.n2(r.qty_fail)}</span>` },
             { t: '结论', f: (r) => this.concChip(r.conclusion) },
             { t: '检验员', f: (r) => UI.esc(r.inspector || '—') },
-            { t: '不良明细', f: (r) => `<span class="small muted">${UI.esc(r.remark || '—')}</span>` },
+            { t: '不良明细', f: (r) => `<span class="small muted">${UI.esc(r.defect_summary || r.remark || '—')}</span>` },
             { t: '时间', f: (r) => `<span class="small muted">${UI.esc((r.created_at || '').slice(5, 16))}</span>` },
             { t: '', align: 'right', f: (r) => `<button class="btn btn-sm btn-ghost" data-det="${r.id}">明细</button>` },
           ], rows, { emptyText: '还没有检验记录' })}

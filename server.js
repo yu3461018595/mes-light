@@ -1672,7 +1672,7 @@ function createQualityIssue(opt) {  const ts = now();
 // 检验判定 → 写检验记录；仅重大异常（critical）自动开异常单并逐级上报管理层，一般不合格待返工重检
 function doInspection(b, actor) {
   const stepId = num(b.order_step_id);
-  const step = get('SELECT * FROM order_steps WHERE id=?', [stepId]);
+  const step = get('SELECT s.*, p.name process_name FROM order_steps s LEFT JOIN processes p ON p.id=s.process_id WHERE s.id=?', [stepId]);
   if (!step) throw new Error('工序不存在');
   const order = get('SELECT * FROM orders WHERE id=?', [step.order_id]);
   if (!order) throw new Error('工单不存在');
@@ -1781,7 +1781,7 @@ function doInspection(b, actor) {
       result.issue = createQualityIssue({
         level, source: 'inspect', order_id: order.id, order_step_id: step.id, inspection_id: inspId,
         product_id: order.product_id, product_name: product ? product.name : null,
-        process_name: (step.process_name || ('工序' + stepSeqNo(step.order_id, step.seq))) + '·' + (INSPECT_LABEL[step.inspect_type] || '检验'),
+        process_name: step.process_name || ('工序' + stepSeqNo(step.order_id, step.seq)),
         qty_affected: qtyFail, bad_summary: summary.join('；'), created_by: actor.id,
       });
       run("UPDATE orders SET status='paused' WHERE id=? AND status IN ('running','released')", [order.id]);
@@ -1844,7 +1844,9 @@ route('GET', '/api/inspections/pending', ['admin', 'technician', 'inspector'], (
 route('GET', '/api/inspections', [], (req, res, _m, _b, _u, query) => {
   const w = []; const p = [];
   if (query.order_id) { w.push('i.order_id=?'); p.push(query.order_id); }
-  ok(res, all(`SELECT i.*, o.code order_code FROM inspections i LEFT JOIN orders o ON o.id=i.order_id
+  ok(res, all(`SELECT i.*, o.code order_code,
+      (SELECT GROUP_CONCAT(bad_reason || '×' || qty, '；') FROM inspection_defects WHERE inspection_id=i.id) defect_summary
+    FROM inspections i LEFT JOIN orders o ON o.id=i.order_id
     ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY i.id DESC LIMIT 200`, p));
 });
 // 检验单明细（含不良项）
