@@ -22,13 +22,27 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.csv': 'text/csv; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 seed();
 
 /* 列类型缓存：把空串按数值列转成 0，避免 NOT NULL 约束失败（新增/编辑时用户留空数字） */
 const colTypes = {};
-for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx', 'order_bad_reasons']) {
+for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx', 'order_bad_reasons', 'equipments', 'equipment_checks']) {
   try {
     colTypes[t] = {};
     for (const row of all(`PRAGMA table_info(${t})`)) colTypes[t][row.name] = (row.type || '').toUpperCase();
@@ -253,7 +267,9 @@ function crud(table, name, opts = {}) {
     ok(res, { id });
   });
   route('PUT', '/api/' + table + '/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
-    const sets = opts.editFields || opts.fields.filter((f) => f !== 'created_at');
+    // 只更新请求中出现的字段（未提交的字段保持原值），避免部分提交把其余列清空
+    const sets = (opts.editFields || opts.fields.filter((f) => f !== 'created_at')).filter((f) => b[f] !== undefined);
+    if (!sets.length) return ok(res, true);
     const cv = (f) => {
       const raw = b[f];
       if (raw === undefined) return null;
@@ -323,6 +339,11 @@ crud('customers', '客户', {
   unique: 'code', order: 'code',
 });
 crud('bad_reasons', '不良原因', { fields: ['name'], editFields: ['name'], unique: 'name', order: 'id' });
+crud('equipments', '设备', {
+  fields: ['code', 'name', 'model', 'location', 'status', 'check_cycle', 'remark', 'created_at'],
+  editFields: ['code', 'name', 'model', 'location', 'status', 'check_cycle', 'remark'],
+  unique: 'code', order: 'code',
+});
 
 route('GET', '/api/users', [], (req, res) => {
   ok(res, all('SELECT u.id,u.username,u.name,u.role,u.team,u.work_center_id,u.active,u.created_at, w.name wc_name FROM users u LEFT JOIN work_centers w ON w.id=u.work_center_id ORDER BY u.id'));
@@ -1378,6 +1399,88 @@ route('GET', '/api/qr/worker/(\\d+)', ['admin', 'technician'], (req, res, m, _b,
   const token = qrToken('worker', w.id);
   const url = baseUrl(req) + '/m/index.html?w=' + w.id + '&t=' + token;
   ok(res, { worker: w, token, url, svg: makeQr(url) });
+});
+
+// 生成设备点检二维码（管理员/技术员）：扫码打开移动端点检页
+route('GET', '/api/qr/equipment/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
+  const eq = get('SELECT id,code,name FROM equipments WHERE id=?', [m[1]]);
+  if (!eq) return fail(res, '设备不存在', 404);
+  const url = baseUrl(req) + '/m/app/index.html#/equip/' + eq.id;
+  ok(res, { equipment: eq, url, svg: makeQr(url) });
+});
+
+// ------------------------------ 设备点检（P1） ------------------------------
+// 点检记录：全员可打点（质检员点检可直接定级）；异常可勾选一键生成质量异常单（走统一上报口径）
+route('POST', '/api/equipments/(\\d+)/check', ['admin', 'technician', 'worker', 'inspector'], (req, res, m, b, u) => {
+  const eq = get('SELECT * FROM equipments WHERE id=?', [m[1]]);
+  if (!eq) return fail(res, '设备不存在', 404);
+  const result = b.result === 'abnormal' ? 'abnormal' : 'ok';
+  let issue = null;
+  tx(() => {
+    const cid = insert('INSERT INTO equipment_checks(equipment_id,result,note,issue_id,checked_by,checked_name,created_at) VALUES(?,?,?,NULL,?,?,?)',
+      [eq.id, result, b.note || null, u.id, u.name, now()]);
+    run('UPDATE equipments SET last_check_at=? WHERE id=?', [now(), eq.id]);
+    if (result === 'abnormal' && b.fault) run("UPDATE equipments SET status='fault' WHERE id=?", [eq.id]);
+    if (result === 'abnormal' && b.report) {
+      // 检验员点检可直接定级；其他角色正式等级「待定级」，申报重大时通知全体检验员及时定级
+      const lv = u.role === 'inspector' && ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'pending';
+      issue = createQualityIssue({
+        level: lv, source: 'report', process_name: '设备点检 · ' + eq.name, qty_affected: 0,
+        bad_summary: `设备点检异常：${eq.code} ${eq.name}${eq.location ? '（' + eq.location + '）' : ''}${b.note ? '：' + b.note : ''}`,
+        created_by: u.id,
+      });
+      run('UPDATE equipment_checks SET issue_id=? WHERE id=?', [issue.id, cid]);
+      if (u.role !== 'inspector' && ['major', 'critical'].includes(b.level)) {
+        for (const ip of all("SELECT id,name FROM users WHERE role='inspector' AND active=1")) {
+          notifyIssue(issue, ip, 'created', `操作工上报重大异常，请及时定级：${issue.code}`,
+            `设备点检异常：${eq.code} ${eq.name}${eq.location ? '（' + eq.location + '）' : ''}（申报等级：${ISSUE_LEVEL_LABEL[b.level] || b.level}）${b.note ? '：' + b.note : ''}`, false);
+        }
+      }
+    }
+    writeLog(u, '设备点检', eq.code + ' ' + (result === 'ok' ? '正常' : '异常'));
+  });
+  ok(res, { issue });
+});
+
+// 点检历史（需登录）
+route('GET', '/api/equipments/(\\d+)/checks', [], (req, res, m) => {
+  ok(res, all('SELECT c.*, q.code issue_code, q.level issue_level FROM equipment_checks c LEFT JOIN quality_issues q ON q.id=c.issue_id WHERE c.equipment_id=? ORDER BY c.id DESC LIMIT 100', [m[1]]));
+});
+
+// ------------------------------ 工序 SOP / 图纸附件（P1） ------------------------------
+const SOP_EXT = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.txt'];
+function uploadDir() {
+  return path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'uploads');
+}
+// 上传/更换工序 SOP（管理员/技术员）：JSON base64，≤12MB，扩展名白名单
+route('POST', '/api/processes/(\\d+)/sop', ['admin', 'technician'], (req, res, m, b, u) => {
+  const p = get('SELECT id,code,name FROM processes WHERE id=?', [m[1]]);
+  if (!p) return fail(res, '工序不存在', 404);
+  if (!b.name) return fail(res, '请选择要上传的文件');
+  const buf = Buffer.from(String(b.data || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+  if (!buf.length) return fail(res, '文件内容为空');
+  if (buf.length > 12 * 1024 * 1024) return fail(res, '文件不能超过 12MB');
+  const safe = String(b.name).replace(/[\\/:*?"<>|]/g, '_').slice(-120);
+  if (!SOP_EXT.includes(path.extname(safe).toLowerCase())) return fail(res, '仅支持 ' + SOP_EXT.join(' ') + ' 格式');
+  const dir = uploadDir();
+  fs.mkdirSync(dir, { recursive: true });
+  // 同一工序只保留最新一份：先清旧文件
+  const old = get('SELECT sop_file FROM processes WHERE id=?', [p.id]);
+  if (old && old.sop_file) { try { fs.unlinkSync(path.join(dir, old.sop_file)); } catch (e) { /* 忽略 */ } }
+  const fname = 'sop_' + p.id + '_' + Date.now() + '_' + safe;
+  fs.writeFileSync(path.join(dir, fname), buf);
+  run('UPDATE processes SET sop_file=?, sop_name=? WHERE id=?', [fname, safe, p.id]);
+  writeLog(u, '上传工序SOP', p.code + ' ' + safe);
+  ok(res, { sop_file: fname, sop_name: safe });
+});
+// 删除工序 SOP（管理员/技术员）
+route('DELETE', '/api/processes/(\\d+)/sop', ['admin', 'technician'], (req, res, m, _b, u) => {
+  const p = get('SELECT id,code,sop_file FROM processes WHERE id=?', [m[1]]);
+  if (!p || !p.sop_file) return fail(res, '该工序未上传 SOP/图纸', 404);
+  try { fs.unlinkSync(path.join(uploadDir(), p.sop_file)); } catch (e) { /* 文件可能已被手动清理 */ }
+  run('UPDATE processes SET sop_file=NULL, sop_name=NULL WHERE id=?', [p.id]);
+  writeLog(u, '删除工序SOP', p.code);
+  ok(res, { ok: true });
 });
 
 // 免登录：按工单令牌读取工单与工序（员工码可凭 wid 访问其被指派班组的工单）
@@ -3136,6 +3239,18 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
       return fs.createReadStream(appFile).pipe(res);
     }
+  }
+
+  // SOP/图纸等上传文件（落盘在 data/uploads/，与数据库同卷保证持久化）
+  if (pathname.startsWith('/uploads/')) {
+    const upDir = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'uploads');
+    const f = path.join(upDir, path.basename(decodeURIComponent(pathname.slice('/uploads/'.length))));
+    if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('404 Not Found');
+    }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(f).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' });
+    return fs.createReadStream(f).pipe(res);
   }
 
   // 静态文件

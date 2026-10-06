@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -1268,6 +1268,55 @@
   crud('work_centers', '工作中心', { unique: 'code', onDelete: (id) => { if (T('order_steps').some((s) => s.work_center_id === id) || T('users').some((u) => u.work_center_id === id) || T('route_steps').some((s) => s.work_center_id === id)) return '该工作中心已被使用，无法删除'; return ''; } });
   crud('customers', '客户', { unique: 'code' });
   crud('bad_reasons', '不良原因', { unique: 'name' });
+  crud('equipments', '设备', { roles: ['admin', 'technician'], unique: 'code' });
+
+  /* 设备点检（P1）：异常可生成质量异常单，口径与 server 一致 */
+  R('POST', '/equipments/(\\d+)/check', (m, b) => {
+    if (requireRole('admin', 'technician', 'worker')) return fail('无权限', 403);
+    const eq = find('equipments', m[0]);
+    if (!eq) return fail('设备不存在', 404);
+    const result = b.result === 'abnormal' ? 'abnormal' : 'ok';
+    const act = actor();
+    insert('equipment_checks', { id: nextId('equipment_checks'), equipment_id: eq.id, result, note: b.note || null, issue_id: null, checked_by: act.id, checked_name: act.name, created_at: nowISO() });
+    update('equipments', eq.id, { last_check_at: nowISO() });
+    if (result === 'abnormal' && b.fault) update('equipments', eq.id, { status: 'fault' });
+    let issue = null;
+    if (result === 'abnormal' && b.report) {
+      const lv = act.role === 'inspector' && ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'pending';
+      issue = createQualityIssue({ level: lv, source: 'report', process_name: '设备点检 · ' + eq.name, qty_affected: 0, bad_summary: `设备点检异常：${eq.code} ${eq.name}${b.note ? '：' + b.note : ''}`, created_by: act.id });
+      const rec = T('equipment_checks').slice(-1)[0];
+      if (rec) rec.issue_id = issue.id;
+      if (act.role !== 'inspector' && ['major', 'critical'].includes(b.level)) {
+        T('users').filter((u2) => u2.role === 'inspector' && u2.active).forEach((ip) => {
+          notifyIssue(issue, { id: ip.id, name: ip.name }, 'created', `操作工上报重大异常，请及时定级：${issue.code}`, `设备点检异常：${eq.code} ${eq.name}（申报等级：${ISSUE_LEVEL_LABEL[b.level] || b.level}）`);
+        });
+      }
+    }
+    writeLog(act, '设备点检', eq.code + ' ' + (result === 'ok' ? '正常' : '异常'));
+    return ok({ issue });
+  });
+  R('GET', '/equipments/(\\d+)/checks', (m) => {
+    const list = T('equipment_checks').filter((c) => Number(c.equipment_id) === Number(m[0])).slice().sort((a, b) => b.id - a.id).slice(0, 100)
+      .map((c) => { const q = c.issue_id ? find('quality_issues', c.issue_id) : null; return Object.assign({}, c, { issue_code: q ? q.code : null, issue_level: q ? q.level : null }); });
+    return ok(list);
+  });
+  /* 工序 SOP：静态版仅保存元数据（无文件系统） */
+  R('POST', '/processes/(\\d+)/sop', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const p = find('processes', m[0]);
+    if (!p) return fail('工序不存在', 404);
+    update('processes', p.id, { sop_file: 'static_' + p.id + '_' + (b.name || 'sop'), sop_name: b.name || 'sop' });
+    writeLog(actor(), '上传工序SOP', p.code + ' ' + (b.name || ''));
+    return ok({ sop_name: b.name || 'sop' });
+  });
+  R('DELETE', '/processes/(\\d+)/sop', (m) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const p = find('processes', m[0]);
+    if (!p) return fail('工序不存在', 404);
+    update('processes', p.id, { sop_file: null, sop_name: null });
+    writeLog(actor(), '删除工序SOP', p.code);
+    return ok(true);
+  });
   crud('materials', '物料档案', { roles: ['admin', 'technician'], unique: 'code', onDelete: (id) => { if (T('inventory_tx').some((t) => Number(t.material_id) === id)) return '该物料已有库存流水，不能删除（可停用）'; return ''; } });
   crud('warehouses', '仓库', { roles: ['admin', 'technician'], unique: 'code', onDelete: (id) => { if (T('inventory').some((r) => Number(r.warehouse_id) === id)) return '该仓库已有库存记录，不能删除'; return ''; } });
 

@@ -128,7 +128,7 @@
   const TITLES = {
     home: '工作台', messages: '消息', mine: '我的', order: '报工', inspect: '质检台',
     quality: '质量异常', issue: '异常详情', stocks: '库存预警', profile: '个人资料', password: '修改密码',
-    pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验',
+    pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验', equip: '设备点检',
   };
   function nav(hash, replace) {
     if (replace) location.replace(hash); else location.hash = hash;
@@ -149,7 +149,7 @@
     $tabbar.hidden = !['home', 'messages', 'mine'].includes(name);
     $view.className = $tabbar.hidden ? '' : 'has-tab';
     $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
-    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake'].includes(name);
+    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip'].includes(name);
     $title.textContent = TITLES[name] || '智工';
     $view.innerHTML = '<div class="loading">加载中…</div>';
 
@@ -166,6 +166,7 @@
         case 'pick': return await renderPick();
         case 'stocktake': return await renderStocktake();
       case 'incoming': return await renderIncoming();
+        case 'equip': return await renderEquip(args[0]);
         case 'profile': return await renderProfile();
         case 'password': return await renderPassword();
         default: return void okMask('页面不存在', '即将返回工作台', [{ text: '返回', onClick: () => nav('#/home', true) }]);
@@ -375,9 +376,10 @@
 
     // 仓储快捷入口：工人/技术员/管理员可领料；管理员/技术员可盘点
     if (me.role !== 'inspector') {
-      blocks.push(`<div class="card"><div class="card-h"><h3>仓储快捷</h3></div>
-        <div class="card-b" style="display:flex;gap:8px;padding:10px 12px">
+      blocks.push(`<div class="card"><div class="card-h"><h3>现场作业</h3></div>
+        <div class="card-b" style="display:flex;gap:8px;padding:10px 12px;flex-wrap:wrap">
           <button class="btn ghost sm" data-go="pick" style="flex:1">🧰 领料申请</button>
+          <button class="btn ghost sm" data-go="equip" style="flex:1">⚙️ 设备点检</button>
           ${isManager ? `<button class="btn ghost sm" data-go="stocktake" style="flex:1">📋 扫码盘点</button>` : ''}
         </div></div>`);
     }
@@ -1233,6 +1235,84 @@
     $view.querySelector('#mPush').onchange = (e) => {
       localStorage.setItem(LS_PUSH, e.target.checked ? '1' : '0');
       toast(e.target.checked ? '已开启消息通知' : '已关闭消息提醒（角标仍显示）');
+    };
+  }
+
+  /* ---------------- 页面：设备点检（P1） ---------------- */
+  const EQ_STATUS = { idle: ['空闲', 'b-idle'], running: ['运转', 'b-done'], fault: ['故障', 'b-closed'], maintain: ['保养', 'b-released'] };
+  async function renderEquip(equipId) {
+    const me = await ensureMe();
+    const eqs = await get('/api/equipments');
+    if (equipId) {
+      const eq = (eqs || []).find((x) => String(x.id) === String(equipId));
+      if (eq) return openEquipCheck(eq);
+    }
+    $view.innerHTML = `<div class="card"><div class="card-b">
+      ${(eqs || []).length ? eqs.map((eq) => {
+        const st = EQ_STATUS[eq.status] || [eq.status, 'b-idle'];
+        let due = '';
+        if (eq.check_cycle > 0 && eq.last_check_at) {
+          const d = new Date(String(eq.last_check_at).slice(0, 10));
+          d.setDate(d.getDate() + eq.check_cycle);
+          if (d.toISOString().slice(0, 10) < new Date().toISOString().slice(0, 10)) due = '<span class="badge b-closed">已超期</span>';
+        } else if (!eq.last_check_at) due = '<span class="badge b-idle">未点检</span>';
+        return `<div class="item" data-eq="${eq.id}">
+          <div class="avatar" style="background:#e8f0fe">⚙️</div>
+          <div class="body"><div class="t1">${esc(eq.code)} ${esc(eq.name)} <span class="badge ${st[1]}">${st[0]}</span> ${due}</div>
+            <div class="t2">${esc(eq.location || '')}${eq.check_cycle > 0 ? ' · 每 ' + eq.check_cycle + ' 天一检' : ' · 不定期点检'}${eq.last_check_at ? ' · 上次 ' + esc(String(eq.last_check_at).slice(0, 10)) : ''}</div></div>
+          <div class="chev">›</div>
+        </div>`;
+      }).join('') : '<div class="empty" style="padding:26px 16px"><p>暂无设备台账</p><p class="tiny">请联系管理员在电脑端「设备」页建立设备并生成二维码</p></div>'}
+    </div></div><div class="hint">点检异常可一键生成质量异常单；申报「严重/致命」会通知质检员及时定级。</div><div style="height:8px"></div>`;
+    $view.querySelectorAll('[data-eq]').forEach((el) => el.onclick = () => openEquipCheck((eqs || []).find((x) => String(x.id) === el.dataset.eq)));
+  }
+
+  function openEquipCheck(eq) {
+    const st = EQ_STATUS[eq.status] || [eq.status, 'b-idle'];
+    $view.innerHTML = `<div class="card"><div class="card-b">
+      <div class="t1" style="font-size:17px">${esc(eq.code)} · ${esc(eq.name)} <span class="badge ${st[1]}">${st[0]}</span></div>
+      <div class="t2" style="margin:4px 0 10px">${esc(eq.model || '')}${eq.location ? ' · ' + esc(eq.location) : ''}${eq.last_check_at ? ' · 上次点检 ' + esc(String(eq.last_check_at).slice(0, 16)) : ' · 从未点检'}</div>
+      <div class="field"><span>点检结果</span>
+        <select class="ipt" id="eqResult"><option value="ok">✅ 正常</option><option value="abnormal">⚠️ 异常</option></select></div>
+      <div class="field"><span>同步设备状态</span>
+        <select class="ipt" id="eqFault"><option value="">不更改</option><option value="1">转为「故障」</option><option value="running">转为「运转」</option></select></div>
+      <div class="field"><span>点检说明 / 异常描述</span>
+        <input class="ipt" id="eqNote" placeholder="如：主轴异响、漏油、导轨磨损"></div>
+      <div id="eqAb" style="display:none">
+        <label class="remember"><input type="checkbox" id="eqReport" checked> 同时生成质量异常单（统一异常口径）</label>
+        <div class="field"><span>异常等级（申报重大将通知质检员及时定级）</span>
+          <select class="ipt" id="eqLevel"><option value="major">严重</option><option value="critical">致命</option><option value="minor">轻微</option></select></div>
+      </div>
+      <button class="btn" id="eqGo" style="margin-top:8px">提交点检</button>
+      <button class="btn ghost" id="eqBack2" style="margin-top:8px">返回设备列表</button>
+    </div></div>`;
+    const ab = $view.querySelector('#eqAb');
+    $view.querySelector('#eqResult').onchange = (e) => { ab.style.display = e.target.value === 'abnormal' ? '' : 'none'; };
+    $view.querySelector('#eqBack2').onclick = () => nav('#/equip', true);
+    $view.querySelector('#eqGo').onclick = async () => {
+      const result = $view.querySelector('#eqResult').value;
+      const note = $view.querySelector('#eqNote').value.trim();
+      const payload = { result, note };
+      const fv = $view.querySelector('#eqFault').value;
+      if (fv) payload.fault = fv === '1';
+      if (result === 'abnormal' && $view.querySelector('#eqReport').checked) payload.report = 1;
+      if (result === 'abnormal' && payload.report) payload.level = $view.querySelector('#eqLevel').value;
+      const btn = $view.querySelector('#eqGo');
+      btn.disabled = true; btn.textContent = '提交中…';
+      try {
+        const r = await post('/api/equipments/' + eq.id + '/check', payload);
+        if (r && r.issue) {
+          okMask('点检已记录', `已生成异常单 ${r.issue.code}（${r.issue.level === 'pending' ? '待质检员定级' : '等级：' + r.issue.level}）`, [
+            { text: '查看异常单', onClick: () => nav('#/issue/' + r.issue.id, true) },
+            { text: '返回设备列表', onClick: () => nav('#/equip', true) },
+          ]);
+        } else {
+          okMask('点检已记录', `${esc(eq.code)} · 正常`, [{ text: '返回设备列表', onClick: () => nav('#/equip', true) }]);
+        }
+      } catch (e) {
+        toast(e.message || '提交失败');
+        btn.disabled = false; btn.textContent = '提交点检';
+      }
     };
   }
 

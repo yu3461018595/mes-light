@@ -39,6 +39,9 @@ Views.basic = {
               const m = { iqc: ['首检 IQC', 'chip-info'], ipqc: ['过程检 IPQC', 'chip-warn'], fqc: ['终检 FQC', 'chip-danger'] }[t] || [t, 'chip-gray'];
               return `<span class="chip ${m[1]}">${m[0]}</span>`;
             } },
+          { t: 'SOP/图纸', f: (r) => r.sop_name
+              ? `<a href="/uploads/${encodeURIComponent(r.sop_file)}" target="_blank" rel="noopener" title="点击预览/下载" style="max-width:220px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom">${UI.esc(r.sop_name)}</a>`
+              : '<span class="muted">—</span>' },
           { t: '备注', f: (r) => UI.esc(r.remark || '—') },
         ],
         fields: [
@@ -126,12 +129,22 @@ Views.basic = {
     if (this.tab === 'users') {
       el.querySelector('#tb').innerHTML = this.renderUsersGrouped(rows, canEdit, c);
     } else {
-      el.querySelector('#tb').innerHTML = UI.table(
-        c.cols.concat(canEdit ? [{
-          t: '操作', align: 'right', w: '130px',
+      let opCol = canEdit ? [{
+        t: '操作', align: 'right', w: '130px',
+        f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`
+          + ` <button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`,
+      }] : [];
+      // 工序：操作列追加 SOP 上传/更换/删除（SOP 查看在列表列里，点击文件名即可）
+      if (this.tab === 'processes' && canEdit) {
+        opCol = [{
+          t: '操作', align: 'right', w: '210px',
           f: (r) => `<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`
+            + ` <button class="btn btn-sm" data-sop="${r.id}">${r.sop_name ? '换SOP' : '传SOP'}</button>`
+            + (r.sop_name ? ` <button class="btn btn-sm btn-danger" data-sopdel="${r.id}">删SOP</button>` : '')
             + ` <button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`,
-        }] : []), rows);
+        }];
+      }
+      el.querySelector('#tb').innerHTML = UI.table(c.cols.concat(opCol), rows);
     }
     el.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => this.form(b.dataset.edit));
     if (canEdit) el.querySelectorAll('[data-qr]').forEach((b) => b.onclick = async () => {
@@ -144,11 +157,40 @@ Views.basic = {
         });
       } catch (e) { UI.toast(e.message, 'err'); }
     });
+    // 工序 SOP 上传/更换
+    el.querySelectorAll('[data-sop]').forEach((b) => b.onclick = () => this.sopUpload(Number(b.dataset.sop)));
+    el.querySelectorAll('[data-sopdel]').forEach((b) => b.onclick = async () => {
+      if (!(await UI.confirm('确定删除该工序的 SOP/图纸？'))) return;
+      try { await API.del('/processes/' + b.dataset.sopdel + '/sop'); UI.toast('已删除', 'ok'); this.render(el); }
+      catch (e) { UI.toast(e.message, 'err'); }
+    });
     el.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
       if (!(await UI.confirm('确定删除该记录？删除后不可恢复。'))) return;
       try { await API.del(c.api + '/' + b.dataset.del); UI.toast('已删除', 'ok'); this.render(el); }
       catch (e) { UI.toast(e.message, 'err'); }
     });
+  },
+
+  /* 工序 SOP/图纸上传：选文件 → base64 → 后端落盘 data/uploads/ */
+  sopUpload(id) {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt';
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      if (!f) return;
+      if (f.size > 12 * 1024 * 1024) return UI.toast('文件不能超过 12MB', 'err');
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          await API.post('/processes/' + id + '/sop', { name: f.name, data: String(reader.result).split(',')[1] || '' });
+          UI.toast('SOP 已上传', 'ok');
+          this.render(document.getElementById('view'));
+        } catch (e) { UI.toast(e.message, 'err'); }
+      };
+      reader.readAsDataURL(f);
+    };
+    inp.click();
   },
 
   /* 人员：先角色分组、再班组分组 */

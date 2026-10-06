@@ -5,6 +5,7 @@ window.App = {
     { k: 'dashboard', v: 'dashboard', t: '看板', roles: ['admin', 'technician', 'worker'] },
     { k: 'orders', v: 'orders', t: '工单', roles: ['admin', 'technician', 'worker'] },
     { k: 'report', v: 'report', t: '报工', roles: ['admin', 'technician', 'worker'] },
+    { k: 'equip', v: 'equip', t: '设备', roles: ['admin', 'technician', 'worker'] },
     { k: 'quality', v: 'quality', t: '质量', roles: ['admin', 'technician', 'inspector'] },
     { k: 'basic', v: 'basic', t: '基础数据', roles: ['admin', 'technician', 'worker'] },
     { k: 'warehouse', v: 'warehouse', t: '物料仓储', roles: ['admin', 'technician'] },
