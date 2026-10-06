@@ -337,29 +337,36 @@ Views.quality = {
     let orders = [];
     try { orders = await API.get('/orders'); } catch (e) { /* 忽略 */ }
     try { this.badReasons = await API.get('/bad_reasons'); } catch (e) { this.badReasons = []; }
+    const isInsp = !!(App.user && App.user.role === 'inspector');
     const opts = [[null, '不关联工单']].concat(orders.slice(0, 100).map((o) => [o.id, o.code + ' ' + (o.product_name || '')]));
     UI.modal({
       title: '上报质量异常',
       size: 'lg',
       body: `<div class="grid g2">
         <label class="field"><span>关联工单</span><select class="input" data-k="order_id">${UI.options(opts.map(([id, n]) => ({ id, name: n })), null, 'name')}</select></label>
-        <label class="field"><span>异常等级</span><div class="input" style="background:#f5f7fa;color:#6b7682">待检验员判定</div></label>
+        ${isInsp
+          ? `<label class="field"><span>异常等级</span><select class="input" data-k="level"><option value="major">严重</option><option value="minor">轻微</option><option value="critical">致命</option></select></label>`
+          : `<label class="field"><span>异常等级</span><div class="input" style="background:#f5f7fa;color:#6b7682">待检验员判定</div></label>`}
         <label class="field"><span>工序 / 环节</span><input class="input" data-k="process_name" placeholder="如：车削 / 来料 / 装配"></label>
         <label class="field"><span>影响数量</span><input class="input" type="number" min="0" data-k="qty_affected" value="0"></label>
       </div>
       <label class="field"><span>问题描述 <b style="color:var(--danger)">*</b></span>
         <input class="input" data-k="bad_summary" placeholder="如：来料圆钢表面锈蚀，影响下料质量"></label>
-      <p class="small muted" style="margin-top:6px">提示：报工上报的异常默认「待定级」，严重等级由质检员在异常单中判定，不会直接推送厂部管理层。</p>`,
+      <p class="small muted" style="margin-top:6px">${isInsp
+        ? '提示：检验员上报的异常将直接通知责任人与厂部管理层。'
+        : '提示：报工上报的异常仅留存记录与统计，由质检员定级后通知责任人与厂部管理层。'}</p>`,
       onOk: async (mask) => {
         const g = (k) => { const e2 = mask.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
         if (!g('bad_summary').trim()) throw new Error('请填写问题描述');
-        await API.post('/quality_issues', {
+        const payload = {
           order_id: g('order_id') ? Number(g('order_id')) : null,
           source: 'report',
           process_name: g('process_name'), qty_affected: Number(g('qty_affected')) || 0,
           bad_summary: g('bad_summary').trim(),
-        });
-        UI.toast('异常已上报（待检验员定级），责任人已收到待办', 'ok');
+        };
+        if (isInsp) payload.level = g('level') || 'major';
+        await API.post('/quality_issues', payload);
+        UI.toast(isInsp ? '异常已上报，已通知责任人与厂部管理层' : '异常已上报（待检验员定级）', 'ok');
         this.render(document.getElementById('view'));
       },
     });

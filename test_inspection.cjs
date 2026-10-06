@@ -279,34 +279,43 @@ async function api(m, u, b, t) {
     const dSt2 = (await H('GET', '/api/orders/' + ordDone.data.id)).data.steps;
     chk('取消后检验标记清空', dSt2[1].inspect_type === '', dSt2[1].inspect_type);
 
-    // 15.2 仅检验员上报的异常才提醒管理层（用技术员建工单，责任人为技术员，管理员才会被升级）
+    // 15.2 上报口径（2026-10-06）：非检验员上报只留存记录不推送任何通知；检验员上报直接定级并通知责任人+管理层
     const tech = await api('POST', '/api/login', { username: 'tech1', password: '123456' }, lg.data.token);
     chk('技术员 tech1 可登录', tech.ok && tech.data.user.role === 'technician', tech);
     const ordTech = await api('POST', '/api/orders', { product_id: prod.data.id, route_id: rt.data.id, qty_plan: 5 }, tech.data.token);
     chk('技术员建工单', ordTech.ok, ordTech);
 
-    const adminCrit = await H('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', qty_affected: 3, bad_summary: '管理员代报：批量尺寸超差' });
-    chk('管理员上报成功(待定级)', adminCrit.ok && adminCrit.data.level === 'pending', adminCrit.data);
-    const adminDet = await H('GET', '/api/quality_issues/' + adminCrit.data.id);
+    // 非检验员（管理员代报）：只留存数据记录与统计，不推送任何通知
+    const adminRep = await H('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', qty_affected: 3, bad_summary: '管理员代报：批量尺寸超差' });
+    chk('管理员上报成功(待定级)', adminRep.ok && adminRep.data.level === 'pending', adminRep.data);
+    const adminDet = await H('GET', '/api/quality_issues/' + adminRep.data.id);
     const adminKinds = (adminDet.data.timeline || []).map((n) => n.kind);
-    chk('管理员上报：仍通知责任人(created)', adminKinds.includes('created'), adminKinds);
-    chk('管理员上报：不升级管理层(无 escalate)', !adminKinds.includes('escalate'), adminKinds);
+    chk('非检验员上报：不推送任何通知(timeline 为空)', adminKinds.length === 0, adminKinds);
 
-    // 检验员通过「上报」创建异常：默认待定级，创建时不推送管理层；严重等级由检验员「定级」判定
-    const qcReport = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', qty_affected: 2, bad_summary: '质检员发现材质不符' }, qc.data.token);
-    chk('质检员上报成功(待定级)', qcReport.ok && qcReport.data.level === 'pending', qcReport.data);
+    // 检验员上报：可直接定级，创建即通知责任人(created) + 厂部管理层(escalate)
+    const qcReport = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'major', qty_affected: 2, bad_summary: '质检员发现材质不符' }, qc.data.token);
+    chk('质检员上报等级生效(major)', qcReport.ok && qcReport.data.level === 'major', qcReport.data);
     const qcDet0 = await api('GET', '/api/quality_issues/' + qcReport.data.id, null, null, qc.data.token);
     const qcKinds0 = (qcDet0.data.timeline || []).map((n) => n.kind);
-    chk('质检员上报：创建不推管理层(无 escalate)', !qcKinds0.includes('escalate'), qcKinds0);
-    // 检验员判定为致命级 → 推送厂部管理层
-    const qcGrade = await api('PUT', '/api/quality_issues/' + qcReport.data.id + '/level', { level: 'critical' }, qc.data.token);
+    chk('质检员上报：通知责任人(created)', qcKinds0.includes('created'), qcKinds0);
+    chk('质检员上报：升级管理层(有 escalate)', qcKinds0.includes('escalate'), qcKinds0);
+
+    // 检验员上报致命级 → 同样通知责任人 + 管理层
+    const qcCrit = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'critical', qty_affected: 4, bad_summary: '质检员上报：关键件开裂' }, qc.data.token);
+    chk('质检员上报致命级生效', qcCrit.ok && qcCrit.data.level === 'critical', qcCrit.data);
+    const qcCritDet = await api('GET', '/api/quality_issues/' + qcCrit.data.id, null, null, qc.data.token);
+    const qcCritKinds = (qcCritDet.data.timeline || []).map((n) => n.kind);
+    chk('质检员上报致命级：有 escalate', qcCritKinds.includes('escalate'), qcCritKinds);
+
+    // 非检验员上报的待定级单，由检验员定级为致命级 → 推送厂部管理层
+    const qcGrade = await api('PUT', '/api/quality_issues/' + adminRep.data.id + '/level', { level: 'critical' }, qc.data.token);
     chk('检验员定级为致命级成功', qcGrade.ok && qcGrade.data.level === 'critical', qcGrade.data);
-    const qcDet = await api('GET', '/api/quality_issues/' + qcReport.data.id, null, null, qc.data.token);
+    const qcDet = await api('GET', '/api/quality_issues/' + adminRep.data.id, null, null, qc.data.token);
     const qcKinds = (qcDet.data.timeline || []).map((n) => n.kind);
-    chk('检验员定级致命级：升级管理层(有 escalate)', qcKinds.includes('escalate'), qcKinds);
-    chk('检验员定级致命级：有定级记录(graded)', qcKinds.includes('graded'), qcKinds);
+    chk('定级致命级：升级管理层(有 escalate)', qcKinds.includes('escalate'), qcKinds);
+    chk('定级致命级：有定级记录(graded)', qcKinds.includes('graded'), qcKinds);
     // 越权：普通技术员不能定级
-    const techGrade = await api('PUT', '/api/quality_issues/' + qcReport.data.id + '/level', { level: 'minor' }, tech.data.token);
+    const techGrade = await api('PUT', '/api/quality_issues/' + adminRep.data.id + '/level', { level: 'minor' }, tech.data.token);
     chk('技术员越权定级被拒', !techGrade.ok, techGrade);
 
     console.log('\n--- 16) 工单负责人 + 检验反馈异常首推负责人 ---');

@@ -1651,21 +1651,24 @@ function createQualityIssue(opt) {  const ts = now();
   const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
   const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
   const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
-  // 上报口径（2026-09-30 修正）：只有「检验员(inspector)」上报的异常才上报管理层（webhook 群 + 管理员站内升级）；
-  // 其余角色（操作工/技术员/管理员）上报的异常仅通知责任处理人（assignee）站内待办，不惊动管理层。
-  const isCritical = issue.level === 'critical';
+  // 上报口径（2026-10-06）：
+  // 1) 操作工报工填写/非检验员代报（source=report 且创建者非检验员）的异常：只留存数据记录与统计，
+  //    不推送任何通知（站内待办/管理层群均不发），待检验员在「待定级」队列定级后再流转。
+  // 2) 检验员上报的异常（上报时直接定级）：创建即通知对应责任处理人 + 厂部管理层（webhook 群 + 管理员站内升级）。
+  // 3) 检验判定/来料判定开单（source=inspect/iqc，属检验质量保障动作）与致命级异常：同样通知责任人 + 管理层。
   const creator = opt.created_by ? get('SELECT id,role FROM users WHERE id=?', [opt.created_by]) : null;
   const creatorIsInspector = !!(creator && creator.role === 'inspector');
-  const notifyMgmt = isCritical && creatorIsInspector;
-  notifyIssue(issue, assignee, 'created', title, body, notifyMgmt);
-  if (notifyMgmt) {
+  const notifyAll = creatorIsInspector || (opt.source || 'inspect') !== 'report' || issue.level === 'critical';
+  if (notifyAll) {
+    notifyIssue(issue, assignee, 'created', title, body, true);
     const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => !assignee || a.id !== assignee.id);
     pushMessage({
-      source: 'quality', toUsers: admins.filter((a) => !assignee || a.id !== assignee.id), kind: 'escalate', issue_id: issue.id,
+      source: 'quality', toUsers: admins, kind: 'escalate', issue_id: issue.id,
       ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
-      title: `重大质量异常：${issue.code}`, body: `${title}　${body}`,
+      title: `质量异常（${ISSUE_LEVEL_LABEL[issue.level] || issue.level}）：${issue.code}`, body: `${title}　${body}`,
     });
   }
+  // 非检验员上报（source=report）：只留存，不发任何通知
   return issue;
 }
 
@@ -1998,8 +2001,13 @@ route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u
 // 报工环节自主上报异常（操作工/质检员均可）
 route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {  let it;
   tx(() => {
+    // 上报口径（2026-10-06）：非检验员上报一律「待定级」且只留存记录不通知；
+    // 检验员上报可直接定级（缺省 major），创建即通知责任人 + 厂部管理层
+    const lv = (b.source || 'report') === 'report'
+      ? (u.role === 'inspector' && ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'pending')
+      : (b.level || 'major');
     it = createQualityIssue({
-      level: b.source === 'report' ? 'pending' : (b.level || 'major'), source: b.source || 'report',
+      level: lv, source: b.source || 'report',
       order_id: num(b.order_id) || null, order_step_id: num(b.order_step_id) || null,
       product_name: b.product_name || null, process_name: b.process_name || null,
       qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: u.id,
@@ -2255,9 +2263,13 @@ function scanOverdueIssues() {
     const escMin = num(getSetting('escalate_minutes', 240), 240);
     const list = all("SELECT * FROM quality_issues WHERE status IN ('open','processing')");
     for (const it of list) {
+      const creator = it.created_by ? get('SELECT role FROM users WHERE id=?', [it.created_by]) : null;
+      const creatorIsInspector = !!(creator && creator.role === 'inspector');
       const born = new Date(String(it.created_at).replace(' ', 'T'));
       const mins = (Date.now() - born.getTime()) / 60000;
-      if (it.status === 'open' && mins >= remindMin) {
+      // 上报口径（2026-10-06）：操作工/代报（非检验员）创建的异常只留存记录与统计，不催办、不升级；
+      // 仅检验员创建的异常在超时未处理时提醒/升级管理层
+      if (it.status === 'open' && mins >= remindMin && creatorIsInspector) {
         const already = get("SELECT id FROM issue_notifications WHERE issue_id=? AND kind='remind'", [it.id]);
         if (!already) {
           const supervisor = get("SELECT id,name FROM users WHERE role='technician' AND team=(SELECT team FROM users WHERE id=?) AND active=1 LIMIT 1", [it.assignee_user_id])
@@ -2266,9 +2278,7 @@ function scanOverdueIssues() {
         }
       }
       if (!it.escalated && mins >= escMin) {
-        // 仅检验员上报的异常，超时未处理才升级管理层（webhook + 管理员）；其余仍保留责任处理人站内提醒
-        const creator = it.created_by ? get('SELECT role FROM users WHERE id=?', [it.created_by]) : null;
-        if (creator && creator.role === 'inspector') {
+        if (creatorIsInspector) {
           const admin = get("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
           notifyIssue(it, admin, 'escalate', `质量异常超 ${Math.round(escMin / 60)} 小时未处理：${it.code}`, `${it.process_name || ''} 不良${it.qty_affected}件，责任人 ${it.assignee_name || '未指派'}`);
         }
