@@ -481,6 +481,7 @@
       <div class="card"><div class="card-b">
         <div class="ocode">${esc(o.code)}</div>
         <div class="pname">${esc(o.product_name || '')} ${esc(o.spec || '')}</div>
+        ${o.owner_name ? `<div class="pname">责任人：<b>${esc(o.owner_name)}</b></div>` : ''}
         <div style="margin-top:8px">${badge(o.status)}</div>
         <div class="bar" style="margin-top:10px"><i style="width:${pct}%"></i></div>
         <div class="prog-txt"><span>已完工 ${o.qty_done}/${o.qty_plan}</span><span>${pct}%</span></div>

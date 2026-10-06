@@ -388,6 +388,22 @@ async function api(m, u, b, t) {
     // 16.3 清空负责人
     const clearOwn = await H('PUT', '/api/orders/' + ord6.data.id + '/owner', { owner_user_id: null });
     chk('清空负责人成功', clearOwn.ok && clearOwn.data.owner_user_id == null, clearOwn.data);
+
+    // 16.4 创建工单时直接指定责任人 + 编辑工单修改/清空责任人
+    const adminU = (usersL.data || []).find((u) => u.username === 'admin');
+    const ord8 = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: tech1id });
+    chk('创建时带责任人成功', ord8.ok, ord8);
+    const ord8d = await H('GET', '/api/orders/' + ord8.data.id);
+    chk('创建后责任人=tech1/李伟', ord8d.data.owner_user_id === tech1id && ord8d.data.owner_name === '李伟', ord8d.data);
+    const ord8e = await H('PUT', '/api/orders/' + ord8.data.id, { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, priority: 2, plan_start: '2026-10-06', plan_end: '2026-10-07', remark: '', owner_user_id: adminU.id });
+    chk('编辑工单修改责任人成功', ord8e.ok, ord8e);
+    const ord8e2 = await H('GET', '/api/orders/' + ord8.data.id);
+    chk('编辑后责任人=admin', ord8e2.data.owner_user_id === adminU.id && !!ord8e2.data.owner_name, ord8e2.data);
+    const ord8e3 = await H('PUT', '/api/orders/' + ord8.data.id, { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, priority: 2, plan_start: '2026-10-06', plan_end: '2026-10-07', remark: '', owner_user_id: null });
+    const ord8e4 = await H('GET', '/api/orders/' + ord8.data.id);
+    chk('编辑清空责任人成功', ord8e3.ok && ord8e4.data.owner_user_id == null && !ord8e4.data.owner_name, ord8e4.data);
+    const ord8bad = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: 999999 });
+    chk('不存在的责任人被拒 400', ord8bad.ok === false, ord8bad);
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));

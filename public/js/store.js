@@ -424,7 +424,9 @@
     const oid = insert('orders', {
       id: 0, code, product_id: num(b.product_id), route_id: num(b.route_id), customer_id: b.customer_id ? num(b.customer_id) : null,
       qty_plan: qty, priority: num(b.priority, 2), plan_start: b.plan_start || today(), plan_end: b.plan_end || today(),
-      status: 'created', remark: b.remark || '', created_by: actor().id, created_at: nowISO(), start_time: null, finish_time: null, close_reason: '',
+      status: 'created', remark: b.remark || '', created_by: actor().id, owner_user_id: b.owner_user_id ? num(b.owner_user_id) : null,
+      owner_name: b.owner_user_id ? (find('users', b.owner_user_id) || {}).name || null : null,
+      created_at: nowISO(), start_time: null, finish_time: null, close_reason: '',
     });
     T('route_steps').filter((s) => s.route_id === route.id).sort((a, b) => a.seq - b.seq)
       .forEach((s) => insert('order_steps', { id: 0, order_id: oid, seq: s.seq, process_id: s.process_id, work_center_id: s.work_center_id, assignee_id: null, qty_plan: qty, qty_good: 0, qty_bad: 0, work_min: 0, status: 'pending', start_time: null, finish_time: null, inspect_type: s.inspect_type || (find('processes', s.process_id) || {}).inspect_type || '', inspect_status: null }));
@@ -438,9 +440,15 @@
     if (before.status !== 'created') return fail('只有「待下发」状态的工单可以修改');
     const route = find('routes', b.route_id);
     if (!route) return fail('工艺路线不存在');
+    const ownerPatch = {};
+    if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id')) {
+      ownerPatch.owner_user_id = b.owner_user_id ? num(b.owner_user_id) : null;
+      ownerPatch.owner_name = b.owner_user_id ? (find('users', b.owner_user_id) || {}).name || null : null;
+    }
     update('orders', before.id, {
       product_id: num(b.product_id), route_id: num(b.route_id), customer_id: b.customer_id ? num(b.customer_id) : null,
       qty_plan: num(b.qty_plan), priority: num(b.priority, 2), plan_start: b.plan_start, plan_end: b.plan_end, remark: b.remark || '',
+      ...ownerPatch,
     });
     if (num(b.route_id) !== before.route_id || num(b.qty_plan) !== before.qty_plan) {
       DB.order_steps = T('order_steps').filter((s) => s.order_id !== before.id);

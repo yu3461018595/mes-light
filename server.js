@@ -534,10 +534,18 @@ route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
     : 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
   if (get('SELECT id FROM orders WHERE code=?', [code])) return fail(res, '工单号已存在');
   const id = tx(() => {
-    const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    // 责任人（accountable）：创建时可直接指定；校验存在且启用
+    let ownerName = null;
+    if (b.owner_user_id) {
+      const ow = get('SELECT id,name,active FROM users WHERE id=?', [num(b.owner_user_id)]);
+      if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
+      ownerName = ow.name;
+    }
+    const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,owner_user_id,owner_name,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [code, b.product_id, b.route_id, b.customer_id || null, qty, num(b.priority, 2),
-        b.plan_start || today(), b.plan_end || today(), 'created', b.remark || '', u.id, now()]);
+        b.plan_start || today(), b.plan_end || today(), 'created', b.remark || '', u.id,
+        b.owner_user_id ? num(b.owner_user_id) : null, ownerName, now()]);
     all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [b.route_id]).forEach((s) => {
       insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
         [oid, s.seq, s.process_id, s.work_center_id, qty, 'pending', String(s.inspect_type || '')]);
@@ -716,9 +724,25 @@ route('PUT', '/api/orders/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) 
   const before = get('SELECT * FROM orders WHERE id=?', [m[1]]);
   if (!before) return fail(res, '工单不存在', 404);
   if (before.status !== 'created') return fail(res, '只有「待下发」状态的工单可以修改');
+  // 责任人：编辑表单提交时一并更新（body 未携带 owner_user_id 字段则不动）
+  let ownerSet = '';
+  const ownerParams = [];
+  if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id')) {
+    let ownerName = null;
+    if (b.owner_user_id) {
+      const ow = get('SELECT id,name,active FROM users WHERE id=?', [num(b.owner_user_id)]);
+      if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
+      ownerName = ow.name;
+      ownerParams.push(num(b.owner_user_id), ownerName);
+    } else {
+      ownerParams.push(null, null);
+    }
+    ownerSet = ',owner_user_id=?,owner_name=?';
+  }
   tx(() => {
-    run('UPDATE orders SET product_id=?,route_id=?,customer_id=?,qty_plan=?,priority=?,plan_start=?,plan_end=?,remark=? WHERE id=?',
-      [b.product_id, b.route_id, b.customer_id || null, num(b.qty_plan), num(b.priority, 2), b.plan_start, b.plan_end, b.remark || '', m[1]]);
+    run(`UPDATE orders SET product_id=?,route_id=?,customer_id=?,qty_plan=?,priority=?,plan_start=?,plan_end=?,remark=?${ownerSet} WHERE id=?`,
+      [b.product_id, b.route_id, b.customer_id || null, num(b.qty_plan), num(b.priority, 2), b.plan_start, b.plan_end, b.remark || '',
+        ...ownerParams, m[1]]);
     if (num(b.route_id) !== before.route_id || num(b.qty_plan) !== before.qty_plan) {
       run('DELETE FROM order_steps WHERE order_id=?', [m[1]]);
       all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [b.route_id]).forEach((s) => {
@@ -1365,7 +1389,7 @@ route('GET', '/api/app/my_orders', [], (req, res, _m, _b, u) => {
 // 工单详情 + 可报工序（登录态；班组不匹配的工序标记为不可报）
 route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
   if (!u) return fail(res, '未登录', 401);
-  const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,
+  const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,o.owner_name,
       (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name,p.spec

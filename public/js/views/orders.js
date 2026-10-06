@@ -170,6 +170,9 @@ Views.orders = {
           ${UI.progress(UI.pct(r.qty_done, r.qty_plan), r.qty_done >= r.qty_plan ? 'ok' : '')}
           <span class="small mono">${UI.f1(UI.pct(r.qty_done, r.qty_plan))}%</span></div>` },
       { t: '优先级', f: (r) => UI.prioChip(r.priority) },
+      { t: '责任人', f: (r) => r.owner_user_id
+          ? `<span class="chip chip-info">${UI.esc(r.owner_name)}</span>`
+          : '<span class="muted small">未指定</span>' },
       { t: '交期', f: (r) => `<span class="${r.plan_end < UI.today() && !['done', 'closed'].includes(r.status) ? 'chip chip-danger' : 'small muted'}">${UI.esc(r.plan_end)}</span>` },
       { t: '状态', f: (r) => UI.badge(r.status), align: 'right' },
     ], list, { emptyText: '没有符合条件的工单' });
@@ -178,10 +181,14 @@ Views.orders = {
 
   /* ---------- 新建 / 编辑 ---------- */
   async form(id) {
-    const meta = await API.get('/meta');
+    const [meta, users] = await Promise.all([API.get('/meta'), API.get('/users').catch(() => [])]);
     let o = null;
     if (id) o = await API.get('/orders/' + id);
     const routeOf = (pid) => meta.routes.find((r) => r.product_id == pid);
+    const ownerOpts = '<option value="">不指定（沿用系统定责）</option>'
+      + (users || []).filter((u) => u.active)
+        .map((u) => `<option value="${u.id}"${o && Number(o.owner_user_id) === Number(u.id) ? ' selected' : ''}>${UI.esc(u.name)}（${UI.esc(u.role)}${u.team ? '·' + UI.esc(u.team) : ''}）</option>`)
+        .join('');
 
     const body = `
       <div class="grid g2">
@@ -201,6 +208,8 @@ Views.orders = {
         <label class="field"><span>备注</span><input class="input" id="fRemark" value="${o ? UI.esc(o.remark || '') : ''}"></label>
         <label class="field"><span>计划开工</span><input class="input" type="date" id="fStart" value="${o ? o.plan_start : UI.today()}"></label>
         <label class="field"><span>计划完工</span><input class="input" type="date" id="fEnd" value="${o ? o.plan_end : UI.today()}"></label>
+        <label class="field" style="grid-column:1/-1"><span>责任人<span class="muted" style="font-weight:normal">（质量异常时首推此人处理）</span></span>
+          <select class="input" id="fOwner">${ownerOpts}</select></label>
       </div>
       ${o ? '' : `<div class="small muted">工单号自动生成；保存后按工艺路线展开工序，可再派工到人和设备。</div>`}`;
 
@@ -229,6 +238,7 @@ Views.orders = {
           remark: mask.querySelector('#fRemark').value,
           plan_start: mask.querySelector('#fStart').value,
           plan_end: mask.querySelector('#fEnd').value,
+          owner_user_id: mask.querySelector('#fOwner').value || null,
         };
         if (!payload.route_id) throw new Error('该产品没有工艺路线，请先到基础数据维护');
         if (!(payload.qty_plan > 0)) throw new Error('计划数量必须大于 0');
