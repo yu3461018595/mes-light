@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -692,6 +692,7 @@
       ref_type: 'stock_shipments', ref_id: id, ref_code: code, order_id: b.order_id,
       operator: actor().name, tx_date: date, remark: '成品出库 ' + code });
     writeLog(actor(), '成品出库', code + ' ' + m.name + ' ×' + qty);
+    if (b.sale_ref) salesSync(b.sale_ref);
     return ok({ id, code });
   });
   R('PUT', '/stock_shipments/(\\d+)', (m, b) => {
@@ -714,6 +715,8 @@
       tx_type: 'out_ship', ref_type: 'stock_shipments', ref_id: row.id, ref_code: row.code, order_id: row.order_id,
       operator: actor().name, tx_date: b.ship_date || row.ship_date, remark: '成品出库(改) ' + row.code });
     writeLog(actor(), '修改成品出库', row.code);
+    salesSync(b.sale_ref !== undefined ? b.sale_ref : row.sale_ref);
+    if (b.sale_ref !== undefined && row.sale_ref && b.sale_ref !== row.sale_ref) salesSync(row.sale_ref);
     return ok(true);
   });
   R('DELETE', '/stock_shipments/(\\d+)', (m) => {
@@ -723,6 +726,7 @@
     revertStock('stock_shipments', row.id, actor().name);
     DB.stock_shipments = T('stock_shipments').filter((x) => x.id !== row.id);
     writeLog(actor(), '删除成品出库', row.code);
+    if (row.sale_ref) salesSync(row.sale_ref);
     return ok(true);
   });
   R('POST', '/inventory/adjust', (_p, b) => {
@@ -1269,6 +1273,129 @@
   crud('customers', '客户', { unique: 'code' });
   crud('bad_reasons', '不良原因', { unique: 'name' });
   crud('equipments', '设备', { roles: ['admin', 'technician'], unique: 'code' });
+
+  /* 销售订单（P2）：接单 → 转工单 → 出货核销 */
+  const salesSync = (saleRef) => {
+    const code = String(saleRef || '').trim();
+    if (!code) return;
+    const so = T('sales_orders').find((r) => r.code === code);
+    if (!so) return;
+    const shipped = T('stock_shipments').filter((r) => r.sale_ref === code).reduce((a, r) => a + num(r.qty), 0);
+    let status = so.status;
+    if (status !== 'cancelled') status = shipped <= 0 ? 'open' : (shipped + 1e-9 >= num(so.qty) ? 'done' : 'partial');
+    update('sales_orders', so.id, { shipped_qty: shipped, status });
+  };
+  R('GET', '/sales_orders', (_p, _b, q) => {
+    let list = T('sales_orders').map((s) => Object.assign({}, s, { has_order: s.produced_order_id && T('orders').some((o) => o.id === s.produced_order_id) ? 1 : 0 }));
+    if (q && q.status) list = list.filter((r) => r.status === q.status);
+    if (q && q.keyword) { const k = q.keyword; list = list.filter((r) => (r.code || '').includes(k) || (r.customer_name || '').includes(k) || (r.product_name || '').includes(k)); }
+    const W = { open: 0, partial: 1, done: 2, cancelled: 3 };
+    list.sort((a, b) => (W[a.status] - W[b.status]) || String(a.delivery_date || '').localeCompare(String(b.delivery_date || '')) || b.id - a.id);
+    return ok(list);
+  });
+  R('POST', '/sales_orders', (_p, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const qty = num(b.qty);
+    if (!(qty > 0)) return fail('请填写有效的销售数量');
+    const p = find('products', num(b.product_id));
+    if (!p) return fail('请选择产品');
+    const c = b.customer_id ? find('customers', num(b.customer_id)) : null;
+    const code = (b.code && b.code.trim()) ? b.code.trim() : 'SO' + dayOffset(0).replace(/-/g, '').slice(2) + String(Math.floor(Math.random() * 900) + 100);
+    if (T('sales_orders').some((r) => r.code === code)) return fail('销售单号已存在');
+    const id = insert('sales_orders', { id: 0, code, customer_id: c ? c.id : null, customer_name: c ? c.name : null,
+      product_id: p.id, product_name: p.name, spec: p.spec || null, unit: p.unit || '件', qty,
+      price: num(b.price, num(p.price, 0)), order_date: b.order_date || today(), delivery_date: b.delivery_date || null,
+      status: 'open', shipped_qty: 0, produced_order_id: null, remark: b.remark || null, created_by: actor().id, created_at: nowISO() });
+    writeLog(actor(), '创建销售订单', code + ' ' + p.name + ' ×' + qty);
+    return ok({ id, code });
+  });
+  R('PUT', '/sales_orders/(\\d+)', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const row = find('sales_orders', m[0]);
+    if (!row) return fail('销售订单不存在', 404);
+    if (row.status === 'cancelled') return fail('已取消的订单不能编辑');
+    const qty = b.qty !== undefined ? num(b.qty) : num(row.qty);
+    if (!(qty > 0)) return fail('请填写有效的销售数量');
+    const c = b.customer_id !== undefined ? (b.customer_id ? find('customers', num(b.customer_id)) : null) : null;
+    update('sales_orders', row.id, {
+      customer_id: b.customer_id !== undefined ? (c ? c.id : null) : row.customer_id,
+      customer_name: b.customer_id !== undefined ? (c ? c.name : null) : row.customer_name,
+      qty, price: b.price !== undefined ? num(b.price, 0) : row.price,
+      order_date: b.order_date || row.order_date,
+      delivery_date: b.delivery_date !== undefined ? (b.delivery_date || null) : row.delivery_date,
+      remark: b.remark !== undefined ? (b.remark || null) : row.remark });
+    salesSync(row.code);
+    writeLog(actor(), '修改销售订单', row.code);
+    return ok(true);
+  });
+  R('DELETE', '/sales_orders/(\\d+)', (m) => {
+    if (requireRole('admin')) return fail('无权限', 403);
+    const row = find('sales_orders', m[0]);
+    if (!row) return fail('销售订单不存在', 404);
+    if (num(row.shipped_qty) > 0) return fail('该订单已有出货记录，不能删除（可改为「已取消」）');
+    remove('sales_orders', row.id);
+    writeLog(actor(), '删除销售订单', row.code);
+    return ok(true);
+  });
+  R('POST', '/sales_orders/(\\d+)/convert', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const s = find('sales_orders', m[0]);
+    if (!s) return fail('销售订单不存在', 404);
+    if (s.status === 'cancelled') return fail('已取消的订单不能转工单');
+    if (s.produced_order_id) { const ex = find('orders', s.produced_order_id); if (ex) return ok({ order_id: ex.id, code: ex.code, existed: true }); }
+    const route = T('routes').filter((r) => r.product_id === s.product_id).sort((a, b2) => a.id - b2.id)[0];
+    if (!route) return fail('该产品还没有工艺路线，请先在基础数据中建立');
+    const qty = Math.max(1, Math.floor(num(b.qty, num(s.qty, 1))));
+    const code = 'WO' + dayOffset(0).replace(/-/g, '').slice(2) + String(Math.floor(Math.random() * 9000) + 1000);
+    const oid = insert('orders', { id: 0, code, product_id: s.product_id, route_id: route.id, customer_id: s.customer_id,
+      qty_plan: qty, priority: num(b.priority, 2), plan_start: b.plan_start || today(), plan_end: b.plan_end || s.delivery_date || today(),
+      status: 'created', remark: '销售订单 ' + s.code + (s.customer_name ? '（' + s.customer_name + '）' : ''),
+      created_by: actor().id, created_at: nowISO(), start_time: null, finish_time: null, close_reason: '' });
+    T('route_steps').filter((st) => st.route_id === route.id).sort((a, b2) => a.seq - b2.seq)
+      .forEach((st) => insert('order_steps', { id: 0, order_id: oid, seq: st.seq, process_id: st.process_id, work_center_id: st.work_center_id, assignee_id: null, qty_plan: qty, qty_good: 0, qty_bad: 0, work_min: 0, status: 'pending', start_time: null, finish_time: null, inspect_type: st.inspect_type || (find('processes', st.process_id) || {}).inspect_type || '', inspect_status: null }));
+    update('sales_orders', s.id, { produced_order_id: oid });
+    writeLog(actor(), '销售订单转工单', s.code + ' → ' + code);
+    return ok({ order_id: oid, code });
+  });
+  R('PATCH', '/sales_orders/(\\d+)/status', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const row = find('sales_orders', m[0]);
+    if (!row) return fail('销售订单不存在', 404);
+    if (!['open', 'partial', 'done', 'cancelled'].includes(b.status)) return fail('无效的状态');
+    if (b.status === 'cancelled' && num(row.shipped_qty) > 0) return fail('该订单已有出货记录，不能取消');
+    update('sales_orders', row.id, { status: b.status });
+    writeLog(actor(), '销售订单状态', row.code + ' → ' + b.status);
+    return ok(true);
+  });
+  // 出货核销：出库单新增/修改/删除后回写销售订单 shipped_qty 与状态（与 server 同口径）
+
+  /* 齐套分析（P2）：静态镜像统一返回「未维护BOM」提示 */
+  R('GET', '/orders/(\\d+)/kit', (m) => {
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    return ok({ order_id: o.id, code: o.code, product_id: o.product_id, qty_plan: o.qty_plan, has_bom: false, kit_pct: null, shortage: 0, lines: [] });
+  });
+  R('GET', '/stats/kit', () => {
+    const list = T('orders').filter((o) => !['done', 'closed'].includes(o.status)).sort((a, b) => (a.priority - b.priority) || String(a.plan_end || '').localeCompare(String(b.plan_end || '')));
+    const view = (o) => { const p = find('products', o.product_id) || {}; const c = o.customer_id ? find('customers', o.customer_id) : null;
+      return { id: o.id, code: o.code, product_id: o.product_id, product_name: p.name || '', product_code: p.code || '', qty_plan: o.qty_plan, priority: o.priority, plan_start: o.plan_start, plan_end: o.plan_end, status: o.status, customer_name: c ? c.name : null, has_bom: false, kit_pct: null, shortage: 0, shortages: [] }; };
+    return ok({ orders: list.map(view), summary: { total: list.length, full_kit: 0, shortage: 0, no_bom: list.length } });
+  });
+  R('PUT', '/orders/(\\d+)/schedule', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (['done', 'closed'].includes(o.status)) return fail('已完工/已关闭的工单不能再排产');
+    const prio = b.priority !== undefined ? num(b.priority, o.priority) : o.priority;
+    if (![1, 2, 3].includes(prio)) return fail('优先级无效（1 高 / 2 中 / 3 低）');
+    const ps = b.plan_start !== undefined ? (b.plan_start || '') : o.plan_start;
+    const pe = b.plan_end !== undefined ? (b.plan_end || '') : o.plan_end;
+    if (ps && pe && ps > pe) return fail('计划开工不能晚于计划完工');
+    update('orders', o.id, { plan_start: ps, plan_end: pe, priority: prio });
+    writeLog(actor(), '工单排产调整', o.code);
+    return ok(true);
+  });
+
 
   /* 设备点检（P1）：异常可生成质量异常单，口径与 server 一致 */
   R('POST', '/equipments/(\\d+)/check', (m, b) => {

@@ -12,6 +12,7 @@ Views.warehouse = {
     ['issues', '领料退料'],
     ['finished', '成品入库'],
     ['shipments', '成品出库'],
+    ['sales', '销售订单'],
     ['tx', '收发明细'],
     ['ratio', '产出比'],
     ['materials', '物料档案'],
@@ -304,6 +305,7 @@ Views.warehouse = {
     if (this.tab === 'prod') { await this.renderProd(el); return; }
     if (this.tab === 'ratio') { await this.renderRatio(el); return; }
     if (this.tab === 'trace') { await this.renderTrace(el); return; }
+    if (this.tab === 'sales') { await this.renderSales(el); return; }
     try { this.meta = await API.get('/meta'); } catch (e) { this.meta = {}; }
     try { this.meta.orders = await API.get('/orders'); } catch (e) { this.meta.orders = []; }
     try { this.meta.materials = await API.get('/materials'); } catch (e) { this.meta.materials = []; }
@@ -898,6 +900,115 @@ Views.warehouse = {
   },
 
   /* ------------------------------ 产销报表（工单 ⇄ 仓储 闭环对账） ------------------------------ */
+  /* ---------- 销售订单：接单登记 → 一键转生产工单 → 出货核销 ---------- */
+  async renderSales(el) {
+    const canEdit = App.canEdit();
+    el.innerHTML = `
+      <div class="tabs">
+        ${this.tabs.map(([k, t]) => `<div class="tab ${this.tab === k ? 'active' : ''}" data-tab="${k}">${t}</div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>销售订单</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="tbStat" class="small muted"></span>
+            ${canEdit ? `<button class="btn btn-primary btn-sm" id="add">${UI.icon('plus')}新增订单</button>` : ''}
+          </div>
+        </div>
+        <div class="card-b tight" id="tb">加载中…</div>
+      </div>`;
+    el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
+    if (el.querySelector('#add')) el.querySelector('#add').onclick = () => this.salesForm();
+
+    let list = [];
+    try { list = await API.get('/sales_orders'); } catch (e) {
+      el.querySelector('#tb').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
+      return;
+    }
+    const SL = { open: ['未交货', 'chip-warn'], partial: ['部分交货', 'chip-info'], done: ['已交货', 'chip-ok'], cancelled: ['已取消', 'chip-gray'] };
+    const todayStr = UI.today();
+    const open = list.filter((r) => r.status === 'open').length;
+    const partial = list.filter((r) => r.status === 'partial').length;
+    el.querySelector('#tbStat').textContent = `共 ${list.length} 单：未交货 ${open} · 部分交货 ${partial}`;
+    const tb = el.querySelector('#tb');
+    tb.innerHTML = UI.table([
+      { t: '销售单号', f: (r) => `<b>${UI.esc(r.code)}</b><div class="small muted">${UI.esc(r.customer_name || '无客户')}</div>` },
+      { t: '产品', f: (r) => `${UI.esc(r.product_name)}<div class="small muted">${UI.esc(r.spec || '')}</div>` },
+      { t: '数量', f: (r) => {
+          const p = r.qty > 0 ? Math.min(100, Math.round((r.shipped_qty || 0) / r.qty * 100)) : 0;
+          return `<span class="mono">${UI.n2(r.qty)}</span> ${UI.esc(r.unit)}
+            <div class="row" style="gap:6px;flex-wrap:nowrap">${UI.progress(p, p >= 100 ? 'ok' : '')}<span class="small mono muted">${p}%</span></div>`;
+        } },
+      { t: '单价 / 金额', f: (r) => `<span class="mono">¥${UI.n2(r.price)}</span><div class="small muted mono">¥${UI.n2(r.qty * r.price)}</div>` },
+      { t: '下单 / 交期', f: (r) => `${UI.esc(r.order_date || '—')}
+          <div class="small ${r.delivery_date && r.delivery_date < todayStr && ['open', 'partial'].includes(r.status) ? 'chip chip-danger' : 'muted'}">${r.delivery_date ? '交 ' + UI.esc(r.delivery_date) : '未约定交期'}</div>` },
+      { t: '生产工单', f: (r) => r.produced_order_id
+          ? `<span class="link" data-go="${r.produced_order_id}">${r.has_order ? '查看' : 'WO#' + r.produced_order_id}</span>`
+          : '<span class="muted">未转</span>' },
+      { t: '状态', f: (r) => { const m = SL[r.status] || [r.status, 'chip-gray']; return `<span class="chip ${m[1]}">${m[0]}</span>`; } },
+      canEdit ? { t: '操作', align: 'right', w: '210px', f: (r) => {
+          const btns = [];
+          if (r.status !== 'cancelled' && r.product_id && !r.produced_order_id) btns.push(`<button class="btn btn-sm btn-primary" data-conv="${r.id}">转工单</button>`);
+          if (r.status !== 'cancelled') btns.push(`<button class="btn btn-sm" data-edit="${r.id}">编辑</button>`);
+          if (['open', 'partial'].includes(r.status)) btns.push(`<button class="btn btn-sm btn-danger" data-cancel="${r.id}">取消</button>`);
+          if (App.isAdmin() && !(r.shipped_qty > 0)) btns.push(`<button class="btn btn-sm btn-danger" data-del="${r.id}">删除</button>`);
+          return btns.join(' ') || '<span class="muted small">—</span>';
+        } } : null,
+    ].filter(Boolean), list, { emptyText: '暂无销售订单，点击右上角「新增订单」开始接单' });
+    tb.querySelectorAll('[data-go]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.go);
+    tb.querySelectorAll('[data-conv]').forEach((b) => b.onclick = async () => {
+      try {
+        const r = await API.post('/sales_orders/' + b.dataset.conv + '/convert', {});
+        UI.toast(r.existed ? `该订单已生成过工单 ${r.code}` : `已生成生产工单 ${r.code}（可在「工单」中下发）`, 'ok');
+        this.render(el);
+      } catch (e) { UI.toast(e.message, 'err'); }
+    });
+    tb.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => this.salesForm(b.dataset.edit, list.find((x) => x.id == b.dataset.edit)));
+    tb.querySelectorAll('[data-cancel]').forEach((b) => b.onclick = async () => {
+      if (!(await UI.confirm('确定取消该销售订单？取消后不可恢复操作（已有出货的订单不可取消）。'))) return;
+      try { await API.patch('/sales_orders/' + b.dataset.cancel + '/status', { status: 'cancelled', reason: '手工取消' }); UI.toast('已取消', 'ok'); this.render(el); }
+      catch (e) { UI.toast(e.message, 'err'); }
+    });
+    tb.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
+      if (!(await UI.confirm('确定删除该销售订单？仅限从未出货的订单。'))) return;
+      try { await API.del('/sales_orders/' + b.dataset.del); UI.toast('已删除', 'ok'); this.render(el); }
+      catch (e) { UI.toast(e.message, 'err'); }
+    });
+  },
+
+  async salesForm(id, row) {
+    if (!this.salesMeta) { try { this.salesMeta = await API.get('/meta'); } catch (e) { this.salesMeta = { products: [], customers: [] }; } }
+    const meta = this.salesMeta;
+    const isEdit = !!row;
+    UI.modal({
+      title: isEdit ? '编辑销售订单 ' + row.code : '新增销售订单',
+      body: `<div class="grid g2">
+        <label class="field"><span>客户</span>
+          <select class="input" id="soCust"><option value="">无</option>${UI.options(meta.customers, isEdit ? row.customer_id : '', 'name')}</select></label>
+        <label class="field"><span class="label-req">产品</span>
+          <select class="input" id="soProd" ${isEdit ? 'disabled' : ''}>${UI.options(meta.products, isEdit ? row.product_id : '', 'name')}</select></label>
+        <label class="field"><span class="label-req">数量</span><input class="input" id="soQty" type="number" min="0.01" step="any" value="${isEdit ? row.qty : ''}"></label>
+        <label class="field"><span>单价(¥)</span><input class="input" id="soPrice" type="number" min="0" step="any" value="${isEdit ? row.price : ''}"></label>
+        <label class="field"><span>下单日期</span><input class="input" type="date" id="soDate" value="${isEdit ? row.order_date : UI.today()}"></label>
+        <label class="field"><span>交货日期</span><input class="input" type="date" id="soDeliver" value="${isEdit ? (row.delivery_date || '') : ''}"></label>
+      </div>
+      <label class="field"><span>备注</span><input class="input" id="soRemark" value="${isEdit ? UI.esc(row.remark || '') : ''}"></label>
+      ${isEdit ? '' : '<div class="small muted">保存后可在列表中「转工单」一键生成生产工单（自动带客户与交期）；出货时在「成品出库」填该销售单号即可自动核销。</div>'}`,
+      onOk: async (mask) => {
+        const g = (s) => mask.querySelector(s).value;
+        const payload = {
+          customer_id: g('#soCust') || null,
+          qty: g('#soQty'), price: g('#soPrice'),
+          order_date: g('#soDate'), delivery_date: g('#soDeliver') || null,
+          remark: g('#soRemark'),
+        };
+        if (isEdit) await API.put('/sales_orders/' + row.id, payload);
+        else { payload.product_id = g('#soProd'); await API.post('/sales_orders', payload); }
+        UI.toast(isEdit ? '已保存' : '销售订单已创建', 'ok');
+        this.render(document.getElementById('view'));
+      },
+    });
+  },
+
   async renderProd(el) {
     el.innerHTML = `
       <div class="tabs">

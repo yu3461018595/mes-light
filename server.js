@@ -2814,6 +2814,7 @@ route('POST', '/api/stock_shipments', ['admin', 'technician'], (req, res, _m, b,
       operator: u.name, tx_date: date, remark: '成品出库 ' + code });
   });
   writeLog(u, '成品出库', code + ' ' + (b.material_name || '') + ' ×' + qty + (b.customer ? ' → ' + b.customer : ''));
+  if (b.sale_ref) syncSalesShipped(b.sale_ref);
   ok(res, { id, code });
 });
 
@@ -2837,6 +2838,8 @@ route('PUT', '/api/stock_shipments/(\\d+)', ['admin', 'technician'], (req, res, 
       operator: u.name, tx_date: b.ship_date || row.ship_date, remark: '成品出库(改) ' + row.code });
   });
   writeLog(u, '修改成品出库', row.code);
+  syncSalesShipped(b.sale_ref !== undefined ? b.sale_ref : row.sale_ref);
+  if (b.sale_ref !== undefined && row.sale_ref && b.sale_ref !== row.sale_ref) syncSalesShipped(row.sale_ref);
   ok(res, true);
 });
 
@@ -2848,6 +2851,208 @@ route('DELETE', '/api/stock_shipments/(\\d+)', ['admin'], (req, res, m, _b, u) =
     run('DELETE FROM stock_shipments WHERE id=?', [m[1]]);
   });
   writeLog(u, '删除成品出库', row.code);
+  if (row.sale_ref) syncSalesShipped(row.sale_ref);
+  ok(res, true);
+});
+
+/* ------------------------------ P2：销售订单（接单 → 转工单 → 出货核销） ------------------------------
+ * sales_orders 出货核销：按成品出库单 sale_ref（销售单号）聚合回写 shipped_qty 与状态，
+ * 新增/修改/删除出库单后自动重算，改错单也不会留脏数据。 */
+function syncSalesShipped(saleRef) {
+  const code = String(saleRef || '').trim();
+  if (!code) return;
+  const so = get('SELECT * FROM sales_orders WHERE code=?', [code]);
+  if (!so) return;
+  const shipped = num(get('SELECT IFNULL(SUM(qty),0) s FROM stock_shipments WHERE sale_ref=?', [code]).s);
+  let status = so.status;
+  if (status !== 'cancelled') {
+    status = shipped <= 0 ? 'open' : (shipped + 1e-9 >= num(so.qty) ? 'done' : 'partial');
+  }
+  run('UPDATE sales_orders SET shipped_qty=?, status=? WHERE id=?', [shipped, status, so.id]);
+}
+
+const SALES_STATUS_LABEL = { open: '未交货', partial: '部分交货', done: '已交货', cancelled: '已取消' };
+
+route('GET', '/api/sales_orders', [], (req, res, _m, _b, _u, q) => {
+  const w = []; const p = [];
+  if (q.status) { w.push('s.status=?'); p.push(q.status); }
+  if (q.keyword) {
+    w.push('(s.code LIKE ? OR s.customer_name LIKE ? OR s.product_name LIKE ?)');
+    const k = '%' + q.keyword + '%';
+    p.push(k, k, k);
+  }
+  ok(res, all(`SELECT s.*, p.code product_code,
+      (SELECT COUNT(*) FROM orders o WHERE o.id=s.produced_order_id) has_order
+    FROM sales_orders s LEFT JOIN products p ON p.id=s.product_id
+    ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+    ORDER BY CASE s.status WHEN 'open' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,
+      CASE WHEN s.status IN ('open','partial') THEN s.delivery_date ELSE '' END, s.id DESC`, p));
+});
+
+route('POST', '/api/sales_orders', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const qty = num(b.qty);
+  if (!(qty > 0)) return fail(res, '请填写有效的销售数量');
+  const pid = num(b.product_id);
+  if (!pid) return fail(res, '请选择产品');
+  const prod = get('SELECT * FROM products WHERE id=?', [pid]);
+  if (!prod) return fail(res, '产品不存在', 404);
+  let cid = num(b.customer_id) || null;
+  let cname = String(b.customer_name || '').trim();
+  if (cid) {
+    const c = get('SELECT name FROM customers WHERE id=?', [cid]);
+    if (!c) return fail(res, '客户不存在', 404);
+    cname = c.name;
+  }
+  const code = b.code && b.code.trim() ? b.code.trim() : genCode('SO');
+  if (get('SELECT id FROM sales_orders WHERE code=?', [code])) return fail(res, '销售单号已存在');
+  const id = insert(`INSERT INTO sales_orders(code,customer_id,customer_name,product_id,product_name,spec,unit,qty,price,order_date,delivery_date,status,remark,created_by,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [code, cid, cname || null, pid, prod.name, prod.spec || null, prod.unit || '件', qty, num(b.price, num(prod.price, 0)),
+      b.order_date || today(), b.delivery_date || null, 'open', b.remark || null, u.id, now()]);
+  writeLog(u, '创建销售订单', `${code} ${prod.name} ×${qty}${cname ? ' → ' + cname : ''}`);
+  ok(res, { id, code });
+});
+
+route('PUT', '/api/sales_orders/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const row = get('SELECT * FROM sales_orders WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '销售订单不存在', 404);
+  if (row.status === 'cancelled') return fail(res, '已取消的订单不能编辑');
+  let cid = row.customer_id;
+  let cname = row.customer_name;
+  if (b.customer_id !== undefined) {
+    cid = num(b.customer_id) || null;
+    if (cid) {
+      const c = get('SELECT name FROM customers WHERE id=?', [cid]);
+      if (!c) return fail(res, '客户不存在', 404);
+      cname = c.name;
+    } else cname = null;
+  }
+  const qty = b.qty !== undefined ? num(b.qty) : num(row.qty);
+  if (!(qty > 0)) return fail(res, '请填写有效的销售数量');
+  run(`UPDATE sales_orders SET customer_id=?, customer_name=?, qty=?, price=?, order_date=?, delivery_date=?, remark=? WHERE id=?`,
+    [cid, cname, qty, b.price !== undefined ? num(b.price, 0) : num(row.price),
+      b.order_date || row.order_date, b.delivery_date !== undefined ? (b.delivery_date || null) : row.delivery_date,
+      b.remark !== undefined ? (b.remark || null) : row.remark, m[1]]);
+  syncSalesShipped(row.code); // 数量可能变化，重算交货状态
+  writeLog(u, '修改销售订单', row.code + ' ' + JSON.stringify(b));
+  ok(res, true);
+});
+
+route('DELETE', '/api/sales_orders/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  const row = get('SELECT * FROM sales_orders WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '销售订单不存在', 404);
+  if (num(row.shipped_qty) > 0) return fail(res, '该订单已有出货记录，不能删除（可改为「已取消」）');
+  run('DELETE FROM sales_orders WHERE id=?', [m[1]]);
+  writeLog(u, '删除销售订单', row.code);
+  ok(res, true);
+});
+
+// 一键转生产工单：数量默认取销售数量（可改），客户/交期带入；重复点击幂等返回已生成的工单
+route('POST', '/api/sales_orders/(\\d+)/convert', ['admin', 'technician'], (req, res, m, b, u) => {
+  const s = get('SELECT * FROM sales_orders WHERE id=?', [m[1]]);
+  if (!s) return fail(res, '销售订单不存在', 404);
+  if (s.status === 'cancelled') return fail(res, '已取消的订单不能转工单');
+  if (s.produced_order_id) {
+    const ex = get('SELECT id, code FROM orders WHERE id=?', [s.produced_order_id]);
+    if (ex) return ok(res, { order_id: ex.id, code: ex.code, existed: true });
+  }
+  if (!s.product_id) return fail(res, '该订单未关联产品档案，无法转工单');
+  const route0 = get('SELECT * FROM routes WHERE product_id=? ORDER BY id LIMIT 1', [s.product_id]);
+  if (!route0) return fail(res, '该产品还没有工艺路线，请先在基础数据中建立');
+  const qty = Math.max(1, Math.floor(num(b.qty, num(s.qty, 1))));
+  const code = 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
+  const oid = tx(() => {
+    const oid2 = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [code, s.product_id, route0.id, s.customer_id, qty, num(b.priority, 2),
+        b.plan_start || today(), b.plan_end || s.delivery_date || today(), 'created',
+        '销售订单 ' + s.code + (s.customer_name ? '（' + s.customer_name + '）' : ''), u.id, now()]);
+    all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [route0.id]).forEach((st) => {
+      insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
+        [oid2, st.seq, st.process_id, st.work_center_id, qty, 'pending', String(st.inspect_type || '')]);
+    });
+    run('UPDATE sales_orders SET produced_order_id=? WHERE id=?', [oid2, s.id]);
+    return oid2;
+  });
+  writeLog(u, '销售订单转工单', s.code + ' → ' + code + ' 数量 ' + qty);
+  ok(res, { order_id: oid, code });
+});
+
+// 状态流转：取消 / 手工完工（已出货核销的自动置 done，一般不需要手工）
+route('PATCH', '/api/sales_orders/(\\d+)/status', ['admin', 'technician'], (req, res, m, b, u) => {
+  const row = get('SELECT * FROM sales_orders WHERE id=?', [m[1]]);
+  if (!row) return fail(res, '销售订单不存在', 404);
+  const to = b.status;
+  if (!SALES_STATUS_LABEL[to]) return fail(res, '无效的状态');
+  if (to === 'cancelled' && num(row.shipped_qty) > 0) return fail(res, '该订单已有出货记录，不能取消');
+  run('UPDATE sales_orders SET status=? WHERE id=?', [to, m[1]]);
+  writeLog(u, '销售订单状态', row.code + ' → ' + SALES_STATUS_LABEL[to] + (b.reason ? '（' + b.reason + '）' : ''));
+  ok(res, true);
+});
+
+/* ------------------------------ P2：齐套分析 + 简单排产 ------------------------------
+ * 齐套：按产品单耗 BOM（product_boms）× 计划数量 ×(1+损耗率) 对比库存台账合计；
+ * 未维护 BOM 的产品返回 has_bom=false（不阻塞排产，仅提示）。 */
+function kitForOrder(o) {
+  const rows = all(`SELECT b.material_id, m.code mcode, m.name mname, m.unit munit, b.qty_per_unit, b.loss_rate
+    FROM product_boms b JOIN materials m ON m.id=b.material_id WHERE b.product_id=?`, [o.product_id]);
+  if (!rows.length) return { has_bom: false, kit_pct: null, shortage: 0, lines: [] };
+  const lines = rows.map((r) => {
+    const need = Math.round(num(o.qty_plan) * num(r.qty_per_unit) * (1 + num(r.loss_rate) / 100) * 1e4) / 1e4;
+    const stock = num(get('SELECT IFNULL(SUM(qty),0) s FROM inventory WHERE material_id=?', [r.material_id]).s);
+    const gap = Math.round(Math.max(0, need - stock) * 1e4) / 1e4;
+    return { material_id: r.material_id, code: r.mcode, name: r.mname, unit: r.munit,
+      qty_per_unit: num(r.qty_per_unit), loss_rate: num(r.loss_rate), need, stock, gap, ok: gap <= 0 };
+  });
+  const pct = Math.min(...lines.map((l) => (l.need > 0 ? Math.min(1, l.stock / l.need) : 1)));
+  return { has_bom: true, kit_pct: Math.floor(pct * 100), shortage: lines.filter((l) => !l.ok).length, lines };
+}
+
+route('GET', '/api/orders/(\\d+)/kit', [], (req, res, m) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  const k = kitForOrder(o);
+  ok(res, { order_id: o.id, code: o.code, product_id: o.product_id, qty_plan: o.qty_plan, ...k });
+});
+
+// 排产看板：全部未完工工单 + 齐套概况（按优先级、交期排序）
+route('GET', '/api/stats/kit', [], (req, res, _m, _b, _u, q) => {
+  const list = all(`SELECT o.id, o.code, o.product_id, p.name product_name, p.code product_code,
+      o.qty_plan, o.priority, o.plan_start, o.plan_end, o.status, c.name customer_name
+    FROM orders o JOIN products p ON p.id=o.product_id LEFT JOIN customers c ON c.id=o.customer_id
+    WHERE o.status NOT IN ('done','closed')
+    ORDER BY o.priority, o.plan_end, o.id`).filter((o) => {
+    if (q.status && o.status !== q.status) return false;
+    return true;
+  });
+  const result = list.map((o) => {
+    const k = kitForOrder(o);
+    return { ...o, has_bom: k.has_bom, kit_pct: k.kit_pct, shortage: k.shortage,
+      shortages: k.lines.filter((l) => !l.ok).slice(0, 5).map((l) => l.name + ' 缺 ' + l.gap) };
+  });
+  ok(res, {
+    orders: result,
+    summary: {
+      total: result.length,
+      full_kit: result.filter((r) => r.has_bom && r.kit_pct >= 100).length,
+      shortage: result.filter((r) => r.has_bom && r.kit_pct < 100).length,
+      no_bom: result.filter((r) => !r.has_bom).length,
+    },
+  });
+});
+
+// 排产调整：计划开工/完工 + 优先级（工单列表与排产看板共用）
+route('PUT', '/api/orders/(\\d+)/schedule', ['admin', 'technician'], (req, res, m, b, u) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (['done', 'closed'].includes(o.status)) return fail(res, '已完工/已关闭的工单不能再排产');
+  const prio = b.priority !== undefined ? num(b.priority, o.priority) : o.priority;
+  if (![1, 2, 3].includes(prio)) return fail(res, '优先级无效（1 高 / 2 中 / 3 低）');
+  const ps = b.plan_start !== undefined ? (b.plan_start || null) : o.plan_start;
+  const pe = b.plan_end !== undefined ? (b.plan_end || null) : o.plan_end;
+  if (ps && pe && ps > pe) return fail(res, '计划开工不能晚于计划完工');
+  run('UPDATE orders SET plan_start=?, plan_end=?, priority=? WHERE id=?', [ps, pe, prio, m[1]]);
+  writeLog(u, '工单排产调整', `${o.code} 计划 ${ps || '—'} ~ ${pe || '—'} 优先级 ${prio}`);
   ok(res, true);
 });
 

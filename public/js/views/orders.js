@@ -22,6 +22,7 @@ Views.orders = {
   state: { status: '', keyword: '' },
 
   async render(el, id) {
+    if (id === 'schedule') return this.schedule(el);
     if (id) return this.detail(el, id);
     const meta = await API.get('/meta');
     this.meta = meta;
@@ -35,6 +36,7 @@ Views.orders = {
         </div>
         <div class="row" style="gap:8px">
           <input class="input" id="kw" placeholder="搜索工单号 / 产品 / 客户" value="${UI.esc(s.keyword)}" style="width:210px">
+          <button class="btn" id="schedBtn">🗓 排产看板</button>
           ${App.canEdit() ? `<button class="btn btn-primary" id="newOrder">${UI.icon('plus')}新建工单</button>` : ''}
         </div>
       </div>
@@ -48,7 +50,107 @@ Views.orders = {
       timer = setTimeout(() => this.loadList(el), 260);
     };
     if (el.querySelector('#newOrder')) el.querySelector('#newOrder').onclick = () => this.form();
+    el.querySelector('#schedBtn').onclick = () => location.hash = '#/orders/schedule';
     await this.loadList(el);
+  },
+
+  /* ---------- 排产看板（P2）：甘特概览 + 齐套率 + 计划调整 ---------- */
+  async schedule(el) {
+    el.innerHTML = `
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn btn-sm" id="back">${UI.icon('back')}返回列表</button>
+        <div class="spacer"></div>
+        <span class="small muted">按优先级与交期排序；点击工单条进入详情</span>
+      </div>
+      <div class="card"><div class="card-h"><h3>齐套与排产概览</h3><span id="sumStat" class="small muted"></span></div>
+        <div class="card-b" id="gantt">加载中…</div></div>
+      <div class="card"><div class="card-h"><h3>工单排产明细</h3></div>
+        <div class="card-b tight" id="tbl">加载中…</div></div>`;
+    el.querySelector('#back').onclick = () => location.hash = '#/orders';
+
+    let d;
+    try { d = await API.get('/stats/kit'); } catch (e) {
+      el.querySelector('#gantt').innerHTML = `<div class="empty">${UI.icon('warn')}<div>${UI.esc(e.message)}</div></div>`;
+      return;
+    }
+    const canEdit = App.canEdit();
+    const { orders: list, summary } = d;
+    el.querySelector('#sumStat').textContent =
+      `在产 ${summary.total} 单：齐套 ${summary.full_kit} · 缺料 ${summary.shortage} · 未维护BOM ${summary.no_bom}`;
+
+    const kitChip = (r) => {
+      if (!r.has_bom) return '<span class="chip chip-gray" title="该产品未维护单耗BOM，无法评估齐套">无BOM</span>';
+      const cls = r.kit_pct >= 100 ? 'chip-ok' : (r.kit_pct >= 50 ? 'chip-warn' : 'chip-danger');
+      const tip = (r.shortages || []).join('\n');
+      return `<span class="chip ${cls}" title="${UI.esc(tip)}">${r.kit_pct}%${r.shortage ? ' · 缺' + r.shortage + '种' : ''}</span>`;
+    };
+
+    /* 甘特条：窗口取「最早开工−2天 ~ 最晚完工+2天」，至少 14 天 */
+    const dayMs = 86400000;
+    const today0 = UI.today();
+    let t0 = null; let t1 = null;
+    list.forEach((r) => {
+      const a = r.plan_start || today0; const b = r.plan_end || r.plan_start || today0;
+      if (!t0 || a < t0) t0 = a; if (!t1 || b > t1) t1 = b;
+    });
+    if (!t0) { t0 = today0; t1 = today0; }
+    t0 = new Date(new Date(t0).getTime() - 2 * dayMs);
+    t1 = new Date(new Date(t1).getTime() + 2 * dayMs);
+    if (t1 - t0 < 14 * dayMs) t1 = new Date(t0.getTime() + 14 * dayMs);
+    const span = Math.max(1, Math.round((t1 - t0) / dayMs));
+    const dstr = (dt) => dt.toISOString().slice(0, 10);
+    const barColor = (r) => !r.has_bom ? 'var(--muted,#9aa)' : (r.kit_pct >= 100 ? 'var(--ok,#2e9e5b)' : (r.kit_pct >= 50 ? 'var(--warn,#d80)' : 'var(--danger,#d33)'));
+    const gantt = el.querySelector('#gantt');
+    gantt.innerHTML = list.length ? `<div class="tight">${list.map((r) => {
+      const a = new Date(r.plan_start || today0); const b = new Date(r.plan_end || r.plan_start || today0);
+      const left = Math.max(0, Math.round((a - t0) / dayMs) / span * 100);
+      const width = Math.min(100 - left, Math.max(2, (Math.round((b - a) / dayMs) + 1) / span * 100));
+      return `<div class="row" style="gap:8px;flex-wrap:nowrap;margin:3px 0">
+        <span class="link small mono" data-id="${r.id}" style="width:150px;flex:none;overflow:hidden;text-overflow:ellipsis">${UI.esc(r.code)} ${UI.esc(r.product_name)}</span>
+        <div style="flex:1;position:relative;height:22px;background:var(--bg2,#f4f6f8);border-radius:4px">
+          <div data-id="${r.id}" class="link" title="${UI.esc(r.plan_start || '')} ~ ${UI.esc(r.plan_end || '')} · ${r.has_bom ? '齐套 ' + r.kit_pct + '%' : '无BOM'}"
+            style="position:absolute;left:${left}%;width:${width}%;top:3px;bottom:3px;background:${barColor(r)};opacity:.85;border-radius:4px"></div>
+        </div>
+        <span style="width:110px;flex:none">${kitChip(r)}</span>
+      </div>`;
+    }).join('')}</div>` : '<div class="empty">暂无在产工单</div>';
+    gantt.querySelectorAll('[data-id]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.id);
+
+    /* 明细表：日期/优先级即时保存 */
+    const PRIO = { 1: '高', 2: '中', 3: '低' };
+    const tbl = el.querySelector('#tbl');
+    tbl.innerHTML = UI.table([
+      { t: '工单 / 客户', f: (r) => `<b class="link" data-open="${r.id}">${UI.esc(r.code)}</b>
+          <div class="small muted">${UI.esc(r.customer_name || '无客户')}</div>` },
+      { t: '产品', f: (r) => `${UI.esc(r.product_name)}<div class="small muted mono">${UI.esc(r.product_code || '')}</div>` },
+      { t: '数量', f: (r) => `<span class="mono">${UI.n2(r.qty_plan)}</span>` },
+      { t: '齐套', f: kitChip },
+      { t: '状态', f: (r) => UI.badge(r.status) },
+      canEdit ? { t: '优先级', f: (r) => `<select class="input input-sm" data-prio="${r.id}">
+          ${[1, 2, 3].map((p) => `<option value="${p}"${r.priority == p ? ' selected' : ''}>${PRIO[p]}</option>`).join('')}</select>` } : { t: '优先级', f: (r) => PRIO[r.priority] || r.priority },
+      canEdit ? { t: '计划开工', f: (r) => `<input class="input input-sm" type="date" data-ps="${r.id}" value="${UI.esc(r.plan_start || '')}">` }
+        : { t: '计划开工', f: (r) => UI.esc(r.plan_start || '—') },
+      canEdit ? { t: '计划完工', f: (r) => `<input class="input input-sm" type="date" data-pe="${r.id}" value="${UI.esc(r.plan_end || '')}">` }
+        : { t: '计划完工', f: (r) => UI.esc(r.plan_end || '—') },
+    ], list, { emptyText: '暂无在产工单' });
+    tbl.querySelectorAll('[data-open]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.open);
+    if (!canEdit) return;
+    const save = async (id2) => {
+      const ps = tbl.querySelector(`[data-ps="${id2}"]`);
+      const pe = tbl.querySelector(`[data-pe="${id2}"]`);
+      const pr = tbl.querySelector(`[data-prio="${id2}"]`);
+      try {
+        await API.put('/orders/' + id2 + '/schedule', {
+          plan_start: ps ? ps.value : undefined, plan_end: pe ? pe.value : undefined,
+          priority: pr ? Number(pr.value) : undefined,
+        });
+        UI.toast('排产已保存', 'ok');
+        this.schedule(el);
+      } catch (e) { UI.toast(e.message, 'err'); }
+    };
+    tbl.querySelectorAll('[data-prio]').forEach((s) => s.onchange = () => save(s.dataset.prio));
+    tbl.querySelectorAll('[data-ps]').forEach((i) => i.onchange = () => save(i.dataset.ps));
+    tbl.querySelectorAll('[data-pe]').forEach((i) => i.onchange = () => save(i.dataset.pe));
   },
 
   async loadList(el) {
@@ -176,6 +278,7 @@ Views.orders = {
     el.innerHTML = `
       <div class="row" style="margin-bottom:12px">
         <button class="btn btn-sm" id="back">${UI.icon('back')}返回列表</button>
+        <button class="btn btn-sm" id="kitBtn">📦 齐套检查</button>
         <div class="spacer"></div>
         ${canEdit ? actions.map((a) => `<button class="btn ${a[2]}" data-status="${a[0]}">${a[1]}</button>`).join('') : ''}
         ${canEdit ? `<button class="btn btn-sm" id="qrOrder">${UI.icon('scan')}报工二维码</button>` : ''}
@@ -360,6 +463,27 @@ Views.orders = {
       UI.toast('状态已更新', 'ok');
       App.render();
     });
+    const kitBtn = el.querySelector('#kitBtn');
+    if (kitBtn) kitBtn.onclick = async () => {
+      try {
+        const k = await API.get('/orders/' + id + '/kit');
+        if (!k.has_bom) {
+          UI.modal({ title: '物料齐套 · ' + k.code, body: '<div class="empty">该产品尚未维护「产品单耗(BOM)」，<br>请在 物料仓储 → 物料档案 → 产品单耗(BOM) 中维护后重试。</div>', buttons: [{ text: '知道了' }] });
+          return;
+        }
+        UI.modal({
+          title: `物料齐套 · ${k.code}（齐套率 ${k.kit_pct}%）`,
+          body: k.lines.length ? `<div class="tight">${UI.table([
+            { t: '物料', f: (l) => `<b>${UI.esc(l.name)}</b><div class="small muted mono">${UI.esc(l.code || '')}</div>` },
+            { t: '单件用量', f: (l) => `<span class="mono">${UI.n2(l.qty_per_unit)}</span>${l.loss_rate ? `<span class="small muted"> +${UI.f1(l.loss_rate)}%</span>` : ''}` },
+            { t: '需求', f: (l) => `<span class="mono">${UI.n2(l.need)}</span> ${UI.esc(l.unit || '')}` },
+            { t: '库存', f: (l) => `<span class="mono">${UI.n2(l.stock)}</span>` },
+            { t: '缺口', align: 'right', f: (l) => l.ok ? '<span class="chip chip-ok">足够</span>' : `<span class="chip chip-danger">缺 ${UI.n2(l.gap)}</span>` },
+          ], k.lines)}</div>` : '<div class="empty">无 BOM 明细</div>',
+          buttons: [{ text: '关闭' }],
+        });
+      } catch (e) { UI.toast(e.message, 'err'); }
+    };
     const qrBtn = el.querySelector('#qrOrder');
     if (qrBtn) qrBtn.onclick = async () => {
       try {
