@@ -42,11 +42,16 @@ seed();
 
 /* 列类型缓存：把空串按数值列转成 0，避免 NOT NULL 约束失败（新增/编辑时用户留空数字） */
 const colTypes = {};
+const colDflt = {};
 for (const t of ['products', 'processes', 'work_centers', 'customers', 'bad_reasons', 'routes', 'users', 'orders', 'order_steps', 'reports', 'logs', 'sessions', 'incoming_materials', 'finished_goods_in', 'materials', 'warehouses', 'inventory', 'inventory_tx', 'order_bad_reasons', 'equipments', 'equipment_checks']) {
   try {
     colTypes[t] = {};
     for (const row of all(`PRAGMA table_info(${t})`)) colTypes[t][row.name] = (row.type || '').toUpperCase();
   } catch (e) { colTypes[t] = {}; }
+  try {
+    colDflt[t] = {};
+    for (const row of all(`PRAGMA table_info(${t})`)) colDflt[t][row.name] = row.dflt_value;
+  } catch (e) { colDflt[t] = {}; }
 }
 
 /* ------------------------------ 工具 ------------------------------ */
@@ -253,7 +258,18 @@ function crud(table, name, opts = {}) {
     }
     const cv = (f) => {
       const raw = b[f];
-      if (raw === undefined) return f === 'created_at' ? now() : null;
+      if (raw === undefined) {
+        // 未提交字段：优先取列 DEFAULT（如 equipments.status 'idle'），避免 NOT NULL 报错
+        const dv = colDflt[table] && colDflt[table][f];
+        if (dv != null) {
+          const s = String(dv);
+          if (/^'.*'$/.test(s) || /^".*"$/.test(s)) return s.slice(1, -1);
+          if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+          if (/^CURRENT/i.test(s)) return now();
+          return s;
+        }
+        return f === 'created_at' ? now() : null;
+      }
       if (raw === '') {
         const t = (colTypes[table] && colTypes[table][f]) || '';
         if (t === 'INTEGER' || t === 'REAL' || t === 'NUMERIC') return 0;
