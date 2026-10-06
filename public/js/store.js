@@ -1021,6 +1021,71 @@
   });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */
+  /* 计件工资（静态镜像）：合格数 × 工序计件单价 */
+  R('GET', '/stats/piece_wage', (_p, _b, q) => {
+    const days = Math.min(180, Math.max(1, num(q.days, 30)));
+    const from = dayOffset(-(days - 1));
+    const map = {};
+    for (const r of T('reports')) {
+      if (r.report_date < from) continue;
+      const u = find('users', r.worker_id) || { name: '?', team: '' };
+      const s = r.order_step_id ? find('order_steps', r.order_step_id) : null;
+      const pr = s ? find('processes', s.process_id) : null;
+      const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0, cnt: 0, wage: 0 });
+      e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); e.cnt++;
+      e.wage = Math.round((e.wage + num(r.qty_good) * num(pr && pr.std_price)) * 100) / 100;
+    }
+    return ok({ days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good) });
+  });
+
+  /* 批次/工单双向追溯（静态镜像） */
+  R('GET', '/trace/(.+)', (m) => {
+    const code = decodeURIComponent(m[1]).trim();
+    const procName = (x) => { const s = x && x.order_step_id ? find('order_steps', x.order_step_id) : null; const pr = s ? find('processes', s.process_id) : null; return pr ? pr.name : ''; };
+    const result = { code, type: 'none', suppliers: [], customers: [], orders: [] };
+    const order = T('orders').find((o) => o.code === code);
+    if (order) {
+      result.type = 'order';
+      const p = find('products', order.product_id) || {};
+      result.order = { id: order.id, code: order.code, status: order.status, qty_plan: order.qty_plan, plan_start: order.plan_start, plan_end: order.plan_end, product_name: p.name, spec: p.spec };
+      result.materials = T('material_issues').filter((x) => x.order_id === order.id && x.type === 'pick')
+        .map((x) => ({ material_code: x.material_code, material_name: x.material_name, material_spec: x.material_spec, qty: x.qty, unit: x.unit, issue_date: x.issue_date, batch: (T('inventory_tx').find((t) => t.ref_type === 'material_issues' && t.ref_id === x.id) || {}).batch || '', warehouse_name: (find('warehouses', x.warehouse_id) || {}).name || '' }));
+      result.reports = T('reports').filter((x) => x.order_id === order.id)
+        .map((x) => ({ report_date: x.report_date, qty_good: x.qty_good, qty_bad: x.qty_bad, worker_name: (find('users', x.worker_id) || {}).name, process_name: procName(x) }));
+      result.inspections = T('inspections').filter((x) => x.order_id === order.id)
+        .map((x) => ({ code: x.code, process_name: x.process_name, conclusion: x.conclusion, qty_check: x.qty_check, qty_pass: x.qty_pass, qty_fail: x.qty_fail, inspector: x.inspector, created_at: x.created_at }));
+      result.finished = T('finished_goods_in').filter((x) => x.order_id === order.id)
+        .map((x) => ({ code: x.code, in_date: x.in_date, batch: x.batch, qty: x.qty, unit: x.unit }));
+      result.shipments = T('stock_shipments').filter((x) => x.order_id === order.id)
+        .map((x) => ({ code: x.code, ship_date: x.ship_date, qty: x.qty, unit: x.unit, batch: x.batch, customer: x.customer }));
+      result.customers = [...new Set(result.shipments.map((s2) => s2.customer).filter(Boolean))];
+    } else {
+      const txs = T('inventory_tx').filter((t) => t.batch === code);
+      if (txs.length) {
+        result.type = 'batch';
+        result.txs = txs.map((t) => {
+          const m2 = find('materials', t.material_id) || {};
+          return { id: t.id, tx_type: t.tx_type, qty: t.qty, batch: t.batch, tx_date: t.tx_date, ref_code: t.ref_code,
+            material_code: m2.code, material_name: m2.name, unit: m2.unit,
+            warehouse_name: (find('warehouses', t.warehouse_id) || {}).name || '', order_code: (find('orders', t.order_id) || {}).code || '' };
+        });
+        const ids = [...new Set(txs.map((t) => t.order_id).filter(Boolean))];
+        result.orders = ids.map((id) => {
+          const o = find('orders', id); if (!o) return null;
+          const p = find('products', o.product_id) || {};
+          return { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan, product_name: p.name,
+            reports: T('reports').filter((x) => x.order_id === id).map((x) => ({ report_date: x.report_date, qty_good: x.qty_good, qty_bad: x.qty_bad, worker_name: (find('users', x.worker_id) || {}).name, process_name: procName(x) })),
+            inspections: T('inspections').filter((x) => x.order_id === id).map((x) => ({ code: x.code, conclusion: x.conclusion, qty_pass: x.qty_pass, qty_fail: x.qty_fail, created_at: x.created_at })) };
+        }).filter(Boolean);
+        result.finished = T('finished_goods_in').filter((x) => x.batch === code).map((x) => ({ code: x.code, in_date: x.in_date, qty: x.qty, unit: x.unit }));
+        result.shipments = T('stock_shipments').filter((x) => x.batch === code).map((x) => ({ code: x.code, ship_date: x.ship_date, qty: x.qty, unit: x.unit, customer: x.customer }));
+        result.customers = [...new Set(result.shipments.map((s2) => s2.customer).filter(Boolean))];
+      }
+    }
+    if (result.type === 'none') return fail('未找到匹配的批次或工单：' + code, 404);
+    return ok(result);
+  });
+
   R('GET', '/qr/order/(\\d+)', (m) => {
     if (requireRole('admin')) return fail('无权限', 403);
     const o = find('orders', m[0]); if (!o) return fail('工单不存在', 404);

@@ -17,6 +17,7 @@ Views.warehouse = {
     ['materials', '物料档案'],
     ['prod', '产销报表'],
     ['warehouses', '仓库'],
+    ['trace', '批次追溯'],
   ],
 
   // 领料/退料类型
@@ -302,6 +303,7 @@ Views.warehouse = {
   async render(el) {
     if (this.tab === 'prod') { await this.renderProd(el); return; }
     if (this.tab === 'ratio') { await this.renderRatio(el); return; }
+    if (this.tab === 'trace') { await this.renderTrace(el); return; }
     try { this.meta = await API.get('/meta'); } catch (e) { this.meta = {}; }
     try { this.meta.orders = await API.get('/orders'); } catch (e) { this.meta.orders = []; }
     try { this.meta.materials = await API.get('/materials'); } catch (e) { this.meta.materials = []; }
@@ -449,6 +451,95 @@ Views.warehouse = {
   },
 
   /* ------------------------------ 收发存汇总（期初 + 收入 − 发出 = 期末） ------------------------------ */
+  /* 批次/工单双向追溯：输入批次号或工单号，展示来料→领料→报工→检验→入库→出库全链路 */
+  async renderTrace(el) {
+    el.innerHTML = `
+      <div class="tabs">
+        ${this.tabs.map(([k, t]) => `<div class="tab ${this.tab === k ? 'active' : ''}" data-tab="${k}">${t}</div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>批次追溯</h3><span class="small muted">输入物料批次号或工单号，双向追溯来料来源与成品去向</span></div>
+        <div class="card-b">
+          <div class="row" style="gap:8px;margin-bottom:6px">
+            <input class="input" id="trCode" placeholder="如：B20261006-01 或 MO-26100601" style="max-width:320px">
+            <button class="btn btn-primary" id="trGo">${UI.icon('search')}追溯</button>
+          </div>
+          <div id="trResult"><p class="small muted">支持两种追溯方向：① 按批次（来料批/成品批）→ 查供应商、流向工单、出库客户；② 按工单 → 查用料批次、报工、检验、成品批次。</p></div>
+        </div>
+      </div>`;
+    el.querySelectorAll('[data-tab]').forEach((t) => t.onclick = () => { this.tab = t.dataset.tab; this.render(el); });
+    const go = async () => {
+      const code = el.querySelector('#trCode').value.trim();
+      if (!code) return UI.toast('请输入批次号或工单号', 'err');
+      const box = el.querySelector('#trResult');
+      box.innerHTML = '<p class="small muted">追溯中…</p>';
+      let r;
+      try { r = await API.get('/trace/' + encodeURIComponent(code)); }
+      catch (e) { box.innerHTML = `<p class="small" style="color:var(--danger)">${UI.esc(e.message)}</p>`; return; }
+      const sec = (title, cols, rows) => rows && rows.length
+        ? `<div class="card" style="margin-top:12px"><div class="card-h"><h3>${title}</h3><span class="small muted">${rows.length} 条</span></div><div class="card-b tight">${UI.table(cols, rows)}</div></div>`
+        : '';
+      const conclChip = { pass: ['合格', 'chip-ok'], fail: ['不合格', 'chip-danger'], concession: ['让步', 'chip-warn'] };
+      const cChip = (c) => { const m = conclChip[c] || [c || '—', 'chip-gray']; return `<span class="chip ${m[1]}">${m[0]}</span>`; };
+      let html = `<p style="margin:4px 0 0">追溯对象：<b class="mono">${UI.esc(r.code)}</b>　<span class="chip chip-blue">${r.type === 'order' ? '工单' : '批次'}</span>
+        ${r.suppliers && r.suppliers.length ? `　来源供应商：<b>${r.suppliers.map(UI.esc).join('、')}</b>` : ''}
+        ${r.customers && r.customers.length ? `　流向客户：<b>${r.customers.map(UI.esc).join('、')}</b>` : ''}</p>`;
+      if (r.type === 'batch') {
+        html += sec('批次流水', [
+          { t: '日期', k: 'tx_date' },
+          { t: '类型', f: (x) => this.txChip(x.tx_type) },
+          { t: '物料', f: (x) => `${UI.esc(x.material_code)} ${UI.esc(x.material_name)}` },
+          { t: '数量', f: (x) => `<span class="mono" style="color:${x.qty >= 0 ? 'var(--ok)' : 'var(--danger)'}">${x.qty > 0 ? '+' : ''}${x.qty}</span> ${UI.esc(x.unit)}` },
+          { t: '仓库', f: (x) => UI.esc(x.warehouse_name || '—') },
+          { t: '关联工单', f: (x) => x.order_code ? `<b class="mono">${UI.esc(x.order_code)}</b>` : '—' },
+          { t: '单号', f: (x) => UI.esc(x.ref_code || '—') },
+        ], r.txs);
+      }
+      if (r.order) {
+        html += `<p style="margin:8px 0 0">工单 <b class="mono">${UI.esc(r.order.code)}</b> · ${UI.esc(r.order.product_name)} · 计划 ${UI.n2(r.order.qty_plan)} · ${UI.badge(r.order.status)}</p>`;
+      }
+      (r.orders || []).forEach((o) => {
+        html += `<p style="margin:8px 0 0">流向工单 <b class="mono">${UI.esc(o.code)}</b> · ${UI.esc(o.product_name)} · ${UI.badge(o.status)}</p>`;
+        html += sec('报工记录', [
+          { t: '日期', k: 'report_date' }, { t: '工序', k: 'process_name' }, { t: '工人', k: 'worker_name' },
+          { t: '合格', f: (x) => `<span class="mono" style="color:var(--ok)">${x.qty_good}</span>` },
+          { t: '不良', f: (x) => `<span class="mono" style="color:var(--danger)">${x.qty_bad}</span>` },
+        ], o.reports);
+        html += sec('检验记录', [
+          { t: '检验单', k: 'code' }, { t: '结论', f: (x) => cChip(x.conclusion) },
+          { t: '合格/不良', f: (x) => `<span class="mono">${x.qty_pass}/${x.qty_fail}</span>` },
+          { t: '时间', f: (x) => `<span class="small mono">${UI.esc(x.created_at)}</span>` },
+        ], o.inspections);
+      });
+      html += sec('用料明细', [
+        { t: '物料', f: (x) => `${UI.esc(x.material_code)} ${UI.esc(x.material_name)}` },
+        { t: '批次', f: (x) => `<b class="mono">${UI.esc(x.batch || '—')}</b>` },
+        { t: '数量', f: (x) => `<span class="mono">${x.qty} ${UI.esc(x.unit)}</span>` },
+        { t: '仓库', f: (x) => UI.esc(x.warehouse_name || '—') },
+        { t: '日期', k: 'issue_date' },
+      ], r.materials);
+      html += sec('检验记录', [
+        { t: '检验单', k: 'code' }, { t: '工序', k: 'process_name' }, { t: '结论', f: (x) => cChip(x.conclusion) },
+        { t: '受检', k: 'qty_check' }, { t: '合格/不良', f: (x) => `<span class="mono">${x.qty_pass}/${x.qty_fail}</span>` },
+        { t: '检验员', k: 'inspector' },
+      ], r.inspections);
+      html += sec('成品入库', [
+        { t: '入库单', k: 'code' }, { t: '日期', k: 'in_date' },
+        { t: '批次', f: (x) => `<b class="mono">${UI.esc(x.batch || '—')}</b>` },
+        { t: '数量', f: (x) => `<span class="mono">${x.qty} ${UI.esc(x.unit)}</span>` },
+      ], r.finished);
+      html += sec('成品出库', [
+        { t: '出库单', k: 'code' }, { t: '日期', k: 'ship_date' },
+        { t: '客户', f: (x) => UI.esc(x.customer || '—') },
+        { t: '批次', f: (x) => `<b class="mono">${UI.esc(x.batch || '—')}</b>` },
+        { t: '数量', f: (x) => `<span class="mono">${x.qty} ${UI.esc(x.unit)}</span>` },
+      ], r.shipments);
+      box.innerHTML = html;
+    };
+    el.querySelector('#trGo').onclick = go;
+    el.querySelector('#trCode').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  },
+
   async renderTxSummary(el) {
     const d = new Date();
     const defStart = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';

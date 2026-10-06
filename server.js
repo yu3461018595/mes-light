@@ -733,7 +733,12 @@ route('GET', '/api/reports', [], (req, res, _m, _b, _u, query) => {
     LEFT JOIN processes pr ON pr.id=s.process_id
     LEFT JOIN work_centers w ON w.id=rp.work_center_id
     ${w.length ? ' WHERE ' + w.join(' AND ') : ''} ORDER BY rp.id DESC LIMIT 300`;
-  ok(res, all(sql, p));
+  const rows = all(sql, p);
+  if (query.format === 'csv') {
+    return sendCSV(res, '报工记录.csv', ['日期', '工单号', '工序', '工人', '合格数', '不良数', '不良原因', '工时(分)', '备注'],
+      rows.map((r) => [r.report_date, r.order_code, r.process_name, r.worker_name, r.qty_good, r.qty_bad, r.bad_reason, r.work_min, r.remark]));
+  }
+  ok(res, rows);
 });
 
 /* 报工核心逻辑（登录态与扫码免登录态共用）。actor 为 {id,name,role,team} 形式的操作人。
@@ -1188,6 +1193,118 @@ route('GET', '/api/stats/production-stock', [], (req, res) => {
     diff: rows.reduce((s, r) => s + Number(r.diff), 0),
   };
   ok(res, { summary, rows });
+});
+
+/* ------------------------------ 升级：CSV 导出助手 ------------------------------ */
+/* 用法：列表接口收到 ?format=csv 时改为下载 CSV（带 BOM，Excel 直接打开不乱码） */
+function sendCSV(res, filename, header, rows) {
+  const esc = (v) => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const body = [header.map(esc).join(',')].concat(rows.map((r) => r.map(esc).join(','))).join('\r\n');
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="' + encodeURIComponent(filename) + '"',
+  });
+  res.end('\ufeff' + body);
+}
+
+/* ------------------------------ 升级：批次/工单双向追溯 ------------------------------ */
+/* 输入批次号或工单号，返回完整追溯链：
+ *   批次 → 来料(供应商) / 领料去向工单 / 报工 / 检验 / 成品入库 / 出库(客户)
+ *   工单 → 用料批次 / 报工明细 / 检验记录 / 成品入库批次 / 出库 */
+route('GET', '/api/trace/([^/]+)', [], (req, res, m) => {
+  const code = decodeURIComponent(m[1]).trim();
+  if (!code) return fail(res, '请输入批次号或工单号');
+  const result = { code, type: 'none', suppliers: [], customers: [], orders: [] };
+
+  const order = get('SELECT o.id,o.code,o.status,o.qty_plan,o.plan_start,o.plan_end,p.name product_name,p.spec FROM orders o JOIN products p ON p.id=o.product_id WHERE o.code=?', [code]);
+  if (order) {
+    result.type = 'order';
+    result.order = order;
+    result.materials = all(`SELECT mi.material_code, mi.material_name, mi.material_spec, mi.qty, mi.unit, mi.issue_date, t.batch, w.name warehouse_name
+      FROM material_issues mi LEFT JOIN inventory_tx t ON t.ref_type='material_issues' AND t.ref_id=mi.id
+      LEFT JOIN warehouses w ON w.id=mi.warehouse_id
+      WHERE mi.order_id=? AND mi.type='pick' ORDER BY mi.id`, [order.id]);
+    result.reports = all(`SELECT rp.report_date, rp.qty_good, rp.qty_bad, u.name worker_name, pr.name process_name
+      FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id
+      LEFT JOIN order_steps s ON s.id=rp.order_step_id LEFT JOIN processes pr ON pr.id=s.process_id
+      WHERE rp.order_id=? ORDER BY rp.id`, [order.id]);
+    result.inspections = all(`SELECT code, process_name, conclusion, qty_check, qty_pass, qty_fail, inspector, created_at
+      FROM inspections WHERE order_id=? ORDER BY id`, [order.id]);
+    result.finished = all(`SELECT code, in_date, batch, qty, unit FROM finished_goods_in WHERE order_id=? ORDER BY id`, [order.id]);
+    result.shipments = all(`SELECT code, ship_date, qty, unit, batch, customer FROM stock_shipments WHERE order_id=? ORDER BY id`, [order.id]);
+    result.customers = [...new Set(result.shipments.map((s) => s.customer).filter(Boolean))];
+  } else {
+    const txs = all(`SELECT t.id, t.tx_type, t.qty, t.batch, t.tx_date, t.ref_code, m.code material_code, m.name material_name, m.unit, w.name warehouse_name, o.code order_code
+      FROM inventory_tx t JOIN materials m ON m.id=t.material_id
+      LEFT JOIN warehouses w ON w.id=t.warehouse_id LEFT JOIN orders o ON o.id=t.order_id
+      WHERE t.batch=? ORDER BY t.id`, [code]);
+    if (txs.length) {
+      result.type = 'batch';
+      result.txs = txs;
+      const orderIds = [...new Set(txs.map((t) => t.order_id).filter(Boolean))];
+      result.orders = orderIds.map((id) => get(`SELECT o.id,o.code,o.status,o.qty_plan,p.name product_name
+        FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, [id])).filter(Boolean);
+      result.orders.forEach((o) => {
+        o.reports = all(`SELECT rp.report_date, rp.qty_good, rp.qty_bad, u.name worker_name, pr.name process_name
+          FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id
+          LEFT JOIN order_steps s ON s.id=rp.order_step_id LEFT JOIN processes pr ON pr.id=s.process_id
+          WHERE rp.order_id=? ORDER BY rp.id`, [o.id]);
+        o.inspections = all(`SELECT code, conclusion, qty_pass, qty_fail, created_at FROM inspections WHERE order_id=? ORDER BY id`, [o.id]);
+      });
+      result.suppliers = all(`SELECT DISTINCT im.supplier FROM incoming_materials im
+        JOIN inventory_tx t ON t.ref_type='incoming_materials' AND t.ref_id=im.id
+        WHERE t.batch=? AND im.supplier IS NOT NULL`, [code]).map((r) => r.supplier);
+      result.finished = all(`SELECT code, in_date, qty, unit FROM finished_goods_in WHERE batch=? ORDER BY id`, [code]);
+      result.shipments = all(`SELECT code, ship_date, qty, unit, customer FROM stock_shipments WHERE batch=? ORDER BY id`, [code]);
+      result.customers = [...new Set(result.shipments.map((s) => s.customer).filter(Boolean))];
+    }
+  }
+  if (result.type === 'none') return fail(res, '未找到匹配的批次或工单：' + code, 404);
+  ok(res, result);
+});
+
+/* ------------------------------ 升级：计件工资统计 ------------------------------ */
+/* 口径：工资 = 报工合格数 × 工序计件单价(processes.std_price)；支持 ?days=N 与 ?format=csv */
+route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, _u, q) => {
+  const days = Math.min(180, Math.max(1, num(q.days, 30)));
+  const rows = all(`SELECT u.id, u.name, u.team,
+      SUM(r.qty_good) good, SUM(r.qty_bad) bad, SUM(r.work_min) minu, COUNT(*) cnt,
+      ROUND(SUM(r.qty_good * COALESCE(pr.std_price, 0)), 2) wage
+    FROM reports r JOIN users u ON u.id=r.worker_id
+    LEFT JOIN order_steps s ON s.id=r.order_step_id
+    LEFT JOIN processes pr ON pr.id=s.process_id
+    WHERE r.report_date >= date('now', ?)
+    GROUP BY u.id ORDER BY wage DESC, good DESC`, ['-' + (days - 1) + ' day']);
+  if (q.format === 'csv') {
+    return sendCSV(res, `计件工资_${days}天.csv`, ['姓名', '班组', '合格数', '不良数', '工时(分)', '报工次数', '计件工资(元)'],
+      rows.map((r) => [r.name, r.team || '', r.good, r.bad, r.minu, r.cnt, r.wage]));
+  }
+  ok(res, { days, rows });
+});
+
+/* ------------------------------ 升级：车间看板大屏（公开只读） ------------------------------ */
+route('GET', '/api/public/board', [], (req, res) => {
+  const today = get(`SELECT COALESCE(SUM(qty_good),0) good, COALESCE(SUM(qty_bad),0) bad,
+      COUNT(DISTINCT worker_id) workers, COUNT(*) cnt FROM reports WHERE report_date=date('now')`);
+  const wip = all(`SELECT o.code, o.status, o.qty_plan, o.plan_end, p.name product_name,
+      (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done
+    FROM orders o JOIN products p ON p.id=o.product_id
+    WHERE o.status IN ('released','running','paused') ORDER BY o.priority, o.plan_end LIMIT 10`);
+  const openIssues = get(`SELECT COUNT(*) n FROM quality_issues WHERE status NOT IN ('closed','cancelled')`).n;
+  const trend = all(`SELECT report_date d, SUM(qty_good) good, SUM(qty_bad) bad FROM reports
+    WHERE report_date >= date('now','-6 day') GROUP BY report_date ORDER BY d`);
+  const teams = all(`SELECT u.team, SUM(r.qty_good) good, SUM(r.qty_bad) bad FROM reports r JOIN users u ON u.id=r.worker_id
+    WHERE r.report_date >= date('now','-29 day') AND u.team IS NOT NULL AND u.team != ''
+    GROUP BY u.team ORDER BY good DESC LIMIT 8`);
+  const latest = all(`SELECT r.report_date, r.qty_good, r.qty_bad, u.name worker_name, o.code order_code, pr.name process_name
+    FROM reports r JOIN users u ON u.id=r.worker_id LEFT JOIN orders o ON o.id=r.order_id
+    LEFT JOIN order_steps s ON s.id=r.order_step_id LEFT JOIN processes pr ON pr.id=s.process_id
+    ORDER BY r.id DESC LIMIT 12`);
+  const month = get(`SELECT COALESCE(SUM(qty_good),0) good, COALESCE(SUM(qty_bad),0) bad FROM reports WHERE report_date >= date('now','-29 day')`);
+  ok(res, { today, wip, open_issues: openIssues, trend, teams, latest, month });
 });
 
 /* ------------------------------ 扫码报工：二维码 + 免登录接口 ------------------------------ */
@@ -2781,10 +2898,16 @@ route('GET', '/api/inventory_tx', [], (req, res, _m, _b, _u, q) => {
   if (q.tx_type) { where.push('t.tx_type=?'); ps.push(q.tx_type); }
   if (q.order_id) { where.push('t.order_id=?'); ps.push(num(q.order_id)); }
   const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  ok(res, all(`SELECT t.*, m.code material_code, m.name material_name, m.unit, w.name warehouse_name, o.code order_code
+  const rows = all(`SELECT t.*, m.code material_code, m.name material_name, m.unit, w.name warehouse_name, o.code order_code
     FROM inventory_tx t JOIN materials m ON m.id=t.material_id
     LEFT JOIN warehouses w ON w.id=t.warehouse_id LEFT JOIN orders o ON o.id=t.order_id
-    ${w} ORDER BY t.id DESC LIMIT ?`, [...ps, limit]));
+    ${w} ORDER BY t.id DESC LIMIT ?`, [...ps, limit]);
+  if (q.format === 'csv') {
+    const TXL = { in_incoming: '来料入库', in_finish: '成品入库', out_pick: '领料出库', in_return: '退料入库', out_ship: '成品出库', adjust: '盘点调整' };
+    return sendCSV(res, '收发明细.csv', ['日期', '类型', '物料编码', '物料名称', '批次', '数量', '变动前', '变动后', '仓库', '关联工单', '单号', '操作人'],
+      rows.map((r) => [r.tx_date, TXL[r.tx_type] || r.tx_type, r.material_code, r.material_name, r.batch, r.qty, r.before_qty, r.after_qty, r.warehouse_name, r.order_code, r.ref_code, r.operator]));
+  }
+  ok(res, rows);
 });
 
 /* ------------------------------ 投入产出比（来料 → 成品入库） ------------------------------

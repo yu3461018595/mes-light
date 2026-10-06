@@ -5,17 +5,22 @@ Views.stats = {
   title: '统计报表',
   icon: 'stats',
   days: 14,
+  tab: 'output',
 
   async render(el) {
     el.innerHTML = `
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <div class="tabs" style="margin:0;border:none">
+          <div class="tab ${this.tab !== 'wage' ? 'active' : ''}" data-t="output">产量分析</div>
+          <div class="tab ${this.tab === 'wage' ? 'active' : ''}" data-t="wage">计件工资</div>
           ${[7, 14, 30].map((d) => `<div class="tab ${this.days === d ? 'active' : ''}" data-d="${d}">近 ${d} 天</div>`).join('')}
         </div>
-        <button class="btn" id="export">${UI.icon('box')}导出 CSV</button>
+        ${this.tab === 'wage' ? `<button class="btn" id="wageExport">${UI.icon('box')}导出 CSV</button>` : `<button class="btn" id="export">${UI.icon('box')}导出 CSV</button>`}
       </div>
       <div id="panel">加载中…</div>`;
+    el.querySelectorAll('[data-t]').forEach((t) => t.onclick = () => { this.tab = t.dataset.t; this.render(el); });
     el.querySelectorAll('[data-d]').forEach((t) => t.onclick = () => { this.days = Number(t.dataset.d); this.render(el); });
+    if (this.tab === 'wage') return this.renderWage(el);
     el.querySelector('#export').onclick = () => this.exportCsv();
 
     const [trend, bad, rank, orders] = await Promise.all([
@@ -93,6 +98,53 @@ Views.stats = {
       </div>`;
 
     el.querySelectorAll('[data-o]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.o);
+  },
+
+  /* 计件工资：合格数 × 工序计件单价（processes.std_price），按人汇总 */
+  async renderWage(el) {
+    let data;
+    try { data = await API.get('/stats/piece_wage?days=' + this.days); }
+    catch (e) { el.querySelector('#panel').innerHTML = `<p class="small" style="color:var(--danger)">${UI.esc(e.message)}</p>`; return; }
+    const rows = data.rows || [];
+    const totalWage = rows.reduce((s, r) => s + (r.wage || 0), 0);
+    const totalGood = rows.reduce((s, r) => s + (r.good || 0), 0);
+    el.querySelector('#wageExport').onclick = () => this.exportWage(rows);
+    el.querySelector('#panel').innerHTML = `
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-l">工资合计</div><div class="stat-v" style="color:var(--primary)">¥${UI.n2(totalWage)}</div>
+          <div class="stat-s">近 ${data.days} 天 · 计件口径</div></div>
+        <div class="stat"><div class="stat-l">计件合格数</div><div class="stat-v" style="color:var(--ok)">${UI.n2(totalGood)}</div>
+          <div class="stat-s">件 · ${rows.length} 人参与</div></div>
+        <div class="stat"><div class="stat-l">人均工资</div><div class="stat-v">¥${UI.n2(rows.length ? totalWage / rows.length : 0)}</div>
+          <div class="stat-s">元 / 人</div></div>
+        <div class="stat"><div class="stat-l">件均单价</div><div class="stat-v">¥${UI.f2(totalGood ? totalWage / totalGood : 0)}</div>
+          <div class="stat-s">元 / 件（加权平均）</div></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>计件工资明细</h3><span class="small muted">工资 = 报工合格数 × 工序计件单价（工序档案中维护）</span></div>
+        <div class="card-b tight">${UI.table([
+          { t: '排名', f: (r, i) => `<b style="color:${i < 3 ? 'var(--primary)' : 'var(--text3)'}">${i + 1}</b>` },
+          { t: '姓名', k: 'name' }, { t: '班组', f: (r) => UI.esc(r.team || '—') },
+          { t: '合格数', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.good)}</span>` },
+          { t: '不良数', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.bad)}</span>` },
+          { t: '报工次数', f: (r) => `<span class="mono">${UI.n2(r.cnt || 0)}</span>` },
+          { t: '工时', f: (r) => `<span class="mono">${UI.f1((r.minu || 0) / 60)} h</span>` },
+          { t: '计件工资', f: (r) => `<b class="mono" style="color:var(--primary)">¥${UI.n2(r.wage || 0)}</b>` },
+          { t: '件均工资', f: (r) => `<span class="mono">¥${r.good ? UI.f2(r.wage / r.good) : '—'}</span>` },
+        ], rows, { emptyText: '所选区间没有报工数据' })}</div>
+      </div>`;
+  },
+
+  exportWage(rows) {
+    const lines = ['姓名,班组,合格数,不良数,报工次数,工时(小时),计件工资(元),件均工资(元)'];
+    rows.forEach((r) => lines.push([r.name, r.team || '', r.good, r.bad, r.cnt || 0,
+      UI.f1((r.minu || 0) / 60), r.wage || 0, r.good ? UI.f2(r.wage / r.good) : ''].join(',')));
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `计件工资_${UI.today()}.csv`;
+    a.click();
+    UI.toast('已导出计件工资 CSV', 'ok');
   },
 
   exportCsv() {

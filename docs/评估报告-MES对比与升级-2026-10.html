@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MES-Light 适用性评估与市面产品对比报告（2026-10）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:#1c2733; background:#f4f6f9; line-height:1.65; padding:0 0 60px; }
+  .wrap { max-width:1080px; margin:0 auto; padding:0 24px; }
+  header { background:linear-gradient(135deg,#123a6d,#1d5fae); color:#fff; padding:38px 0 30px; margin-bottom:28px; }
+  header h1 { font-size:26px; letter-spacing:1px; }
+  header .sub { opacity:.85; font-size:14px; margin-top:8px; }
+  h2 { font-size:20px; margin:34px 0 14px; padding-left:12px; border-left:4px solid #1d5fae; }
+  h3 { font-size:16px; margin:20px 0 10px; color:#123a6d; }
+  p { margin:8px 0; font-size:14.5px; }
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:13.5px; box-shadow:0 1px 4px rgba(20,40,70,.08); border-radius:8px; overflow:hidden; }
+  th { background:#eef3fa; text-align:left; padding:9px 12px; font-weight:600; white-space:nowrap; }
+  td { padding:8px 12px; border-top:1px solid #eef1f5; vertical-align:top; }
+  .yes { color:#0f9d58; font-weight:600; } .no { color:#c94a4a; font-weight:600; } .part { color:#c07f16; font-weight:600; }
+  .card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,40,70,.08); padding:18px 22px; margin:14px 0; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  ul { padding-left:22px; font-size:14px; }
+  li { margin:5px 0; }
+  .tag { display:inline-block; background:#e8f1fd; color:#1d5fae; border-radius:4px; padding:1px 8px; font-size:12px; margin-right:6px; }
+  .new { background:#e7f7ee; color:#0f7a44; }
+  .roadmap td:first-child { white-space:nowrap; }
+  .small { font-size:12.5px; color:#5b6b7d; }
+  .price { font-weight:600; color:#123a6d; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>MES-Light（智工 MES）适用性评估与市面产品对比报告</h1>
+    <div class="sub">评估日期：2026-10-06　|　版本：main（含本次升级：批次追溯 / 计件工资 / 车间大屏 / CSV 导出）</div>
+  </div>
+</header>
+<div class="wrap">
+
+<h2>一、项目现状功能盘点</h2>
+<div class="card">
+<p>系统定位：<b>面向 10–200 人离散制造小厂的轻量云端 MES</b>（零依赖 Node + SQLite + Docker 单容器，可内网部署也可云上部署，PC / 手机 H5 / Android APK 三端共用）。</p>
+<table>
+<tr><th style="width:130px">模块</th><th>已实现能力</th></tr>
+<tr><td><b>生产执行</b></td><td>工单全生命周期（下达→暂停→完工→关闭）、多工序工艺路线、派工到人/班组、工单负责人、工序增删排序、报工（合格/不良/工时、多工序一次申报）、扫码报工二维码</td></tr>
+<tr><td><b>质量闭环</b></td><td>IQC/IPQC/FQC 检验点、抽检模式、检查表模板、来料检验闭环（不合格不计库存）、质检员扫码免登录台、异常单全流程（上报→待定级→定级→指派→处理→验证→关闭）、致命级自动暂停工单、超时逐级升级（站内+企微/钉钉 webhook）</td></tr>
+<tr><td><b>物料仓储</b></td><td>库存台账（物料×仓×批）、来料/领退料/成品出入库、先进先出跨批扣料、盘点调整、安全库存预警、BOM 单耗与材料损耗分析、产出比（来料→成品）三层分析</td></tr>
+<tr><td><b>统计看板</b></td><td>产量/良率/工时趋势、人员排名、FPY 一次合格率、供应商质量、产销对账、异常统计<br><span class="tag new">本次新增</span>计件工资统计、车间大屏看板、批次/工单双向追溯、关键报表 CSV 导出</td></tr>
+<tr><td><b>多端与协同</b></td><td>PC 端、手机 H5、Android APK（扫码安装）、消息中心（报工/检验/异常/升级）、公开追溯查询接口</td></tr>
+<tr><td><b>平台特性</b></td><td>5 角色 RBAC（管理员/技术员/操作工/质检员）、操作日志、零第三方依赖（无 npm 供应链风险）、Docker 一键部署/更新、SQLite 单文件易备份</td></tr>
+</table>
+</div>
+
+<h2>二、适用性评估</h2>
+<div class="grid">
+<div class="card">
+<h3>✅ 适合谁用</h3>
+<ul>
+<li><b>10–200 人离散/半离散加工厂</b>：机加、五金、注塑、电子装联、家具、食品分装等；</li>
+<li>目前用<b>纸质流转卡 + Excel + 微信群</b>管生产，想要<b>零实施成本、当天上线</b>的场景；</li>
+<li>对<b>数据主权/内网部署</b>敏感（客户图纸保密、不接受公有云 SaaS）的工厂——本系统可完全私有化；</li>
+<li>已有轻量 ERP（如管家婆、金蝶迷你版），缺<b>车间执行层</b>的补位需求。</li>
+</ul>
+</div>
+<div class="card">
+<h3>⚠️ 不适合谁</h3>
+<ul>
+<li>需要<b>设备联网采集（PLC/CNC 直采）、OEE 自动计算</b>的重资产工厂（需 IoT 网关，当前未覆盖）；</li>
+<li><b>500 人以上多工厂集团</b>：缺多组织架构、跨厂协同、集团数据标准；</li>
+<li>需要<b>与财务/成本核算深度集成</b>的（未对接金蝶/用友等 ERP）；</li>
+<li>流程行业（化工/冶金）的连续过程控制场景。</li>
+</ul>
+</div>
+</div>
+
+<h2>三、与市面主流产品对比</h2>
+<div class="card">
+<table>
+<tr><th>产品</th><th>目标客群</th><th>价格（公开渠道口径）</th><th>核心优势</th><th>相对 MES-Light</th></tr>
+<tr><td><b>MES-Light<br>（本项目）</b></td><td>10–200 人小厂</td><td class="price">自持有，近乎 0 成本<br>（一台 2C4G 云服务器即可）</td><td>质量闭环深（检验点+抽检+检查表+异常定级升级）、私有化部署、零依赖零授权费、三端齐备、源码可改</td><td>—</td></tr>
+<tr><td><b>黑湖小工单</b></td><td>10–100 人小微</td><td class="price">约 1.08 万/年（50 账号）</td><td>开箱即用、上线以周计、计时计件工资、多端体验打磨好</td><td>功能重叠度高；其计件工资/追溯本次已补齐；黑湖胜在 SaaS 运维与生态，本项目胜在私有化与零年费</td></tr>
+<tr><td><b>黑湖智造</b></td><td>中大型/多工厂</td><td class="price">传统 MES 约 1/5</td><td>云原生多厂协同、动态排程、供应链协同</td><td>集团级能力本项目不具备；单厂场景本项目够用</td></tr>
+<tr><td><b>简道云生产管理</b></td><td>中小/柔性流程</td><td class="price">按人数订阅，数千~数万/年</td><td>低代码自定义强、表单灵活</td><td>缺制造深度逻辑（工序流转/检验放行/批次扣料需自行搭建）；本项目出厂即带制造闭环</td></tr>
+<tr><td><b>金蝶云·星空 MES</b></td><td>200 人上下 + ERP 一体</td><td class="price">3–20 万/套起</td><td>与金蝶 ERP/财务无缝集成、智能排产</td><td>ERP 集成与财务一体化是本项目短板；但投入相差 1–2 个数量级</td></tr>
+<tr><td><b>用友 U8/精益 MES</b></td><td>中型离散制造</td><td class="price">8–30 万/套起</td><td>多品种多工序、成熟实施体系</td><td>功能更全但重、贵、实施 3–9 个月；本项目 1 天上线</td></tr>
+<tr><td><b>鼎捷 sMES</b></td><td>电子/汽配等中大型</td><td class="price">设备云 5–30 万，MES 30–80 万</td><td>行业套件深、PLC/CNC 联网（IIoT）</td><td>设备物联层本项目未做；纯人工报工场景本系统已覆盖其 60–70% 高频功能</td></tr>
+<tr><td><b>管家婆工贸</b></td><td>小微贸易+生产</td><td class="price">数千~2 万级</td><td>进销存强、自动计件工资</td><td>其车间执行弱；本项目报工/质量/追溯更深，两者常互补</td></tr>
+</table>
+<p class="small">注：价格为 2025–2026 年公开报道/官网口径，实际以厂商报价为准；对比目的是定位差距，非逐项评分。</p>
+</div>
+
+<h3>功能覆盖对照（SME 高频功能 × 本项目）</h3>
+<table>
+<tr><th>SME 高频功能</th><th>黑湖小工单</th><th>简道云</th><th>管家婆工贸</th><th>MES-Light（升级后）</th></tr>
+<tr><td>工单/派工/报工</td><td class="yes">✔</td><td class="part">自建</td><td class="part">基础</td><td class="yes">✔ 深（班组指派+负责人+多工序申报）</td></tr>
+<tr><td>质量检验/异常闭环</td><td class="part">基础</td><td class="part">自建</td><td class="no">✘</td><td class="yes">✔✔ 检验点+抽检+检查表+定级升级（超出同档）</td></tr>
+<tr><td>库存/批次/FIFO</td><td class="yes">✔</td><td class="part">自建</td><td class="yes">✔</td><td class="yes">✔ 批次台账+跨批扣料+盘点</td></tr>
+<tr><td>质量追溯</td><td class="yes">✔</td><td class="part">自建</td><td class="no">✘</td><td class="yes"><b>✔ 本次新增</b>（批次↔工单双向）</td></tr>
+<tr><td>计件工资</td><td class="yes">✔</td><td class="no">✘</td><td class="yes">✔</td><td class="yes"><b>✔ 本次新增</b>（工序单价×合格数）</td></tr>
+<tr><td>车间看板/大屏</td><td class="yes">✔</td><td class="part">自建</td><td class="no">✘</td><td class="yes"><b>✔ 本次新增</b>（免登录大屏 30s 刷新）</td></tr>
+<tr><td>报表导出</td><td class="yes">✔</td><td class="yes">✔</td><td class="yes">✔</td><td class="yes"><b>✔ 本次新增/增强</b>（CSV，Excel 直开）</td></tr>
+<tr><td>移动端 APP</td><td class="yes">✔</td><td class="part">H5</td><td class="part">弱</td><td class="yes">✔ APK+H5（报工/质检/领料/盘点/消息）</td></tr>
+<tr><td>设备管理/OEE</td><td class="yes">✔</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘（仅有工作中心状态字段）→ 路线图</td></tr>
+<tr><td>APS 智能排产</td><td class="part">有限</td><td class="no">✘</td><td class="no">✘</td><td class="no">✘（目前按优先级+交期排序）→ 路线图</td></tr>
+<tr><td>ERP/财务集成</td><td class="part">开放接口</td><td class="part">可搭</td><td class="yes">✔</td><td class="no">✘（CSV 导出可作过渡）→ 路线图</td></tr>
+<tr><td>SOP/图纸无纸化</td><td class="yes">✔</td><td class="part">自建</td><td class="no">✘</td><td class="no">✘ → 路线图</td></tr>
+</table>
+
+<h2>四、本次升级明细（已实现并测试）</h2>
+<div class="card">
+<ul>
+<li><b>批次/工单双向追溯</b>（物料仓储 → 新页签）：输入来料/成品批次号 → 供应商、批次流水、流向工单及其报工与检验；输入工单号 → 用料批次、报工明细、检验记录、成品入库批次、出库客户。数据来自既有流水表，无需新增录入。</li>
+<li><b>计件工资统计</b>（报表 → 新页签）：工资 = 报工合格数 × 工序计件单价（工序档案维护单价），按人汇总工资/合格/不良/工时，支持导出 CSV。</li>
+<li><b>车间生产大屏</b>（<code>/board.html</code>，菜单「车间大屏」）：免登录、深色 TV 版式、30 秒自动刷新——今日产量/良率、在制工单进度条、近 7 日产量柱图、班组产出排行、最新报工、未关闭异常警示。</li>
+<li><b>CSV 导出（服务端）</b>：报工记录、收发明细、计件工资支持 <code>?format=csv</code>（带 BOM，Excel 直开不乱码），便于给 ERP/财务过渡对接。</li>
+</ul>
+</div>
+
+<h2>五、后续升级路线图建议</h2>
+<table class="card roadmap">
+<tr><th>优先级</th><th>方向</th><th>说明</th></tr>
+<tr><td><b>P1 高</b></td><td>设备管理与点检</td><td>工作中心已有 status 字段，补：设备台账、日点检/保养记录、故障报修联动异常单、简易 OEE（时间开动率×性能×质量）。人工录入即可，无需先做 IoT。</td></tr>
+<tr><td><b>P1 高</b></td><td>SOP/图纸附件</td><td>工序挂附件（PDF/图片），工人扫码报工页直接看作业指导书——补齐"无纸化"短板。</td></tr>
+<tr><td><b>P2 中</b></td><td>齐套分析与简单排产</td><td>按 BOM 单耗算工单缺料（已有数据基础），交期倒排+能力负荷图（甘特），暂不做算法级 APS。</td></tr>
+<tr><td><b>P2 中</b></td><td>销售订单入口</td><td>当前以生产工单为源头；补销售订单→MRP 建议工单，形成"接单→生产→出货"闭环。</td></tr>
+<tr><td><b>P3 规划</b></td><td>ERP 对接</td><td>标准 CSV/JSON 导入导出已就绪；下一步做金蝶云星空/管家婆的物料与入库单接口对接。</td></tr>
+<tr><td><b>P3 规划</b></td><td>IoT 设备采集</td><td>经网关读 PLC/CNC 计数自动生成报工候选，人工确认——重投入项，按客户需求排期。</td></tr>
+</table>
+
+<h2>六、结论</h2>
+<div class="card">
+<p>对照市面产品，MES-Light 在<b>单厂小规模场景的功能完整度已达黑湖小工单同档水平</b>，且质量闭环（检验点+抽检+检查表+异常定级升级）明显深于同价位 SaaS；本次补齐追溯、计件工资、车间大屏、报表导出四个 SME 高频刚需后，<b>主要差距收敛到"设备物联 + 排产算法 + ERP 集成"三大项</b>——这些恰是重投入、重实施的模块，对目标客群（10–200 人小厂）并非第一优先级。建议按 P1（设备点检、SOP 附件）→ P2（齐套排产、销售订单）节奏演进，以极低的持有成本形成差异化竞争力。</p>
+</div>
+
+</div>
+</body>
+</html>

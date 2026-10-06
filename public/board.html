@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智工 MES · 车间看板</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0d1420; color:#dfe7f2; font-family:"Microsoft YaHei","PingFang SC",sans-serif;
+    padding:22px 26px; min-height:100vh;
+  }
+  .hd { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:18px; }
+  .hd h1 { font-size:26px; font-weight:700; letter-spacing:2px; color:#fff; }
+  .hd h1 b { color:#4da3ff; }
+  .hd .clock { font-size:15px; color:#8ea2bd; font-variant-numeric:tabular-nums; }
+  .kpi { display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:18px; }
+  .kpi .c { background:#131d2e; border:1px solid #1f2d44; border-radius:12px; padding:16px 18px; }
+  .kpi .l { font-size:13px; color:#8ea2bd; margin-bottom:6px; }
+  .kpi .v { font-size:34px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .kpi .s { font-size:12px; color:#66788f; margin-top:4px; }
+  .ok { color:#37d67a; } .bad { color:#ff6b6b; } .blue { color:#4da3ff; } .warn { color:#ffb84d; }
+  .cols { display:grid; grid-template-columns:1.35fr 1fr; gap:14px; }
+  .card { background:#131d2e; border:1px solid #1f2d44; border-radius:12px; padding:14px 18px; margin-bottom:14px; }
+  .card h3 { font-size:15px; color:#aebfd6; font-weight:600; margin-bottom:10px; letter-spacing:1px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { text-align:left; color:#66788f; font-weight:500; font-size:12.5px; padding:4px 6px; border-bottom:1px solid #1f2d44; }
+  td { padding:7px 6px; border-bottom:1px solid #17233a; font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:none; }
+  .bar-w { background:#1a2740; border-radius:6px; height:16px; overflow:hidden; min-width:110px; }
+  .bar { height:100%; background:linear-gradient(90deg,#2f7bd9,#4da3ff); border-radius:6px; transition:width .6s; }
+  .bar.hot { background:linear-gradient(90deg,#d9822f,#ffb84d); }
+  .pct { font-size:12.5px; color:#8ea2bd; margin-left:8px; }
+  .trend { display:flex; align-items:flex-end; gap:10px; height:120px; padding-top:6px; }
+  .trend .col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:3px; }
+  .trend .g { width:70%; background:linear-gradient(180deg,#37d67a,#1f9d5a); border-radius:4px 4px 0 0; min-height:3px; }
+  .trend .b { width:70%; background:#8a3a44; border-radius:3px 3px 0 0; }
+  .trend .d { font-size:11px; color:#66788f; }
+  .trend .n { font-size:12px; color:#37d67a; font-variant-numeric:tabular-nums; }
+  .teamrow { display:flex; align-items:center; gap:10px; padding:5px 0; }
+  .teamrow .nm { width:90px; font-size:14px; }
+  .teamrow .bar-w { flex:1; height:14px; }
+  .ft { text-align:center; color:#4a5a72; font-size:12px; margin-top:8px; }
+  .alert { background:#2a1a20; border:1px solid #5a2a35; color:#ff9aa5; border-radius:10px; padding:10px 16px; margin-bottom:14px; font-size:14px; display:none; }
+</style>
+</head>
+<body>
+  <div class="hd">
+    <h1>智工 MES · <b>车间生产看板</b></h1>
+    <div class="clock" id="clock"></div>
+  </div>
+  <div class="alert" id="alert"></div>
+  <div class="kpi" id="kpi"></div>
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h3>在制工单进度（前 10）</h3>
+        <table><thead><tr><th>工单号</th><th>产品</th><th>状态</th><th style="width:34%">进度</th><th>交期</th></tr></thead>
+        <tbody id="wip"></tbody></table>
+      </div>
+      <div class="card">
+        <h3>近 7 日产量</h3>
+        <div class="trend" id="trend"></div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h3>班组近 30 日产出</h3>
+        <div id="teams"></div>
+      </div>
+      <div class="card">
+        <h3>最新报工</h3>
+        <table><thead><tr><th>时间</th><th>工单</th><th>工序</th><th>工人</th><th>合格</th><th>不良</th></tr></thead>
+        <tbody id="latest"></tbody></table>
+      </div>
+    </div>
+  </div>
+  <div class="ft">数据每 30 秒自动刷新 · 智工 MES-Light</div>
+<script>
+const ST = { released:'已下达', running:'生产中', paused:'已暂停' };
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const n2 = (n) => Number(n || 0).toLocaleString('zh-CN');
+
+function clock() {
+  const d = new Date();
+  document.getElementById('clock').textContent =
+    d.getFullYear() + '年' + (d.getMonth()+1) + '月' + d.getDate() + '日 星期' + '日一二三四五六'[d.getDay()]
+    + '　' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+}
+setInterval(clock, 1000); clock();
+
+async function refresh() {
+  let d;
+  try {
+    const r = await fetch('/api/public/board', { cache:'no-store' });
+    d = (await r.json()).data;
+  } catch (e) { return; }
+  const t = d.today || {}, m = d.month || {};
+  const rate = (t.good + t.bad) > 0 ? Math.round(t.good / (t.good + t.bad) * 1000) / 10 : 100;
+  document.getElementById('kpi').innerHTML = `
+    <div class="c"><div class="l">今日产量</div><div class="v ok">${n2(t.good)}</div><div class="s">件 · ${n2(t.workers)} 人报工 ${n2(t.cnt)} 次</div></div>
+    <div class="c"><div class="l">今日不良</div><div class="v ${t.bad > 0 ? 'bad' : 'ok'}">${n2(t.bad)}</div><div class="s">件 · 良率 ${rate}%</div></div>
+    <div class="c"><div class="l">在制工单</div><div class="v blue">${n2(d.wip.length)}</div><div class="s">张进行中</div></div>
+    <div class="c"><div class="l">未关闭质量异常</div><div class="v ${d.open_issues > 0 ? 'warn' : 'ok'}">${n2(d.open_issues)}</div><div class="s">单待处理</div></div>
+    <div class="c"><div class="l">近 30 日产量</div><div class="v">${n2(m.good)}</div><div class="s">件 · 不良 ${n2(m.bad)} 件</div></div>`;
+
+  const al = document.getElementById('alert');
+  al.style.display = d.open_issues > 0 ? 'block' : 'none';
+  al.textContent = '⚠ 当前有 ' + d.open_issues + ' 张质量异常单未关闭，请责任班组尽快处理';
+
+  document.getElementById('wip').innerHTML = d.wip.map((o) => {
+    const p = o.qty_plan > 0 ? Math.min(100, Math.round(o.qty_done / o.qty_plan * 100)) : 0;
+    return `<tr><td><b>${esc(o.code)}</b></td><td>${esc(o.product_name)}</td>
+      <td><span style="color:${o.status === 'paused' ? '#ff6b6b' : '#8ea2bd'}">${ST[o.status] || o.status}</span></td>
+      <td><div style="display:flex;align-items:center"><div class="bar-w"><div class="bar ${p < 40 ? 'hot' : ''}" style="width:${p}%"></div></div><span class="pct">${n2(o.qty_done)}/${n2(o.qty_plan)} · ${p}%</span></div></td>
+      <td style="color:${o.plan_end && o.plan_end < new Date().toISOString().slice(0,10) ? '#ff6b6b' : '#8ea2bd'}">${esc(o.plan_end || '—')}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" style="color:#66788f">暂无在制工单</td></tr>';
+
+  const maxT = Math.max(1, ...d.trend.map((x) => x.good));
+  document.getElementById('trend').innerHTML = d.trend.map((x) => `
+    <div class="col"><span class="n">${n2(x.good)}</span>
+      <div style="display:flex;flex-direction:column;justify-content:flex-end;height:100%"><div class="g" style="height:${Math.round(x.good / maxT * 100)}%"></div></div>
+      ${x.bad > 0 ? `<div class="b" style="height:${Math.max(3, Math.round(x.bad / maxT * 100))}%"></div>` : ''}
+      <span class="d">${(x.d || '').slice(5)}</span></div>`).join('');
+
+  const maxG = Math.max(1, ...d.teams.map((x) => x.good));
+  document.getElementById('teams').innerHTML = d.teams.map((x) => `
+    <div class="teamrow"><span class="nm">${esc(x.team)}</span>
+      <div class="bar-w"><div class="bar" style="width:${Math.round(x.good / maxG * 100)}%"></div></div>
+      <span class="pct" style="color:#37d67a">${n2(x.good)} 件</span></div>`).join('') || '<p style="color:#66788f;font-size:13px">暂无班组数据</p>';
+
+  document.getElementById('latest').innerHTML = d.latest.map((r) => `
+    <tr><td style="color:#66788f">${esc((r.report_date || '').slice(5))}</td><td>${esc(r.order_code || '—')}</td>
+    <td>${esc(r.process_name || '—')}</td><td>${esc(r.worker_name || '—')}</td>
+    <td style="color:#37d67a">${n2(r.qty_good)}</td><td style="color:${r.qty_bad > 0 ? '#ff6b6b' : '#66788f'}">${n2(r.qty_bad)}</td></tr>`).join('');
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

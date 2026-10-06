@@ -8,6 +8,7 @@ window.UI = (function () {
 
   const n2 = (n) => Number(n || 0).toLocaleString('zh-CN');
   const f1 = (n) => (Math.round(Number(n || 0) * 10) / 10).toFixed(1);
+  const f2 = (n) => (Math.round(Number(n || 0) * 100) / 100).toFixed(2);
   const pct = (a, b) => (b > 0 ? Math.round((a / b) * 1000) / 10 : 0);
   const today = () => new Date().toISOString().slice(0, 10);
   const md = (s) => (s ? String(s).slice(5).replace('-', '/') : '');
@@ -304,7 +305,7 @@ window.UI = (function () {
   const progress = (p, cls) => `<div class="bar ${cls || ''}"><i style="width:${Math.min(100, Math.max(0, p || 0))}%"></i></div>`;
 
   return {
-    esc, n2, f1, pct, today, md, hours, badge, prioChip, STATUS, WC_STATUS, ICONS, icon,
+    esc, n2, f1, f2, pct, today, md, hours, badge, prioChip, STATUS, WC_STATUS, ICONS, icon,
     toast, modal, confirm, qrModal, table, options, lineChart, barChart, chartZoom, ring, progress,
   };
 })();
