@@ -2082,10 +2082,13 @@ route('GET', '/api/inspections/pending', ['admin', 'technician', 'inspector'], (
   ok(res, rows);
 });
 // 检验记录列表
-route('GET', '/api/inspections', [], (req, res, _m, _b, _u, query) => {
+route('GET', '/api/inspections', [], (req, res, _m, _b, u, query) => {
   const w = []; const p = [];
   if (query.order_id) { w.push('i.order_id=?'); p.push(query.order_id); }
+  if (query.mine === '1' && u) { w.push('i.inspector_id=?'); p.push(u.id); }
+  if (query.today === '1') { w.push('date(i.created_at)=date(?)'); p.push(today()); }
   ok(res, all(`SELECT i.*, o.code order_code,
+      (SELECT inspect_type FROM order_steps s WHERE s.id=i.order_step_id) inspect_type,
       (SELECT GROUP_CONCAT(bad_reason || '×' || qty, '；') FROM inspection_defects WHERE inspection_id=i.id) defect_summary
     FROM inspections i LEFT JOIN orders o ON o.id=i.order_id
     ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY i.id DESC LIMIT 200`, p));
@@ -2106,7 +2109,7 @@ route('POST', '/api/inspections', ['admin', 'technician', 'inspector'], (req, re
 // 质检台队列（APP 质检员扫码登录后进入）——与公开扫码入口同口径，但走登录态
 route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (req, res, _m, _b, u) => {
   const rows = all(`SELECT s.id order_step_id, s.order_id, s.seq, s.process_id, s.inspect_type, s.qty_plan, s.qty_good, s.qty_bad,
-      s.assignee_team, p.name process_name, o.code order_code, od.name product_name,
+      s.assignee_team, p.name process_name, p.sop_file, p.sop_name, o.code order_code, od.name product_name,
       (SELECT pr.name FROM users pr WHERE pr.id=s.assignee_id) last_worker,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN orders o ON o.id=s.order_id

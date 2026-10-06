@@ -27,6 +27,7 @@
     sources: [],         // 消息场景字典
     order: null, steps: [], workers: [], badReasons: [],
     sel: new Set(), vals: {},
+    qcTab: 'steps', qcKw: '',
     msgs: [], msgFilter: '',
     pollTimer: null,
   };
@@ -645,23 +646,43 @@
   }
 
   /* ---------------- 页面：质检台 ---------------- */
+  /* ---------------- 现场检验工作台（工序检验 / 来料检验 / 已检记录） ---------------- */
+  function qcTabs() {
+    const tabs = [['steps', '工序检验'], ['incoming', '来料检验'], ['done', '已检记录']];
+    return `<div class="seg" style="margin-bottom:10px">
+      ${tabs.map(([k, t]) => `<button data-qct="${k}" class="${S.qcTab === k ? 'on' : ''}">${t}</button>`).join('')}
+    </div>`;
+  }
+  function bindQcTabs() {
+    $view.querySelectorAll('[data-qct]').forEach((b) => b.onclick = () => {
+      S.qcTab = b.dataset.qct;
+      if (S.qcTab === 'incoming') renderIncoming();
+      else if (S.qcTab === 'done') renderQcDone();
+      else renderInspect();
+    });
+  }
+
   async function renderInspect() {
+    S.qcTab = 'steps';
     const data = await get('/api/inspections/queue');
     const list = data.steps || [];
     S.badReasons = data.badReasons || [];
     $view.innerHTML = `
+      ${qcTabs()}
       <div class="card"><div class="card-b">
-        <div class="ocode">质检台</div>
+        <div class="ocode">质检台 · 工序检验</div>
         <div class="pname">${esc((S.me && S.me.name) || data.worker.name)} · 待检 <b>${list.length}</b> 道工序</div>
+        ${list.length > 1 ? `<input class="ipt qc-kw" placeholder="输入工单号 / 产品 / 工序名快速定位" style="margin-top:8px" value="${esc(S.qcKw || '')}">` : ''}
       </div></div>
       ${list.length ? list.map((s) => {
         const isFinal = String(s.inspect_type) === 'fqc';
         const cl = Array.isArray(s.checklist) ? s.checklist : [];
-        return `<div class="card insp" data-s="${s.order_step_id}"><div class="card-b">
+        return `<div class="card insp" data-s="${s.order_step_id}" data-kw="${esc([s.order_code, s.product_name, s.process_name].join(' ').toLowerCase())}"><div class="card-b">
           <div class="ocode" style="font-size:16px">${esc(s.order_code)} · 第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}
             <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span></div>
           <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
           <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>
+          ${s.sop_file ? `<div class="t3" style="margin-top:4px"><a class="qc-sop" href="/uploads/${encodeURIComponent(s.sop_file)}" target="_blank" rel="noopener">📄 图纸/SOP：${esc(s.sop_name || '点击查看')}</a></div>` : ''}
           <div style="margin-top:12px">
             <div class="field" style="margin-bottom:10px"><span>检验方式</span>
               <select class="ipt qi-mode"><option value="full">全检</option><option value="sample">抽检</option></select></div>
@@ -689,6 +710,20 @@
         </div></div>`;
       }).join('') : `<div class="card"><div class="empty"><div class="ico">👍</div><p>当前没有待检工序</p></div></div>`}
       <div style="height:10px"></div>`;
+    bindQcTabs();
+    const kwInput = $view.querySelector('.qc-kw');
+    if (kwInput) kwInput.oninput = () => {
+      const kw = kwInput.value.trim().toLowerCase();
+      S.qcKw = kwInput.value;
+      let vis = 0;
+      $view.querySelectorAll('.insp').forEach((c) => {
+        const hit = !kw || String(c.dataset.kw || '').includes(kw);
+        c.style.display = hit ? '' : 'none';
+        if (hit) vis++;
+      });
+      const head = $view.querySelector('.pname b');
+      if (head) head.textContent = vis;
+    };
     bindBadRows();
     list.forEach((s) => { S.vals[s.order_step_id] = { badRows: [{ reason: '', qty: '', detail: '' }] }; renderBadRows(s.order_step_id); });
     $view.querySelectorAll('.qi-mode').forEach((sel) => sel.onchange = () => {
@@ -791,11 +826,13 @@
   async function renderIncoming() {
     const me = await ensureMe();
     if (me.role === 'worker') return renderError('工人账号无需做来料检验');
+    S.qcTab = 'incoming';
     const list = await get('/api/incoming_materials').catch(() => []);
     const pending = (list || []).filter((x) => x.result === 'pending');
     $view.innerHTML = `
+      ${qcTabs()}
       <div class="card"><div class="card-b">
-        <div class="ocode">来料检验（IQC）</div>
+        <div class="ocode">质检台 · 来料检验（IQC）</div>
         <div class="pname">${esc((S.me && S.me.name) || me.name)} · 待检 <b>${pending.length}</b> 批</div>
       </div></div>
       ${pending.length ? pending.map((s) => `
@@ -818,7 +855,42 @@
           <div class="mask-hint" style="margin-top:8px">合格 / 让步自动入库；不合格不入库并自动开质量异常单（含供应商留痕）。</div>
         </div></div>`).join('') : `<div class="card"><div class="empty"><div class="ico">📭</div><p>当前没有待检来料</p></div></div>`}
       <div style="height:10px"></div>`;
+    bindQcTabs();
     $view.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => submitIncoming(b.dataset.judge, b.dataset.cc));
+  }
+
+  /* 已检记录：检验员本人的判定历史（今日 / 近 50 条切换） */
+  async function renderQcDone() {
+    S.qcTab = 'done';
+    const [today, recent] = await Promise.all([
+      get('/api/inspections?mine=1&today=1').catch(() => []),
+      get('/api/inspections?mine=1').catch(() => []),
+    ]);
+    const mark = { pass: ['合格', 'b-done'], concession: ['让步', 'b-paused'], fail: ['不合格', 'b-paused'] };
+    const rows = (arr) => arr.length ? arr.map((i) => `
+      <div class="item">
+        <div class="avatar" style="background:${i.conclusion === 'pass' ? '#e8f5e9' : '#fff3e0'}">${i.conclusion === 'pass' ? '✅' : (i.conclusion === 'concession' ? '🤝' : '❌')}</div>
+        <div class="body">
+          <div class="t1">${esc(i.code || ('QC#' + i.id))} <span class="badge ${(mark[i.conclusion] || ['?', 'b-paused'])[1]}">${(mark[i.conclusion] || [i.conclusion])[0]}</span>
+            <span class="badge b-released">${esc(INSPECT_LABEL[i.inspect_type] || '检验')}</span></div>
+          <div class="t2">${esc(i.order_code || '')} · ${esc(i.process_name || '')}<br>
+            受检 ${i.qty_check} · 合格 <b>${i.qty_pass}</b> · 不合格 <b style="color:#d93b3b">${i.qty_fail}</b>${i.defect_summary ? '<br>不良：' + esc(i.defect_summary) : ''}</div>
+          <div class="t3"><span>检验员 ${esc(i.inspector || '—')}</span><span>${esc(String(i.created_at).slice(5, 16))}</span></div>
+        </div>
+      </div>`).join('') : `<div class="empty"><div class="ico">🗒️</div><p>${arr === today ? '今天还没有判定记录' : '暂无检验记录'}</p></div>`;
+    $view.innerHTML = `
+      ${qcTabs()}
+      <div class="seg" id="doneSeg" style="margin-bottom:10px">
+        <button class="on" data-r="today">今日<i>${today.length}</i></button>
+        <button data-r="recent">近 50 条<i>${recent.length}</i></button>
+      </div>
+      <div class="card nopad" id="doneList">${rows(today)}</div>
+      <div style="height:10px"></div>`;
+    bindQcTabs();
+    $view.querySelectorAll('#doneSeg button').forEach((b) => b.onclick = () => {
+      $view.querySelectorAll('#doneSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      $view.querySelector('#doneList').innerHTML = rows(b.dataset.r === 'today' ? today : recent);
+    });
   }
 
   async function submitIncoming(id, conclusion) {
