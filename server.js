@@ -137,7 +137,7 @@ function makeQr(text, cellSize = 6) {
 }
 
 /* ------------------------------ 认证 ------------------------------ */
-route('POST', '/api/login', [], (req, res, _m, body) => {
+route('POST', '/api/login', ['*'], (req, res, _m, body) => {
   const u = get('SELECT * FROM users WHERE username=? AND active=1', [String(body.username || '').trim()]);
   if (!u || u.password !== hashPassword(String(body.password || ''))) return fail(res, '账号或密码错误', 401);
   const token = crypto.randomBytes(24).toString('hex');
@@ -148,7 +148,7 @@ route('POST', '/api/login', [], (req, res, _m, body) => {
   ok(res, { token, user: { id: u.id, username: u.username, name: u.name, role: u.role, team: u.team } });
 });
 
-route('POST', '/api/logout', [], (req, res, _m, _b, u) => {
+route('POST', '/api/logout', ['*'], (req, res, _m, _b, u) => {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (token) run('DELETE FROM sessions WHERE token=?', [token]);
@@ -203,7 +203,7 @@ route('POST', '/api/profile', [], (req, res, _m, b, u) => {
 });
 
 /* ------------------------------ 元数据 ------------------------------ */
-route('GET', '/api/meta', [], (req, res) => {
+route('GET', '/api/meta', ['*'], (req, res) => {
   ok(res, {
     products: all('SELECT * FROM products ORDER BY code'),
     processes: all('SELECT * FROM processes ORDER BY code'),
@@ -704,7 +704,7 @@ route('DELETE', '/api/orders/(\\d+)', ['admin'], (req, res, m, _b, u) => {
 });
 
 /* 扫码：按工单号 / 产品编码定位 */
-route('GET', '/api/scan/(.+)', [], (req, res, m) => {
+route('GET', '/api/scan/(.+)', ['*'], (req, res, m) => {
   const key = decodeURIComponent(m[1]).trim();
   const o = get(ORDER_SQL + ' WHERE o.code=?', [key]);
   if (o) return ok(res, { type: 'order', order: o });
@@ -942,7 +942,7 @@ route('POST', '/api/reports', [], (req, res, _m, b, u) => {
 });
 
 /* 扫码免登录报工：令牌必须匹配工单（机台码）或员工（员工码） */
-route('POST', '/api/public/reports', [], (req, res, _m, b) => {
+route('POST', '/api/public/reports', ['*'], (req, res, _m, b) => {
   try {
     const order_id = num(b.order_id);
     const worker_id = num(b.worker_id);
@@ -1286,7 +1286,7 @@ route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, _u, q) => {
 });
 
 /* ------------------------------ 升级：车间看板大屏（公开只读） ------------------------------ */
-route('GET', '/api/public/board', [], (req, res) => {
+route('GET', '/api/public/board', ['*'], (req, res) => {
   const today = get(`SELECT COALESCE(SUM(qty_good),0) good, COALESCE(SUM(qty_bad),0) bad,
       COUNT(DISTINCT worker_id) workers, COUNT(*) cnt FROM reports WHERE report_date=date('now')`);
   const wip = all(`SELECT o.code, o.status, o.qty_plan, o.plan_end, p.name product_name,
@@ -1381,7 +1381,7 @@ route('GET', '/api/qr/worker/(\\d+)', ['admin', 'technician'], (req, res, m, _b,
 });
 
 // 免登录：按工单令牌读取工单与工序（员工码可凭 wid 访问其被指派班组的工单）
-route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
+route('GET', '/api/public/order/(\\d+)', ['*'], (req, res, m, _b, _u, q) => {
   const orderOk = checkQrToken(q.t, 'order', m[1]);
   const wAssigned = q.wid && checkQrToken(q.t, 'worker', q.wid);
   // 存在未指派班组的工序 → 该工单对全员开放报工；否则仅被指派班组的员工可看
@@ -1405,7 +1405,7 @@ route('GET', '/api/public/order/(\\d+)', [], (req, res, m, _b, _u, q) => {
 });
 
 // 免登录：按员工令牌读取该员工在制工单
-route('GET', '/api/public/worker/(\\d+)', [], (req, res, m, _b, _u, q) => {
+route('GET', '/api/public/worker/(\\d+)', ['*'], (req, res, m, _b, _u, q) => {
   if (!checkQrToken(q.t, 'worker', m[1])) return fail(res, '二维码已失效或无权限', 403);
   const w = get('SELECT id,name,team FROM users WHERE id=?', [m[1]]);
   if (!w) return fail(res, '员工不存在', 404);
@@ -1431,7 +1431,7 @@ route('GET', '/api/qr/inspector/(\\d+)', ['admin', 'technician'], (req, res, m, 
 });
 
 // 免登录：质检员待检队列（扫码即判）
-route('GET', '/api/public/inspector/(\\d+)', [], (req, res, m, _b, _u, q) => {
+route('GET', '/api/public/inspector/(\\d+)', ['*'], (req, res, m, _b, _u, q) => {
   if (!checkQrToken(q.t, 'worker', m[1])) return fail(res, '二维码已失效或无权限', 403);
   const w = get("SELECT id,name,team,role FROM users WHERE id=?", [m[1]]);
   if (!w) return fail(res, '用户不存在', 404);
@@ -3100,13 +3100,17 @@ const server = http.createServer(async (req, res) => {
       if (!match) return fail(res, '接口不存在：' + method + ' ' + pathname, 404);
       const [, pattern, roles, fn] = match;
       const m = pathname.match(pattern);
+      // 角色语义（2026-10-06 安全加固）：['*']=完全公开；空数组=需登录（任意角色）；非空=需登录且角色匹配
+      if (roles[0] === '*') return fn(req, res, m, body, currentUser(req), query);
       if (roles.length) {
         const u = currentUser(req);
         if (!u) return fail(res, '未登录或登录已过期', 401);
         if (!roles.includes(u.role)) return fail(res, '当前角色无权执行该操作', 403);
         return fn(req, res, m, body, u, query);
       }
-      return fn(req, res, m, body, currentUser(req), query);
+      const u0 = currentUser(req);
+      if (!u0) return fail(res, '未登录或登录已过期', 401);
+      return fn(req, res, m, body, u0, query);
     } catch (e) {
       return fail(res, e.message || '服务器内部错误', 500);
     }

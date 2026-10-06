@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智工 MES 使用说明书</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:#24303d; background:#f5f7fa; line-height:1.75; }
+  .layout { display:flex; max-width:1200px; margin:0 auto; }
+  nav { width:240px; background:#12263f; color:#cfe0f2; padding:24px 0; position:sticky; top:0; height:100vh; overflow:auto; flex-shrink:0; }
+  nav .logo { font-size:17px; font-weight:700; color:#fff; padding:0 22px 14px; border-bottom:1px solid #24405f; margin-bottom:10px; }
+  nav a { display:block; color:#b9cde3; text-decoration:none; font-size:13.5px; padding:7px 22px; }
+  nav a:hover { background:#1b3a5e; color:#fff; }
+  nav .grp { font-size:11.5px; color:#6f8aa8; padding:12px 22px 4px; letter-spacing:1px; }
+  main { flex:1; padding:34px 40px 80px; min-width:0; }
+  h1 { font-size:26px; margin-bottom:4px; }
+  .ver { color:#7a8a9b; font-size:13px; margin-bottom:24px; }
+  h2 { font-size:20px; margin:36px 0 12px; padding:8px 14px; background:#eaf2fb; border-left:4px solid #1d5fae; border-radius:0 6px 6px 0; }
+  h3 { font-size:16px; margin:22px 0 8px; color:#123a6d; }
+  p, li { font-size:14.5px; }
+  ul, ol { padding-left:24px; margin:8px 0; }
+  li { margin:4px 0; }
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:13.5px; margin:10px 0 16px; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(20,40,70,.08); }
+  th { background:#eef3fa; text-align:left; padding:8px 12px; font-weight:600; }
+  td { padding:7px 12px; border-top:1px solid #eef1f5; vertical-align:top; }
+  .tip { background:#eefaf1; border:1px solid #bfe5cb; border-radius:8px; padding:10px 16px; margin:10px 0; font-size:13.5px; }
+  .warn { background:#fff7e8; border:1px solid #f0d9a8; border-radius:8px; padding:10px 16px; margin:10px 0; font-size:13.5px; }
+  .kbd { background:#eef1f5; border:1px solid #d8dfe8; border-radius:4px; padding:0 6px; font-size:12.5px; font-family:Consolas,monospace; }
+  code { background:#eef1f5; border-radius:4px; padding:1px 6px; font-size:13px; }
+  .step { background:#fff; border-radius:10px; box-shadow:0 1px 3px rgba(20,40,70,.08); padding:16px 22px; margin:12px 0; }
+  @media (max-width:800px){ nav{display:none} main{padding:20px 16px 60px} }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div class="logo">智工 MES<br><span style="font-size:11px;color:#6f8aa8">使用说明书</span></div>
+  <div class="grp">快速开始</div>
+  <a href="#s1">1. 系统简介与访问方式</a>
+  <a href="#s2">2. 角色与权限</a>
+  <a href="#s3">3. 登录与账号</a>
+  <div class="grp">管理员指南</div>
+  <a href="#s4">4. 上线准备（基础数据）</a>
+  <a href="#s5">5. 工单管理</a>
+  <div class="grp">日常作业</div>
+  <a href="#s6">6. 报工（PC / 扫码 / 手机）</a>
+  <a href="#s7">7. 质量管理与检验</a>
+  <a href="#s8">8. 质量异常单与通知</a>
+  <a href="#s9">9. 物料仓储</a>
+  <div class="grp">管理分析</div>
+  <a href="#s10">10. 统计报表与计件工资</a>
+  <a href="#s11">11. 车间大屏</a>
+  <a href="#s12">12. 手机端 APP</a>
+  <div class="grp">附录</div>
+  <a href="#s13">13. 常见问题 FAQ</a>
+  <a href="#s14">14. 术语与规则速查</a>
+</nav>
+<main>
+<h1>智工 MES 使用说明书</h1>
+<div class="ver">版本 v1.1 · 2026-10-06 · 适用于 main 分支（含批次追溯 / 计件工资 / 车间大屏 / 安全加固）</div>
+
+<h2 id="s1">1. 系统简介与访问方式</h2>
+<p>智工 MES 是面向中小制造工厂的<b>轻量化制造执行系统</b>，覆盖「工单 → 报工 → 检验 → 异常 → 仓储 → 统计」全流程，支持 PC、手机、Android APP、车间大屏四种使用方式。</p>
+<table>
+<tr><th>入口</th><th>地址 / 方式</th><th>适用场景</th></tr>
+<tr><td>PC 端</td><td><code>http://114.117.233.47:8080/</code></td><td>管理员 / 技术员日常管理、报表分析</td></tr>
+<tr><td>手机 H5</td><td><code>http://114.117.233.47:8080/m/app/</code></td><td>工人报工、质检判定、领料、盘点</td></tr>
+<tr><td>Android APP</td><td><code>http://114.117.233.47:8080/install.html</code>（扫码安装）</td><td>同手机 H5，体验更佳，支持扫码</td></tr>
+<tr><td>车间大屏</td><td><code>http://114.117.233.47:8080/board.html</code>（免登录，30 秒自动刷新）</td><td>车间电视 / 显示器投屏</td></tr>
+</table>
+
+<h2 id="s2">2. 角色与权限</h2>
+<table>
+<tr><th>角色</th><th>典型用户</th><th>主要权限</th></tr>
+<tr><td><b>管理员</b> admin</td><td>厂长 / IT</td><td>全部功能：基础数据、用户管理、工单、报工、检验、异常定级、仓储、报表、日志；可代报工与代上报（行为同操作工口径）</td></tr>
+<tr><td><b>技术员</b> technician</td><td>车间主管 / 工艺员</td><td>建工单与工艺路线、派工、报工、领料、盘点、查看报表；<b>不能</b>定级异常、不能管理用户</td></tr>
+<tr><td><b>操作工</b> worker</td><td>一线员工</td><td>报工（本班组/未指派工单）、上报异常（留存记录，重大可申报）、查看自己的产出与消息</td></tr>
+<tr><td><b>质检员</b> inspector</td><td>QC</td><td>检验判定（合格/让步/不合格）、抽检、检查表、<b>异常定级</b>、上报异常（直接定级）、扫码质检台</td></tr>
+</table>
+<div class="tip">💡 指派了班组的工单，仅该班组人员与质检员/管理层可见可报；未指派班组的工单全员可报。</div>
+
+<h2 id="s3">3. 登录与账号</h2>
+<div class="step">
+<ol>
+<li>浏览器打开 PC 端或手机端地址，输入<b>用户名（中文姓名）</b>与密码登录；</li>
+<li>首次使用请联系管理员开通账号，初始密码 <code>123456</code>；</li>
+<li>登录后点击右上角头像 →「修改密码」及时更改；</li>
+<li>会话有效期 7 天，过期后重新登录即可。</li>
+</ol>
+</div>
+<div class="warn">⚠️ 连续输错密码不会锁定（当前版本），请管理员妥善管理账号；员工离职请在「基础数据 → 用户」中停用。</div>
+
+<h2 id="s4">4. 上线准备（基础数据）</h2>
+<p>首次使用按以下顺序录入基础数据（菜单「基础数据」）：</p>
+<div class="step">
+<ol>
+<li><b>用户管理</b>：添加员工，指定角色与班组（班组用于派工可见性与计件统计）；</li>
+<li><b>工序</b>：录入加工工序，维护<b>标准工时</b>与<b>计件单价</b>（计件工资的依据）、是否检验点；</li>
+<li><b>工作中心</b>（可选）：设备/工位台账；</li>
+<li><b>产品</b>：录入成品编码、名称、规格、单位；</li>
+<li><b>工艺路线</b>：为产品配置工序顺序（可增删、排序、每行指定检验点与单价）；</li>
+<li><b>仓库 / 物料</b>：建仓库、录物料（设置安全库存上下限）；成品物料可从产品一键导入；</li>
+<li><b>不良原因</b>：维护报工与检验用的不良原因库。</li>
+</ol>
+</div>
+
+<h2 id="s5">5. 工单管理</h2>
+<div class="step">
+<h3>创建与下达</h3>
+<ol>
+<li>「工单 → 新建工单」：选产品（自动带出工艺路线）、填计划数量、优先级、计划起止日期，可指派<b>责任班组</b>与<b>工单负责人</b>；</li>
+<li>新工单为「已下达」状态，车间即可开始生产；也可先保存为待下达。</li>
+</ol>
+<h3>过程管理</h3>
+<ul>
+<li>工单详情可查看各工序进度、合格/不良数、领发料记录；</li>
+<li>未开工前可<b>增加/删除工序、批量排序</b>（已报工的工序不可删、末道工序不可删）；</li>
+<li>工序可临时调整检验点（无报工且未进检验流时）；</li>
+<li>异常或待料可「暂停」工单，恢复后继续报工；数量不够可「关闭」。</li>
+</ul>
+</div>
+<div class="tip">💡 完工数口径：工单完工量 = 各工序合格数的<b>最小值</b>（瓶颈工序口径），末道工序合格后自动触发成品入库（可在仓库关闭自动入库）。</div>
+
+<h2 id="s6">6. 报工（PC / 扫码 / 手机）</h2>
+<div class="step">
+<h3>方式一：PC「报工」页</h3>
+<ol>
+<li>选工单 → 选工序 → 填合格数、不良数（选不良原因）、工时；</li>
+<li>支持一人一次申报多道工序（身兼多岗场景）。</li>
+</ol>
+<h3>方式二：工单二维码扫码</h3>
+<ol>
+<li>管理员在工单详情生成二维码并张贴到工位；</li>
+<li>工人手机扫码 → 免登录报工页 → 输入工号选择自己 → 报工。</li>
+</ol>
+<h3>方式三：手机 APP「报工」</h3>
+<p>打开 APP → 首页「我的工单」→ 选工序报工，界面与 H5 一致。</p>
+<h3>报工后的流转</h3>
+<ul>
+<li>普通工序：报工即累计完工数，达到计划数自动完工；</li>
+<li><b>检验点工序</b>：报工后工序转「待检」，由质检员判定合格后才放行流转；</li>
+<li>填了不良数时选择不良原因，计入统计分析；</li>
+<li>报工出错可由管理员在报工记录中删除重报（自动回滚库存联动）。</li>
+</ul>
+</div>
+
+<h2 id="s7">7. 质量管理与检验</h2>
+<div class="step">
+<h3>检验点配置（三处入口）</h3>
+<ul>
+<li>工序档案：设置默认检验点（IQC 来料 / IPQC 过程 / FQC 终检）；</li>
+<li>工艺路线编辑器：每行「检验」下拉单独调整；</li>
+<li>工单增加工序弹窗：临时指定。</li>
+</ul>
+<h3>质检员判定</h3>
+<ol>
+<li>「质量 → 待检队列」或扫码质检台查看待检工序；</li>
+<li>支持<b>全检 / 抽检</b>（填受检样本数）；可使用<b>检查表模板</b>逐项打分；</li>
+<li>结论三选一：<b>合格</b>（放行流转）/ <b>让步接收</b>（放行并打特采标记）/ <b>不合格</b>（工序转返工，工人重新报工后再次进入待检）；</li>
+<li>不合格需填不良明细（原因+数量）；报废登记可录损失数量与金额；</li>
+<li>终检不合格或不良率超阈值（默认 20%，可在质量设置调整）→ 判定<b>致命级</b>：自动开异常单 + 暂停工单。</li>
+</ol>
+<h3>来料检验（IQC）</h3>
+<p>「物料仓储 → 来料入库」录单后默认待检、<b>不计入库存</b>；判定合格（或让步）才入库，不合格自动开异常单并留痕供应商。</p>
+</div>
+
+<h2 id="s8">8. 质量异常单与通知</h2>
+<div class="step">
+<h3>谁上报、怎么流转</h3>
+<table>
+<tr><th>场景</th><th>等级</th><th>通知行为</th></tr>
+<tr><td>操作工报工时填写异常 / PC 代报</td><td>「待定级」（可申报严重程度）</td><td><b>仅留存记录与统计</b>；申报了严重/致命时<b>通知全体质检员</b>及时定级；不通知管理层</td></tr>
+<tr><td>质检员在异常单中定级</td><td>轻微 / 严重</td><td>通知责任处理人（工单负责人→班组技术员→创建人）</td></tr>
+<tr><td>质检员定级为<b>致命</b></td><td>致命</td><td>通知责任人 + <b>厂部管理层</b>（站内 + 企微/钉钉群 webhook）</td></tr>
+<tr><td>质检员上报异常（上报时直接定级）</td><td>轻微/严重 → 责任人；致命 → 责任人+管理层</td><td>同上</td></tr>
+<tr><td>检验判定不合格自动开单</td><td>按定级规则</td><td>同上；致命级同时暂停工单</td></tr>
+</table>
+<h3>异常单生命周期</h3>
+<p><span class="kbd">待处理</span> → 认领/指派 → <span class="kbd">处理中</span> → 填写原因/措施/处置 → 提交验证 → <span class="kbd">验证中</span> → 验证关闭 <span class="kbd">已关闭</span>（误报可作废）。</p>
+<ul>
+<li>定级：详情页「定级」按钮（仅质检员/管理员）；</li>
+<li>超时提醒：长时间未认领提醒班组技术员；<b>只有质检员创建的单</b>超时才升级管理层；</li>
+<li>消息在 PC 铃铛、手机 APP「消息」中查看，点击可直达异常单。</li>
+</ul>
+</div>
+
+<h2 id="s9">9. 物料仓储</h2>
+<div class="step">
+<h3>常用页签</h3>
+<ul>
+<li><b>库存台账</b>：按物料×仓库×批次的实时库存；低于安全下限在首页与预警页提醒；支持盘点调整（按实盘差异自动生成调整流水）；</li>
+<li><b>来料入库</b>：录单（供应商、批次）→ IQC 判定 → 合格入库；</li>
+<li><b>领料退料</b>：领料必选工单；选工单后按 BOM 单耗自动带出<b>建议用量</b>（计划×单耗×(1+损耗%)）一键填入；出库无批次时自动<b>先进先出</b>跨批扣料；</li>
+<li><b>成品入库 / 出库</b>：出库可填客户；删除/修改单据自动红字冲销并重算库存；</li>
+<li><b>收发明细</b>：全部库存变动流水（不可改），支持汇总视图与 CSV 导出；</li>
+<li><b>产出比</b>：成品入库合格 ÷ 来料合格，总览/月度/按工单三层；<b>材料损耗分析</b>：应耗 vs 实领，超 10% 红色预警；</li>
+<li><b>物料档案</b>：维护安全库存、供应商、产品单耗（BOM）；</li>
+<li><b>批次追溯</b>：输入<b>批次号</b>→ 查供应商来源、批次流水、流向工单、出库客户；输入<b>工单号</b>→ 查用料批次、报工、检验、成品批次、出库记录。质量问题时几分钟内完成双向追查。</li>
+</ul>
+</div>
+
+<h2 id="s10">10. 统计报表与计件工资</h2>
+<div class="step">
+<ul>
+<li><b>产量分析</b>：产量/良率趋势、不良原因分布、人员产出排名、工单达成率；支持导出 CSV；</li>
+<li><b>计件工资</b>：工资 = 报工合格数 × 工序计件单价（在「基础数据 → 工序」维护），按人汇总排名，可按 7/14/30 天切换并导出 CSV 交财务；</li>
+<li><b>质量报表</b>：FPY 一次合格率、供应商合格率、月度质量趋势、报废与损失金额；</li>
+<li><b>产销对账</b>：计划-完工-入库-库存对账表，快速发现漏入库；</li>
+<li><b>服务端导出</b>：报工记录、收发明细、计件工资支持 <code>?format=csv</code> 直接下载（Excel 打开不乱码）。</li>
+</ul>
+</div>
+
+<h2 id="s11">11. 车间大屏</h2>
+<p>PC 菜单「车间大屏」或直接访问 <code>/board.html</code>。建议用浏览器全屏（F11）投到车间电视：</p>
+<ul>
+<li>今日产量 / 不良 / 良率、在制工单进度条、近 7 日产量柱图、班组产出排行、最新报工滚动；</li>
+<li>有未关闭质量异常时顶部红色警示；</li>
+<li>免登录、每 30 秒自动刷新，开机自启可将该地址设为浏览器主页。</li>
+</ul>
+
+<h2 id="s12">12. 手机端 APP</h2>
+<div class="step">
+<ol>
+<li>手机浏览器访问 <code>http://114.117.233.47:8080/install.html</code>，或扫码张贴的安装二维码；</li>
+<li>下载 APK 安装（Android 8+，首次安装允许「未知来源」）；</li>
+<li>打开 APP 登录一次即可长期使用；</li>
+<li>功能：我的工单/报工、扫码质检、领料申请、扫码盘点、消息中心、上报异常、修改密码。</li>
+</ol>
+</div>
+
+<h2 id="s13">13. 常见问题 FAQ</h2>
+<div class="step">
+<p><b>Q：报工时看不到某张工单？</b><br>该工单指派了其他班组。找技术员调整指派，或由其班组同事报工。</p>
+<p><b>Q：报工后工序一直是「待检」？</b><br>该工序是检验点，等质检员在「质量 → 待检队列」判定合格后自动流转。</p>
+<p><b>Q：工序报错了数量怎么办？</b><br>联系管理员在报表/工单中删除该条报工（自动回滚），然后重新报工。</p>
+<p><b>Q：领料时提示库存不足？</b><br>按合计口径检查各仓各批次；可先做「来料入库」并完成 IQC 判定。</p>
+<p><b>Q：为什么操作工上报的异常管理层没收到？</b><br>这是设计口径：操作工异常仅留存+通知质检员定级，<b>致命级</b>或<b>质检员上报</b>才通知管理层。</p>
+<p><b>Q：忘记密码？</b><br>联系管理员在用户管理中重置为初始密码。</p>
+<p><b>Q：数据安全吗？</b><br>系统私有化部署在自有服务器，所有接口（除登录/大屏等公开页）需登录访问；请定期用服务器 <code>data/</code> 目录备份 SQLite 数据库。</p>
+</div>
+
+<h2 id="s14">14. 术语与规则速查</h2>
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>IQC / IPQC / FQC</td><td>来料检验 / 过程检验 / 最终检验</td></tr>
+<tr><td>FPY</td><td>首次合格率：终检一次性判定合格的比率</td></tr>
+<tr><td>让步接收</td><td>不完全合格但经评审放行使用/出货，系统打特采标记</td></tr>
+<tr><td>致命级异常</td><td>终检不合格或不良率≥阈值（默认 20%），自动暂停工单并上报管理层</td></tr>
+<tr><td>待定级</td><td>操作工上报的异常初始状态，由质检员判定严重等级</td></tr>
+<tr><td>完工数口径</td><td>工单完工 = 各工序合格数最小值（瓶颈）</td></tr>
+<tr><td>计件单价</td><td>工序档案中的元/件，计件工资 = Σ(合格数 × 单价)</td></tr>
+<tr><td>先进先出</td><td>出库未指定批次时按入库先后自动跨批次扣料</td></tr>
+</table>
+
+<p class="ver" style="margin-top:30px">— 智工 MES-Light · 如需功能扩展或问题反馈，请联系系统管理员 —</p>
+</main>
+</div>
+</body>
+</html>
