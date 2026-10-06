@@ -1651,24 +1651,26 @@ function createQualityIssue(opt) {  const ts = now();
   const issue = get('SELECT * FROM quality_issues WHERE id=?', [id]);
   const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
   const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（${DISPOSITION_LABEL[issue.disposition] || '待处理'}）`;
-  // 上报口径（2026-10-06）：
-  // 1) 操作工报工填写/非检验员代报（source=report 且创建者非检验员）的异常：只留存数据记录与统计，
-  //    不推送任何通知（站内待办/管理层群均不发），待检验员在「待定级」队列定级后再流转。
-  // 2) 检验员上报的异常（上报时直接定级）：创建即通知对应责任处理人 + 厂部管理层（webhook 群 + 管理员站内升级）。
-  // 3) 检验判定/来料判定开单（source=inspect/iqc，属检验质量保障动作）与致命级异常：同样通知责任人 + 管理层。
   const creator = opt.created_by ? get('SELECT id,role FROM users WHERE id=?', [opt.created_by]) : null;
   const creatorIsInspector = !!(creator && creator.role === 'inspector');
-  const notifyAll = creatorIsInspector || (opt.source || 'inspect') !== 'report' || issue.level === 'critical';
-  if (notifyAll) {
+  // 上报口径（2026-10-06 修订）：
+  // 1) 致命级（任何来源）：通知责任处理人 + 厂部管理层（webhook 群 + 管理员站内升级）。
+  // 2) 检验员上报 / 检验判定 / 来料判定开单（非致命）：仅通知责任处理人（不推管理层）。
+  // 3) 操作工/代报上报（source=report，非检验员）：正式等级仍为「待定级」，只留存数据记录与统计，
+  //    不通知责任人与管理层；其中申报为重大（严重/致命）的，由上报接口另行通知检验员及时定级。
+  const isCritical = issue.level === 'critical';
+  if (isCritical) {
     notifyIssue(issue, assignee, 'created', title, body, true);
     const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => !assignee || a.id !== assignee.id);
     pushMessage({
       source: 'quality', toUsers: admins, kind: 'escalate', issue_id: issue.id,
       ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
-      title: `质量异常（${ISSUE_LEVEL_LABEL[issue.level] || issue.level}）：${issue.code}`, body: `${title}　${body}`,
+      title: `重大质量异常：${issue.code}`, body: `${title}　${body}`,
     });
+  } else if (creatorIsInspector || (opt.source || 'inspect') !== 'report') {
+    notifyIssue(issue, assignee, 'created', title, body, false);
   }
-  // 非检验员上报（source=report）：只留存，不发任何通知
+  // 非检验员上报（source=report，非致命申报）：只留存，不发任何通知
   return issue;
 }
 
@@ -2001,8 +2003,8 @@ route('POST', '/api/quality_issues/(\\d+)/cancel', ['admin'], (req, res, m, b, u
 // 报工环节自主上报异常（操作工/质检员均可）
 route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {  let it;
   tx(() => {
-    // 上报口径（2026-10-06）：非检验员上报一律「待定级」且只留存记录不通知；
-    // 检验员上报可直接定级（缺省 major），创建即通知责任人 + 厂部管理层
+    // 上报口径（2026-10-06）：非检验员上报正式等级一律「待定级」（检验员判定），只留存记录；
+    // 检验员上报可直接定级（缺省 major）
     const lv = (b.source || 'report') === 'report'
       ? (u.role === 'inspector' && ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'pending')
       : (b.level || 'major');
@@ -2012,6 +2014,14 @@ route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req,
       product_name: b.product_name || null, process_name: b.process_name || null,
       qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: u.id,
     });
+    // 操作工/代报申报重大（严重/致命）：通知全体检验员及时定级（不通知责任人与管理层）
+    if ((b.source || 'report') === 'report' && u.role !== 'inspector' && ['major', 'critical'].includes(b.level)) {
+      const inspUsers = all("SELECT id,name FROM users WHERE role='inspector' AND active=1");
+      for (const ip of inspUsers) {
+        notifyIssue(it, ip, 'created', `操作工上报重大异常，请及时定级：${it.code}`,
+          `${it.process_name || ''} 不良${it.qty_affected}件：${it.bad_summary || ''}（申报等级：${ISSUE_LEVEL_LABEL[b.level]}）`, false);
+      }
+    }
     writeLog(u, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
   });
   ok(res, it);

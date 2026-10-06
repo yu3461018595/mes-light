@@ -1572,19 +1572,21 @@
     const issue = find('quality_issues', id);
     const title = `${order ? order.code : '工单'} · ${opt.process_name || '工序'} 出现${ISSUE_LEVEL_LABEL[issue.level]}质量异常`;
     const body = `不良${issue.qty_affected}件：${issue.bad_summary || '未填写原因'}（待处理）`;
-    // 上报口径（2026-10-06）：非检验员上报（source=report）只留存记录不通知；
-    // 检验员上报/检验判定/来料判定开单（或致命级）→ 通知责任人 + 厂部管理层（escalate 站内升级）
+    // 上报口径（2026-10-06 修订）：致命级（任何来源）→ 通知责任人 + 管理层；
+    // 检验员上报/检验判定/来料判定开单（非致命）→ 仅通知责任人；
+    // 非检验员上报（source=report）→ 只留存记录，申报重大时由上报接口另行通知检验员
     const creator = opt.created_by ? find('users', num(opt.created_by)) : null;
     const creatorIsInspector = !!(creator && creator.role === 'inspector');
-    const notifyAll = creatorIsInspector || (opt.source || 'inspect') !== 'report' || issue.level === 'critical';
-    if (notifyAll) {
+    if (issue.level === 'critical') {
       notifyIssue(issue, assignee, 'created', title, body);
       const admins = T('users').filter((u2) => u2.role === 'admin' && u2.active && (!assignee || u2.id !== assignee.id));
       pushMessage({
         source: 'quality', toUsers: admins, kind: 'escalate', issue_id: issue.id,
         ref_type: 'issue', ref_id: issue.id, link: '#/quality/issue/' + issue.id,
-        title: `质量异常（${ISSUE_LEVEL_LABEL[issue.level] || issue.level}）：${issue.code}`, body: `${title}　${body}`,
+        title: `重大质量异常：${issue.code}`, body: `${title}　${body}`,
       });
+    } else if (creatorIsInspector || (opt.source || 'inspect') !== 'report') {
+      notifyIssue(issue, assignee, 'created', title, body);
     }
     return issue;
   }
@@ -1853,8 +1855,8 @@
   R('POST', '/quality_issues', (_p, b) => {
     if (canInspect()) return fail('无权限', 403);
     const act = actor();
-    // 上报口径（2026-10-06）：非检验员上报一律「待定级」且只留存记录不通知；
-    // 检验员上报可直接定级（缺省 major），创建即通知责任人 + 厂部管理层
+    // 上报口径（2026-10-06）：非检验员上报正式等级一律「待定级」（检验员判定），只留存记录；
+    // 检验员上报可直接定级（缺省 major）；操作工申报重大（严重/致命）→ 另通知全体检验员
     const lv = (b.source || 'report') === 'report'
       ? (act.role === 'inspector' && ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'pending')
       : (b.level || 'major');
@@ -1864,6 +1866,12 @@
       product_name: b.product_name || null, process_name: b.process_name || null,
       qty_affected: num(b.qty_affected), bad_summary: b.bad_summary || b.title || '', created_by: act.id,
     });
+    if ((b.source || 'report') === 'report' && act.role !== 'inspector' && ['major', 'critical'].includes(b.level)) {
+      T('users').filter((u2) => u2.role === 'inspector' && u2.active).forEach((ip) => {
+        notifyIssue(it, ip, 'created', `操作工上报重大异常，请及时定级：${it.code}`,
+          `${it.process_name || ''} 不良${it.qty_affected}件：${it.bad_summary || ''}（申报等级：${ISSUE_LEVEL_LABEL[b.level]}）`);
+      });
+    }
     writeLog(act, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
     return ok(it);
   });

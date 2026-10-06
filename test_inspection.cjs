@@ -290,17 +290,35 @@ async function api(m, u, b, t) {
     chk('管理员上报成功(待定级)', adminRep.ok && adminRep.data.level === 'pending', adminRep.data);
     const adminDet = await H('GET', '/api/quality_issues/' + adminRep.data.id);
     const adminKinds = (adminDet.data.timeline || []).map((n) => n.kind);
-    chk('非检验员上报：不推送任何通知(timeline 为空)', adminKinds.length === 0, adminKinds);
+    chk('非检验员上报(未申报)：不推送任何通知(timeline 为空)', adminKinds.length === 0, adminKinds);
 
-    // 检验员上报：可直接定级，创建即通知责任人(created) + 厂部管理层(escalate)
+    // 非检验员申报重大（严重）→ 通知检验员及时定级（不通知责任人/管理层），正式等级仍待定级
+    const adminMajor = await H('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'major', qty_affected: 5, bad_summary: '管理员代报：疑似批量开裂' });
+    chk('管理员申报重大上报成功(仍待定级)', adminMajor.ok && adminMajor.data.level === 'pending', adminMajor.data);
+    const adminMajorDet = await H('GET', '/api/quality_issues/' + adminMajor.data.id);
+    const adminMajorKinds = (adminMajorDet.data.timeline || []).map((n) => n.kind);
+    chk('申报重大：通知检验员(created)', adminMajorKinds.includes('created'), adminMajorKinds);
+    chk('申报重大：不推管理层(无 escalate)', !adminMajorKinds.includes('escalate'), adminMajorKinds);
+    const majorTos = (adminMajorDet.data.timeline || []).filter((n) => n.kind === 'created').map((n) => n.to_user_id);
+    const usersAll2 = await H('GET', '/api/users');
+    const inspIds = (usersAll2.data || []).filter((u2) => u2.role === 'inspector').map((u2) => u2.id);
+    chk('申报重大：通知对象均为检验员', majorTos.length > 0 && majorTos.every((id2) => inspIds.includes(id2)), { majorTos, inspIds });
+
+    // 非检验员申报轻微 → 仅留存，无任何通知
+    const adminMinor = await H('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'minor', qty_affected: 1, bad_summary: '管理员代报：轻微划伤' });
+    const adminMinorDet = await H('GET', '/api/quality_issues/' + adminMinor.data.id);
+    const adminMinorKinds = (adminMinorDet.data.timeline || []).map((n) => n.kind);
+    chk('申报轻微：仅留存(timeline 为空)', adminMinor.ok && adminMinor.data.level === 'pending' && adminMinorKinds.length === 0, adminMinorKinds);
+
+    // 检验员上报：可直接定级；严重级仅通知责任人，不推管理层
     const qcReport = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'major', qty_affected: 2, bad_summary: '质检员发现材质不符' }, qc.data.token);
     chk('质检员上报等级生效(major)', qcReport.ok && qcReport.data.level === 'major', qcReport.data);
     const qcDet0 = await api('GET', '/api/quality_issues/' + qcReport.data.id, null, null, qc.data.token);
     const qcKinds0 = (qcDet0.data.timeline || []).map((n) => n.kind);
-    chk('质检员上报：通知责任人(created)', qcKinds0.includes('created'), qcKinds0);
-    chk('质检员上报：升级管理层(有 escalate)', qcKinds0.includes('escalate'), qcKinds0);
+    chk('质检员上报严重级：通知责任人(created)', qcKinds0.includes('created'), qcKinds0);
+    chk('质检员上报严重级：不推管理层(无 escalate)', !qcKinds0.includes('escalate'), qcKinds0);
 
-    // 检验员上报致命级 → 同样通知责任人 + 管理层
+    // 检验员上报致命级 → 通知责任人 + 管理层
     const qcCrit = await api('POST', '/api/quality_issues', { order_id: ordTech.data.id, source: 'report', level: 'critical', qty_affected: 4, bad_summary: '质检员上报：关键件开裂' }, qc.data.token);
     chk('质检员上报致命级生效', qcCrit.ok && qcCrit.data.level === 'critical', qcCrit.data);
     const qcCritDet = await api('GET', '/api/quality_issues/' + qcCrit.data.id, null, null, qc.data.token);

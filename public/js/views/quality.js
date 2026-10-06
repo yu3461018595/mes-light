@@ -346,27 +346,28 @@ Views.quality = {
         <label class="field"><span>关联工单</span><select class="input" data-k="order_id">${UI.options(opts.map(([id, n]) => ({ id, name: n })), null, 'name')}</select></label>
         ${isInsp
           ? `<label class="field"><span>异常等级</span><select class="input" data-k="level"><option value="major">严重</option><option value="minor">轻微</option><option value="critical">致命</option></select></label>`
-          : `<label class="field"><span>异常等级</span><div class="input" style="background:#f5f7fa;color:#6b7682">待检验员判定</div></label>`}
+          : `<label class="field"><span>严重程度（申报）</span><select class="input" data-k="level"><option value="minor">轻微</option><option value="major">严重</option><option value="critical">致命</option></select></label>`}
         <label class="field"><span>工序 / 环节</span><input class="input" data-k="process_name" placeholder="如：车削 / 来料 / 装配"></label>
         <label class="field"><span>影响数量</span><input class="input" type="number" min="0" data-k="qty_affected" value="0"></label>
       </div>
       <label class="field"><span>问题描述 <b style="color:var(--danger)">*</b></span>
         <input class="input" data-k="bad_summary" placeholder="如：来料圆钢表面锈蚀，影响下料质量"></label>
       <p class="small muted" style="margin-top:6px">${isInsp
-        ? '提示：检验员上报的异常将直接通知责任人与厂部管理层。'
-        : '提示：报工上报的异常仅留存记录与统计，由质检员定级后通知责任人与厂部管理层。'}</p>`,
+        ? '提示：致命级将通知责任人与厂部管理层；轻微/严重仅通知责任人。'
+        : '提示：上报仅留存记录与统计，正式等级由检验员判定；申报「严重/致命」会通知检验员及时定级。'}</p>`,
       onOk: async (mask) => {
         const g = (k) => { const e2 = mask.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
         if (!g('bad_summary').trim()) throw new Error('请填写问题描述');
-        const payload = {
+        await API.post('/quality_issues', {
           order_id: g('order_id') ? Number(g('order_id')) : null,
-          source: 'report',
+          source: 'report', level: g('level') || (isInsp ? 'major' : 'minor'),
           process_name: g('process_name'), qty_affected: Number(g('qty_affected')) || 0,
           bad_summary: g('bad_summary').trim(),
-        };
-        if (isInsp) payload.level = g('level') || 'major';
-        await API.post('/quality_issues', payload);
-        UI.toast(isInsp ? '异常已上报，已通知责任人与厂部管理层' : '异常已上报（待检验员定级）', 'ok');
+        });
+        const lv = g('level');
+        UI.toast(isInsp
+          ? (lv === 'critical' ? '异常已上报，已通知责任人与厂部管理层' : '异常已上报，已通知责任人')
+          : (lv === 'minor' ? '异常已上报（仅留存记录）' : '重大异常已上报，已通知检验员定级'), 'ok');
         this.render(document.getElementById('view'));
       },
     });
