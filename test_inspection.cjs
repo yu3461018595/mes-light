@@ -449,6 +449,35 @@ async function api(m, u, b, t) {
     chk('管理员(非责任人)不再收到不良提醒', ad2 === ad1, { ad1, ad2 });
     const owMsgs = ((await api('GET', '/api/notifications', null, owTok9)).data || []).filter((n) => /报工不良提醒/.test(n.title || ''));
     chk('提醒标题含不良率', /（10%）/.test(owMsgs[0] && owMsgs[0].title || ''), owMsgs[0] && owMsgs[0].title);
+
+    // 18) 检验员异常上报（手机端/PC 同接口）：严重程度由检验员直定级；无论等级均知会管理层
+    console.log('\n--- 18) 检验员异常上报与管理层知会 ---');
+    const sfx8 = String(Date.now() + 88).slice(-6);
+    const qcTok18 = (await api('POST', '/api/login', { username: 'qc01', password: '123456' }, lg.data.token)).data.token;
+    chk('建质检员会话', !!qcTok18, !!qcTok18);
+    const cntN = async (t, re) => (((await api('GET', '/api/notifications', null, t)).data || []).filter((n) => re.test(n.title || ''))).length;
+    const aMinor0 = await cntN(lg.data.token, /检验员上报质量异常（轻微）/);
+    const aMajor0 = await cntN(lg.data.token, /检验员上报质量异常（严重）/);
+    const aCrit0 = await cntN(lg.data.token, /重大质量异常/);
+    const iGrade0 = await cntN(qcTok18, /请及时定级/);
+    // 18.1 检验员上报轻微 → 直定级 minor + 管理层站内知会
+    const ri1 = await api('POST', '/api/quality_issues', { source: 'report', level: 'minor', order_id: ord9.data.id, process_name: '外观', qty_affected: 3, bad_summary: '轻微划伤18-' + sfx8 }, qcTok18);
+    chk('检验员上报轻微成功且直定级', ri1.ok && ri1.data.level === 'minor', ri1);
+    chk('管理层收到轻微上报知会', await cntN(lg.data.token, /检验员上报质量异常（轻微）/) === aMinor0 + 1, { aMinor0 });
+    // 18.2 检验员上报严重 → 直定级 major + 管理层站内知会
+    const ri2 = await api('POST', '/api/quality_issues', { source: 'report', level: 'major', order_id: ord9.data.id, process_name: '外观', qty_affected: 12, bad_summary: '批量气泡18-' + sfx8 }, qcTok18);
+    chk('检验员上报严重成功且直定级', ri2.ok && ri2.data.level === 'major', ri2);
+    chk('管理层收到严重上报知会', await cntN(lg.data.token, /检验员上报质量异常（严重）/) === aMajor0 + 1, { aMajor0 });
+    // 18.3 检验员上报致命 → createQualityIssue 升级管理层（escalate），不重复发「检验员上报」知会
+    const ri3 = await api('POST', '/api/quality_issues', { source: 'report', level: 'critical', order_id: ord9.data.id, process_name: '装配', qty_affected: 50, bad_summary: '致命缺陷18-' + sfx8 }, qcTok18);
+    chk('检验员上报致命成功且直定级', ri3.ok && ri3.data.level === 'critical', ri3);
+    chk('管理层收到致命升级通知', await cntN(lg.data.token, /重大质量异常/) === aCrit0 + 1, { aCrit0 });
+    // 18.4 技术员（非检验员）申报重大 → 待定级，不通知管理层，通知检验员定级
+    const hitsBefore4 = ((await api('GET', '/api/notifications', null, lg.data.token)).data || []).filter((n) => /检验员上报质量异常/.test(n.title || '')).map((n) => n.title + ' issue=' + n.issue_id);
+    const ri4 = await H('POST', '/api/quality_issues', { source: 'report', level: 'major', order_id: ord9.data.id, process_name: '装配', qty_affected: 8, bad_summary: '技术员申报18-' + sfx8 });
+    chk('技术员申报创建成功且待定级', ri4.ok && ri4.data.level === 'pending', ri4);
+    chk('技术员申报不发「检验员上报」管理层知会', await cntN(lg.data.token, /检验员上报质量异常/) === aMinor0 + aMajor0 + 2, { got: await cntN(lg.data.token, /检验员上报质量异常/), expect: aMinor0 + aMajor0 + 2, hitsBefore4 });
+    chk('检验员收到定级请求', await cntN(qcTok18, /请及时定级/) === iGrade0 + 1, { iGrade0 });
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));

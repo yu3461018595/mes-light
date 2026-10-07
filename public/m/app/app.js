@@ -162,6 +162,7 @@
         case 'order': return await renderOrder(args[0]);
         case 'inspect': return await renderInspect();
         case 'quality': return await renderQuality();
+        case 'report_issue': return await renderReportIssue();
         case 'issue': return await renderIssue(args[0]);
         case 'stocks': return await renderStocks();
         case 'pick': return await renderPick();
@@ -381,7 +382,18 @@
         <div class="card-b" style="display:flex;gap:8px;padding:10px 12px;flex-wrap:wrap">
           <button class="btn ghost sm" data-go="pick" style="flex:1">🧰 领料申请</button>
           <button class="btn ghost sm" data-go="equip" style="flex:1">⚙️ 设备点检</button>
+          <button class="btn ghost sm" data-go="report_issue" style="flex:1">⚠️ 异常上报</button>
           ${isManager ? `<button class="btn ghost sm" data-go="stocktake" style="flex:1">📋 扫码盘点</button>` : ''}
+        </div></div>`);
+    }
+
+    // 质检快捷入口：质检员现场发现异常可直接上报管理层（可选严重程度）
+    if (isInspector) {
+      blocks.push(`<div class="card"><div class="card-h"><h3>质检快捷</h3></div>
+        <div class="card-b" style="display:flex;gap:8px;padding:10px 12px;flex-wrap:wrap">
+          <button class="btn ghost sm" data-go="report_issue" style="flex:1">⚠️ 异常上报</button>
+          <button class="btn ghost sm" data-go="inspect" style="flex:1">🔍 质检台</button>
+          <button class="btn ghost sm" data-go="incoming" style="flex:1">📥 来料检验</button>
         </div></div>`);
     }
 
@@ -794,6 +806,7 @@
     const open = list.filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
     const closed = list.filter((x) => !['open', 'processing', 'verifying'].includes(x.status));
     $view.innerHTML = `
+      ${isManager ? `<button class="btn ok sm" id="qNewIssue" style="width:100%;margin-bottom:10px">⚠️ 上报质量异常</button>` : ''}
       <div class="seg">
         <button class="on" data-f="open">待处理<i>${open.length}</i></button>
         <button data-f="done">已闭环<i>${closed.length}</i></button>
@@ -801,6 +814,8 @@
       </div>
       <div class="card nopad" id="issueList"></div>
       <div style="height:10px"></div>`;
+    const newBtn = $view.querySelector('#qNewIssue');
+    if (newBtn) newBtn.onclick = () => nav('#/report_issue');
     const paint = (f) => {
       const rows = f === 'open' ? open : f === 'done' ? closed : list;
       $view.querySelector('#issueList').innerHTML = rows.length ? rows.map((it) => `
@@ -821,6 +836,100 @@
       $view.querySelectorAll('.seg button').forEach((x) => x.classList.toggle('on', x === b));
       paint(b.dataset.f);
     });
+  }
+
+  /* ---------------- 页面：检验员异常上报（可选严重程度，直达管理层） ---------------- */
+  const RI_LV = {
+    minor: { label: '轻微', color: '#f0a30a', bg: '#fff8e1', desc: '轻微＝不影响交付的小瑕疵，留存记录并通知责任人与管理层' },
+    major: { label: '严重', color: '#e07b00', bg: '#fff3e0', desc: '严重＝需返工/让步处理，影响质量与进度，管理层重点跟进' },
+    critical: { label: '致命', color: '#d93b3b', bg: '#fdecec', desc: '致命＝重大质量事故，将升级厂部管理层（站内+群通知）' },
+  };
+  async function renderReportIssue() {
+    const me = await ensureMe();
+    if (me.role === 'worker') return renderError('异常上报面向质检/管理人员；操作工请通过报工页登记不良，由检验判定后处理');
+    const orders = await get('/api/orders?status=running,paused,released').catch(() => []);
+    S.riLevel = '';
+    $view.innerHTML = `
+      <div class="card"><div class="card-b">
+        <div class="ocode">异常上报</div>
+        <div class="pname">${esc(me.name)} · 质检现场发现的问题，上报直达管理层</div>
+      </div></div>
+      <div class="card"><div class="card-b">
+        <div class="field" style="margin-bottom:10px"><span>关联工单（在产 / 已下发）</span>
+          <select class="ipt ri-order">
+            <option value="">不关联工单</option>
+            ${orders.map((o) => `<option value="${o.id}">${esc(o.code)} ${esc(o.product_name || '')}${o.status === 'paused' ? '（已暂停）' : ''}</option>`).join('')}
+          </select></div>
+        <div class="field ri-step-wrap" style="margin-bottom:10px" hidden><span>工序位置</span>
+          <select class="ipt ri-step"></select></div>
+        <div class="field" style="margin-bottom:10px"><span>严重程度（由质检员判定）<b style="color:var(--danger)">*</b></span>
+          <div class="btn-row" style="gap:8px">
+            <button class="btn ghost sm ri-lv" data-lv="minor" style="flex:1;padding:10px 4px">🟡 轻微</button>
+            <button class="btn ghost sm ri-lv" data-lv="major" style="flex:1;padding:10px 4px">🟠 严重</button>
+            <button class="btn ghost sm ri-lv" data-lv="critical" style="flex:1;padding:10px 4px">🔴 致命</button>
+          </div>
+          <div class="t3 ri-lv-hint" style="margin-top:6px">请选择严重程度</div></div>
+        <div class="field" style="margin-bottom:10px"><span>影响数量（不良件数）</span>
+          <input class="ipt ri-qty" type="number" inputmode="numeric" min="0" value="0"></div>
+        <div class="field" style="margin-bottom:4px"><span>问题描述 <b style="color:var(--danger)">*</b></span>
+          <input class="ipt ri-summary" placeholder="如：外观划伤集中出现，疑似模具磨损"></div>
+        <button class="btn ok" id="riSubmit" style="width:100%;margin-top:12px">提交上报</button>
+        <div class="mask-hint" style="margin-top:8px">提交后生成质量异常单：责任处理人收到待办，厂部管理层同步收到通知。</div>
+      </div></div>
+      <div style="height:10px"></div>`;
+    const lvBtns = [...$view.querySelectorAll('.ri-lv')];
+    const paintLv = () => {
+      lvBtns.forEach((b) => {
+        const on = b.dataset.lv === S.riLevel;
+        const conf = RI_LV[b.dataset.lv];
+        b.style.background = on ? conf.color : '';
+        b.style.color = on ? '#fff' : '';
+        b.style.borderColor = on ? conf.color : '';
+      });
+      $view.querySelector('.ri-lv-hint').textContent = S.riLevel ? RI_LV[S.riLevel].desc : '请选择严重程度';
+    };
+    lvBtns.forEach((b) => b.onclick = () => { S.riLevel = b.dataset.lv; paintLv(); });
+    paintLv();
+    $view.querySelector('.ri-order').onchange = async (e) => {
+      const wrap = $view.querySelector('.ri-step-wrap');
+      const sel = $view.querySelector('.ri-step');
+      const oid = e.target.value;
+      if (!oid) { wrap.hidden = true; sel.innerHTML = ''; return; }
+      try {
+        const o = await get('/api/orders/' + oid);
+        const steps = (o && o.steps) || [];
+        sel.innerHTML = `<option value="">整单（不指定工序）</option>` +
+          steps.map((s) => `<option value="${s.id}">第 ${s.seq_no || s.seq} 道 ${esc(s.process_name || '')}</option>`).join('');
+        wrap.hidden = !steps.length;
+      } catch (err) { wrap.hidden = true; }
+    };
+    $view.querySelector('#riSubmit').onclick = async () => {
+      const orderId = $view.querySelector('.ri-order').value;
+      const stepId = $view.querySelector('.ri-step').value;
+      const qty = Math.max(0, Math.floor(num($view.querySelector('.ri-qty').value)));
+      const summary = ($view.querySelector('.ri-summary').value || '').trim();
+      if (!S.riLevel) return toast('请选择严重程度');
+      if (!summary) return toast('请填写问题描述');
+      const lv = RI_LV[S.riLevel];
+      if (!confirm(`确认上报「${lv.label}」异常？${orderId ? '\n工单：' + $view.querySelector('.ri-order').selectedOptions[0].textContent : ''}\n不良 ${qty} 件：${summary}`)) return;
+      try {
+        const r = await post('/api/quality_issues', {
+          source: 'report', level: S.riLevel,
+          order_id: orderId ? num(orderId) : null,
+          order_step_id: stepId ? num(stepId) : null,
+          qty_affected: qty, bad_summary: summary,
+        });
+        okMask('已上报 ' + (r.code || ''), [
+          '严重程度：<b>' + (LEVEL_LABEL[r.level] || r.level) + '</b>',
+          r.level === 'critical'
+            ? '已通知责任处理人，并升级厂部管理层（站内+群通知）'
+            : '已通知责任处理人与厂部管理层，请跟进处理进度',
+        ].join('<br>'), [
+          { text: '再报一条', onClick: () => renderReportIssue() },
+          { text: '返回', onClick: () => nav('#/home', true) },
+        ]);
+      } catch (e) { toast(e.message); }
+    };
   }
 
   /* ---------------- 页面：来料检验（IQC） ---------------- */

@@ -2136,6 +2136,16 @@
           `${it.process_name || ''} 不良${it.qty_affected}件：${it.bad_summary || ''}（申报等级：${ISSUE_LEVEL_LABEL[b.level]}）`);
       });
     }
+    // 检验员主动上报：无论等级均知会管理层（致命级已由 createQualityIssue 升级）
+    if ((b.source || 'report') === 'report' && act.role === 'inspector' && it.level !== 'critical') {
+      const admins = T('users').filter((u2) => u2.role === 'admin' && u2.active && u2.id !== it.assignee_user_id);
+      pushMessage({
+        source: 'quality', toUsers: admins, kind: 'created', issue_id: it.id,
+        ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+        title: `检验员上报质量异常（${ISSUE_LEVEL_LABEL[it.level] || it.level}）：${it.code}`,
+        body: `${it.order_code || '工单'} · ${it.process_name || '工序'} 不良${it.qty_affected}件：${it.bad_summary || '未填原因'}`,
+      });
+    }
     writeLog(act, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
     return ok(it);
   });

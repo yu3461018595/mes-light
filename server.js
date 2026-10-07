@@ -2297,6 +2297,17 @@ route('POST', '/api/quality_issues', ['admin', 'technician', 'inspector'], (req,
           `${it.process_name || ''} 不良${it.qty_affected}件：${it.bad_summary || ''}（申报等级：${ISSUE_LEVEL_LABEL[b.level]}）`, false);
       }
     }
+    // 检验员主动上报（2026-10-07）：严重程度由检验员直接判定；无论等级均知会厂部管理层
+    // （致命级已由 createQualityIssue 升级管理层站内+webhook，此处补推非致命级的站内通知）
+    if ((b.source || 'report') === 'report' && u.role === 'inspector' && lv !== 'critical') {
+      const admins = all("SELECT id,name FROM users WHERE role='admin' AND active=1").filter((a) => a.id !== it.assignee_user_id);
+      pushMessage({
+        source: 'quality', toUsers: admins, kind: 'created', issue_id: it.id,
+        ref_type: 'issue', ref_id: it.id, link: '#/quality/issue/' + it.id,
+        title: `检验员上报质量异常（${ISSUE_LEVEL_LABEL[lv] || lv}）：${it.code}`,
+        body: `${it.order_code || '工单'} · ${it.process_name || '工序'} 不良${it.qty_affected}件：${it.bad_summary || '未填原因'}`,
+      });
+    }
     writeLog(u, '上报质量异常', it.code + ' ' + (b.bad_summary || ''));
   });
   ok(res, it);

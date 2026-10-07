@@ -353,7 +353,7 @@ Views.quality = {
       <label class="field"><span>问题描述 <b style="color:var(--danger)">*</b></span>
         <input class="input" data-k="bad_summary" placeholder="如：来料圆钢表面锈蚀，影响下料质量"></label>
       <p class="small muted" style="margin-top:6px">${isInsp
-        ? '提示：致命级将通知责任人与厂部管理层；轻微/严重仅通知责任人。'
+        ? '提示：严重程度由你判定；上报将同步通知责任处理人与厂部管理层，致命级额外升级（群通知）。'
         : '提示：上报仅留存记录与统计，正式等级由检验员判定；申报「严重/致命」会通知检验员及时定级。'}</p>`,
       onOk: async (mask) => {
         const g = (k) => { const e2 = mask.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
@@ -366,7 +366,7 @@ Views.quality = {
         });
         const lv = g('level');
         UI.toast(isInsp
-          ? (lv === 'critical' ? '异常已上报，已通知责任人与厂部管理层' : '异常已上报，已通知责任人')
+          ? (lv === 'critical' ? '异常已上报，已通知责任人与厂部管理层（致命级已升级群通知）' : '异常已上报，已通知责任人与厂部管理层')
           : (lv === 'minor' ? '异常已上报（仅留存记录）' : '重大异常已上报，已通知检验员定级'), 'ok');
         this.render(document.getElementById('view'));
       },
