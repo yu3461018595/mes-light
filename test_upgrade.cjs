@@ -81,7 +81,7 @@ async function raw(method, url, token) {
     chk('计件工资按工资降序', (wage.data.rows || []).every((r, i, a) => i === 0 || Number(a[i - 1].wage) >= Number(r.wage)), JSON.stringify(wage.data.rows));
 
     const wageCsv = await raw('GET', '/api/stats/piece_wage?days=30&format=csv', token);
-    chk('计件工资 CSV 导出', wageCsv.status === 200 && wageCsv.ct.indexOf('text/csv') >= 0 && wageCsv.text.indexOf('计件工资(元)') >= 0, wageCsv.text.slice(0, 120));
+    chk('工资核算 CSV 导出', wageCsv.status === 200 && wageCsv.ct.indexOf('text/csv') >= 0 && wageCsv.text.indexOf('工资(元)') >= 0, wageCsv.text.slice(0, 120));
 
     const repCsv = await raw('GET', '/api/reports?format=csv', token);
     chk('报工记录 CSV 导出', repCsv.status === 200 && repCsv.text.indexOf('工单号') >= 0 && repCsv.text.indexOf('合格数') >= 0, repCsv.text.slice(0, 120));

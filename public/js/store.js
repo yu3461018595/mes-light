@@ -139,7 +139,11 @@
     const w = rp.work_center_id ? find('work_centers', rp.work_center_id) : null;
     const badReasons = T('report_bad_reasons').filter((x) => x.report_id === rp.id)
       .map((x) => ({ bad_reason: x.bad_reason, bad_reason_id: x.bad_reason_id, bad_reason_detail: x.bad_reason_detail, qty: x.qty }));
-    return Object.assign({}, rp, { worker_name: u.name, order_code: o.code, process_name: pr ? pr.name : '', wc_name: w ? w.name : '', bad_reasons: badReasons });
+    const isTime = String(rp.wage_type) === 'time';
+    const rate = rp.unit_price !== undefined && rp.unit_price !== null ? num(rp.unit_price) : (isTime ? num(o.hourly_rate) : num(pr && pr.std_price));
+    const amount = Math.round((isTime ? num(rp.work_hours) * rate : num(rp.qty_good) * rate) * 100) / 100;
+    return Object.assign({}, rp, { worker_name: u.name, order_code: o.code, process_name: pr ? pr.name : '', wc_name: w ? w.name : '', bad_reasons: badReasons,
+      wage_type: rp.wage_type || 'piece', work_hours: num(rp.work_hours), unit_price: rate, amount });
   }
 
   /* ------------------------------ 报工核心 ------------------------------ */
@@ -215,11 +219,17 @@
       // 检验点：报工后该工序落「待检」，由质检员判定后才放行完工（一期检验模式）
       const needInspect = !!String(step.inspect_type || '').trim();
 
+      // 工资核算快照：计件=合格数×工序单价；计时=工时×工单时薪
+      const isTime = String(order.wage_type) === 'time';
+      const workHours = Math.max(0, num(it.work_min)) / 60;
+      if (isTime && workHours <= 0) throw new Error('计时核算工单报工需填写实动工时（小时）');
+      const snapRate = isTime ? (num(order.hourly_rate) || 0) : (num((find('processes', step.process_id) || {}).std_price) || 0);
       const rid = insert('reports', {
         id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
         bad_reason: badEntries[0] ? badEntries[0].bad_reason : '', bad_reason_id: badEntries[0] ? badEntries[0].bad_reason_id : null, work_min: num(it.work_min),
         report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
+        unit_price: snapRate, wage_type: isTime ? 'time' : 'piece', work_hours: workHours > 0 ? workHours : null,
       });
       for (const e of badEntries) {
         insert('report_bad_reasons', { id: nextId('report_bad_reasons'), report_id: rid, bad_reason_id: e.bad_reason_id, bad_reason: e.bad_reason, bad_reason_detail: e.bad_reason_detail, qty: e.qty });
@@ -241,7 +251,8 @@
       if (step.id === lastStepId && good > 0 && !needInspect) {
         autoIn = autoFinishInStatic(order, product, good, act, rid);
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn });
+      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn,
+        wage: Math.round((isTime ? workHours * snapRate : good * snapRate) * 100) / 100 });
     });
 
     if (!T('order_steps').some((s) => s.order_id === order.id && s.status !== 'done')) {
@@ -251,7 +262,7 @@
     const tb = items.reduce((a, it) => a + Math.max(0, Math.floor(num((it.bad_reasons ? (it.bad_reasons.reduce((s, e) => s + Math.max(0, Math.floor(num(e.qty))), 0)) : it.qty_bad)))), 0);
     writeLog(act, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + tg + ' / 不良 ' + tb);
     try { notifyAfterReport(order, act, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
-    return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
+    return { count: items.length, steps: results, finished: results.some((r) => r.finished), total_wage: Math.round(results.reduce((a, r) => a + (r.wage || 0), 0) * 100) / 100 };
   }
   // 报工后的负责人通知：不良率达阈值（minor_ratio，默认5%）才提醒，收件人=责任人+质检员
   function notifyAfterReport(order, act, items, results, product) {
@@ -434,6 +445,8 @@
       status: 'created', remark: b.remark || '', created_by: actor().id,
       owner_user_id: b.owner_user_id ? num(b.owner_user_id) : null,
       owner_name: b.owner_user_id ? ((u8) => (u8 && u8.active && u8.role !== 'worker' ? u8.name : null))(find('users', b.owner_user_id)) : null,
+      wage_type: String(b.wage_type) === 'time' ? 'time' : 'piece',
+      hourly_rate: String(b.wage_type) === 'time' ? Math.max(0, num(b.hourly_rate)) : null,
       created_at: nowISO(), start_time: null, finish_time: null, close_reason: '',
     });
     T('route_steps').filter((s) => s.route_id === route.id).sort((a, b) => a.seq - b.seq)
@@ -459,10 +472,18 @@
       ownerPatch.owner_user_id = null;
       ownerPatch.owner_name = null;
     }
+    const wagePatch = {};
+    if (Object.prototype.hasOwnProperty.call(b, 'wage_type')) {
+      const wt = String(b.wage_type) === 'time' ? 'time' : 'piece';
+      const hr = wt === 'time' ? Math.max(0, num(b.hourly_rate)) : null;
+      if (wt === 'time' && !(hr > 0)) return fail('计时核算工单需填写时薪（元/小时）', 400);
+      wagePatch.wage_type = wt;
+      wagePatch.hourly_rate = hr;
+    }
     update('orders', before.id, {
       product_id: num(b.product_id), route_id: num(b.route_id), customer_id: b.customer_id ? num(b.customer_id) : null,
       qty_plan: num(b.qty_plan), priority: num(b.priority, 2), plan_start: b.plan_start, plan_end: b.plan_end, remark: b.remark || '',
-      ...ownerPatch,
+      ...ownerPatch, ...wagePatch,
     });
     if (num(b.route_id) !== before.route_id || num(b.qty_plan) !== before.qty_plan) {
       DB.order_steps = T('order_steps').filter((s) => s.order_id !== before.id);
@@ -1048,7 +1069,7 @@
   });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */
-  /* 计件工资（静态镜像）：合格数 × 计件单价（报工快照优先，回退工序档案）；普通员工仅本人 */
+  /* 工资核算（静态镜像）：计件=合格数×单价快照；计时=工时×时薪快照；普通员工仅本人 */
   R('GET', '/stats/piece_wage', (_p, _b, q) => {
     const me = Store.currentUser || {};
     const canAll = ['admin', 'technician'].includes(me.role);
@@ -1063,19 +1084,24 @@
       const u = find('users', r.worker_id) || { name: '?', team: '' };
       const s = r.order_step_id ? find('order_steps', r.order_step_id) : null;
       const pr = s ? find('processes', s.process_id) : null;
-      const price = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : num(pr && pr.std_price);
+      const o = r.order_id ? find('orders', r.order_id) : null;
+      const isTime = String(r.wage_type) === 'time';
+      const rate = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : (isTime ? num(o && o.hourly_rate) : num(pr && pr.std_price));
+      const amt = isTime ? num(r.work_hours) * rate : num(r.qty_good) * rate;
       const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0, cnt: 0, wage: 0 });
       e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); e.cnt++;
-      e.wage = Math.round((e.wage + num(r.qty_good) * price) * 100) / 100;
+      e.wage = Math.round((e.wage + amt) * 100) / 100;
     }
     let detail = null;
     if (selfId && q.detail) {
       const oById = {}; T('orders').forEach((o) => oById[o.id] = o);
       detail = T('reports').filter((r) => num(r.worker_id) === selfId && inRange(r.report_date))
         .map((r) => { const s = r.order_step_id ? find('order_steps', r.order_step_id) : null; const pr = s ? find('processes', s.process_id) : null;
-          const price = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : num(pr && pr.std_price);
-          return { report_date: r.report_date, qty_good: r.qty_good, qty_bad: r.qty_bad, unit_price: price,
-            amount: Math.round(num(r.qty_good) * price * 100) / 100, order_code: (oById[r.order_id] || {}).code || '', process_name: pr ? pr.name : '' }; })
+          const o = oById[r.order_id] || {};
+          const isTime = String(r.wage_type) === 'time';
+          const rate = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : (isTime ? num(o.hourly_rate) : num(pr && pr.std_price));
+          return { report_date: r.report_date, qty_good: r.qty_good, qty_bad: r.qty_bad, wage_type: r.wage_type, work_hours: num(r.work_hours), unit_price: rate,
+            amount: Math.round((isTime ? num(r.work_hours) * rate : num(r.qty_good) * rate) * 100) / 100, order_code: o.code || '', process_name: pr ? pr.name : '' }; })
         .sort((a, b) => String(b.report_date).localeCompare(String(a.report_date)));
     }
     return ok({ month, days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good), detail, self_only: !canAll });
@@ -1206,7 +1232,8 @@
     const canManage = ['admin', 'technician'].includes(u.role);
     const order = { id: o.id, code: o.code, status: o.status, qty_plan: o.qty_plan,
       qty_done: lastStep ? num(lastStep.qty_good) : 0,
-      qty_bad: stepsAll.reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec };
+      qty_bad: stepsAll.reduce((a, s) => a + num(s.qty_bad), 0), product_name: p.name, spec: p.spec,
+      wage_type: o.wage_type || 'piece', hourly_rate: num(o.hourly_rate) };
     const steps = stepsAll.map((s) => {
       const pr = find('processes', s.process_id) || {};
       let allow = s.allow_report === 0 ? 0 : 1;

@@ -175,6 +175,25 @@ async function api(method, url, body, token) {
     const pwSelf = await api('GET', '/api/stats/piece_wage?days=30', null, wTok);
     chk('操作工仅能查本人工资', pwSelf.ok && pwSelf.data.self_only === true && (pwSelf.data.rows || []).every((r) => r.id === workerId), JSON.stringify(pwSelf.data));
 
+    // ---------- 4.7 计时核算工单：工单级选择核算方式，工资=实动工时×时薪快照 ----------
+    const rt = await H('POST', '/api/orders', { product_id: pid, route_id: o1.route_id, qty_plan: 100, wage_type: 'time', hourly_rate: 30 });
+    chk('创建计时核算工单成功', rt.ok && rt.data.id, JSON.stringify(rt));
+    const noRate = await H('POST', '/api/orders', { product_id: pid, route_id: o1.route_id, qty_plan: 100, wage_type: 'time', hourly_rate: 0 });
+    chk('计时工单无时薪被拒', noRate.ok === false, JSON.stringify(noRate));
+    await H('PUT', '/api/orders/' + rt.data.id + '/status', { status: 'released' });
+    const tSteps = (await H('GET', '/api/orders/' + rt.data.id)).data.steps;
+    const repT0 = await api('POST', '/api/reports', { order_id: rt.data.id, order_step_id: tSteps[0].id, qty_good: 10, qty_bad: 0 }, wTok);
+    chk('计时工单缺工时报工被拒', repT0.ok === false && String(repT0.msg || '').includes('工时'), JSON.stringify(repT0));
+    const repT = await api('POST', '/api/reports', { order_id: rt.data.id, order_step_id: tSteps[0].id, qty_good: 10, qty_bad: 0, work_min: 120 }, wTok);
+    chk('计时报工返回 2h×30=60 元', repT.ok && Math.abs((repT.data.total_wage || 0) - 60) < 0.001, JSON.stringify(repT.data));
+    const oT = (await H('GET', '/api/orders/' + rt.data.id)).data;
+    chk('工单详情计时报工行 amount=60/wage_type=time', oT.wage_type === 'time' && oT.reports.length && Math.abs(oT.reports[0].amount - 60) < 0.001 && oT.reports[0].wage_type === 'time', JSON.stringify(oT.reports[0]));
+    const pwT = await H('GET', '/api/stats/piece_wage?days=1&worker_id=' + workerId + '&detail=1');
+    const tRow = (pwT.data.detail || []).find((x) => x.wage_type === 'time');
+    chk('工资统计含计时明细 60 元/2 小时', !!tRow && Math.abs(tRow.amount - 60) < 0.001 && Math.abs(tRow.work_hours - 2) < 0.001, JSON.stringify(tRow));
+    const rowT = pwT.data.rows.find((r) => r.id === workerId);
+    chk('计时工资并入员工汇总（25+60=85）', !!rowT && Math.abs(rowT.wage - 85) < 0.01, JSON.stringify(pwT.data.rows));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

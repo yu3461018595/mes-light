@@ -488,7 +488,8 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team);
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name,
       COALESCE(rp.unit_price, pr.std_price, 0) unit_price,
-      ROUND(rp.qty_good * COALESCE(rp.unit_price, pr.std_price, 0), 2) amount
+      CASE WHEN rp.wage_type='time' THEN ROUND(COALESCE(rp.work_hours,0) * COALESCE(rp.unit_price, 0), 2)
+           ELSE ROUND(rp.qty_good * COALESCE(rp.unit_price, pr.std_price, 0), 2) END amount
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE rp.order_id=? ORDER BY rp.id DESC LIMIT 100`, [m[1]]);
@@ -545,19 +546,23 @@ route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
     if (ow.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
     ownerName = ow.name;
   }
+  // 工资核算方式：piece 计件（默认）/ time 计时（按实动工时×时薪）
+  const wageType = String(b.wage_type) === 'time' ? 'time' : 'piece';
+  const hourRate = wageType === 'time' ? Math.max(0, num(b.hourly_rate)) : null;
+  if (wageType === 'time' && !(hourRate > 0)) return fail(res, '计时核算工单需填写时薪（元/小时）', 400);
   const id = tx(() => {
-    const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,owner_user_id,owner_name,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,owner_user_id,owner_name,wage_type,hourly_rate,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [code, b.product_id, b.route_id, b.customer_id || null, qty, num(b.priority, 2),
         b.plan_start || today(), b.plan_end || today(), 'created', b.remark || '', u.id,
-        b.owner_user_id ? num(b.owner_user_id) : null, ownerName, now()]);
+        b.owner_user_id ? num(b.owner_user_id) : null, ownerName, wageType, hourRate, now()]);
     all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [b.route_id]).forEach((s) => {
       insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
         [oid, s.seq, s.process_id, s.work_center_id, qty, 'pending', String(s.inspect_type || '')]);
     });
     return oid;
   });
-  writeLog(u, '创建工单', code + ' 数量 ' + qty);
+  writeLog(u, '创建工单', code + ' 数量 ' + qty + (wageType === 'time' ? '（计时核算 ¥' + hourRate + '/小时）' : ''));
   ok(res, { id, code });
 });
 
@@ -746,10 +751,20 @@ route('PUT', '/api/orders/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) 
     }
     ownerSet = ',owner_user_id=?,owner_name=?';
   }
+  // 核算方式：body 携带 wage_type 才更新；计时必须有时薪
+  let wageSet = '';
+  const wageParams = [];
+  if (Object.prototype.hasOwnProperty.call(b, 'wage_type')) {
+    const wt = String(b.wage_type) === 'time' ? 'time' : 'piece';
+    const hr = wt === 'time' ? Math.max(0, num(b.hourly_rate)) : null;
+    if (wt === 'time' && !(hr > 0)) return fail(res, '计时核算工单需填写时薪（元/小时）', 400);
+    wageSet = ',wage_type=?,hourly_rate=?';
+    wageParams.push(wt, hr);
+  }
   tx(() => {
-    run(`UPDATE orders SET product_id=?,route_id=?,customer_id=?,qty_plan=?,priority=?,plan_start=?,plan_end=?,remark=?${ownerSet} WHERE id=?`,
+    run(`UPDATE orders SET product_id=?,route_id=?,customer_id=?,qty_plan=?,priority=?,plan_start=?,plan_end=?,remark=?${ownerSet}${wageSet} WHERE id=?`,
       [b.product_id, b.route_id, b.customer_id || null, num(b.qty_plan), num(b.priority, 2), b.plan_start, b.plan_end, b.remark || '',
-        ...ownerParams, m[1]]);
+        ...ownerParams, ...wageParams, m[1]]);
     if (num(b.route_id) !== before.route_id || num(b.qty_plan) !== before.qty_plan) {
       run('DELETE FROM order_steps WHERE order_id=?', [m[1]]);
       all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [b.route_id]).forEach((s) => {
@@ -913,13 +928,19 @@ function doReport(b, actor) {
       }
       it._bad = bad;
       if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
-      // 计件单价快照：报工时刻的工序单价，后续调价不影响历史工资
-      const unitPrice = num(get('SELECT std_price FROM processes WHERE id=?', [step.process_id]).std_price) || 0;
-      const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at,unit_price)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      // 工资核算：工单级 wage_type —— piece 计件（合格数×计件单价）/ time 计时（实动工时×时薪）。
+      // 报工行快照 wage_type、work_hours（小时）与单价（unit_price：计件存单件价、计时存时薪），后续调价不影响历史工资
+      const isTime = String(order.wage_type) === 'time';
+      const workHours = Math.max(0, num(it.work_min)) / 60;
+      if (isTime && workHours <= 0) throw new Error('计时核算工单报工需填写实动工时（小时）');
+      const snapRate = isTime
+        ? (num(order.hourly_rate) || 0)
+        : (num(get('SELECT std_price FROM processes WHERE id=?', [step.process_id]).std_price) || 0);
+      const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at,unit_price,wage_type,work_hours)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
           good, bad, badEntries[0] ? badEntries[0].bad_reason : '', badEntries[0] ? badEntries[0].bad_reason_id : null, num(it.work_min),
-          it.report_date || today(), it.remark || '', now(), unitPrice]);
+          it.report_date || today(), it.remark || '', now(), snapRate, isTime ? 'time' : 'piece', workHours > 0 ? workHours : null]);
       // 写入不良明细
       for (const e of badEntries) {
         insert('INSERT INTO report_bad_reasons(report_id,bad_reason_id,bad_reason,bad_reason_detail,qty) VALUES(?,?,?,?,?)',
@@ -949,7 +970,8 @@ function doReport(b, actor) {
       if (step.id === lastStepId && good > 0 && !needInspect) {
         autoIn = autoFinishIn(order, product, good, actor, step.id, rid);
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn, wage: Math.round(good * unitPrice * 100) / 100 });
+      const repWage = isTime ? Math.round(workHours * snapRate * 100) / 100 : Math.round(good * snapRate * 100) / 100;
+      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn, wage: repWage });
     }
 
     // 全部工序完成 → 工单完工（检验点未放行的工序状态仍为 running，天然阻止误判完工）
@@ -1344,9 +1366,11 @@ route('GET', '/api/trace/([^/]+)', [], (req, res, m) => {
 
 /* ------------------------------ 升级：计件工资统计 ------------------------------ */
 /* 口径：工资 = 报工合格数 × 工序计件单价(processes.std_price)；支持 ?days=N 与 ?format=csv */
-/* 计件工资核算：工资 = 报工合格数 × 计件单价（报工时快照 unit_price，旧数据回退工序档案当前单价）
+/* 工资核算（计件+计时）：计件工单 = 报工合格数 × 单价快照；计时工单 = 实动工时 × 时薪快照（均报工时落库，调价不影响历史）
  * 支持 days（近N天）与 month（YYYY-MM 按月核算，二选一）；
  * 隐私：操作工/质检员仅能查本人工资，管理员/技术员可查全员（可传 worker_id 过滤 + detail=1 展开逐单明细）。 */
+const WAGE_EXPR = `CASE WHEN r.wage_type='time' THEN COALESCE(r.work_hours,0) * COALESCE(r.unit_price, o.hourly_rate, 0)
+    ELSE r.qty_good * COALESCE(r.unit_price, pr.std_price, 0) END`;
 route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, u, q) => {
   const month = /^\d{4}-\d{2}$/.test(String(q.month || '')) ? q.month : null;
   const days = Math.min(180, Math.max(1, num(q.days, 30)));
@@ -1358,22 +1382,24 @@ route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, u, q) => {
   const FULL_ARGS = ARGS.concat(selfId ? [selfId] : []);
   const rows = all(`SELECT u.id, u.name, u.team,
       SUM(r.qty_good) good, SUM(r.qty_bad) bad, SUM(r.work_min) minu, COUNT(*) cnt,
-      ROUND(SUM(r.qty_good * COALESCE(r.unit_price, pr.std_price, 0)), 2) wage
+      ROUND(SUM(${WAGE_EXPR}), 2) wage
     FROM reports r JOIN users u ON u.id=r.worker_id
+    LEFT JOIN orders o ON o.id=r.order_id
     LEFT JOIN order_steps s ON s.id=r.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE ${COND}${SELF}
     GROUP BY u.id ORDER BY wage DESC, good DESC`, FULL_ARGS);
   if (q.format === 'csv') {
-    return sendCSV(res, `计件工资_${month || days + '天'}.csv`, ['姓名', '班组', '合格数', '不良数', '工时(分)', '报工次数', '计件工资(元)'],
+    return sendCSV(res, `工资核算_${month || days + '天'}.csv`, ['姓名', '班组', '合格数', '不良数', '工时(分)', '报工次数', '工资(元)'],
       rows.map((r) => [r.name, r.team || '', r.good, r.bad, r.minu, r.cnt, r.wage]));
   }
   /* 单人逐单明细（核算对账用） */
   let detail = null;
   if (selfId && q.detail) {
-    detail = all(`SELECT r.report_date, r.qty_good, r.qty_bad,
+    detail = all(`SELECT r.report_date, r.qty_good, r.qty_bad, r.wage_type,
+        COALESCE(r.work_hours, 0) work_hours,
         COALESCE(r.unit_price, pr.std_price, 0) unit_price,
-        ROUND(r.qty_good * COALESCE(r.unit_price, pr.std_price, 0), 2) amount,
+        ROUND(${WAGE_EXPR}, 2) amount,
         o.code order_code, pr.name process_name
       FROM reports r JOIN orders o ON o.id=r.order_id
       LEFT JOIN order_steps s ON s.id=r.order_step_id
@@ -1426,7 +1452,7 @@ route('GET', '/api/app/my_orders', [], (req, res, _m, _b, u) => {
 // 工单详情 + 可报工序（登录态；班组不匹配的工序标记为不可报）
 route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
   if (!u) return fail(res, '未登录', 401);
-  const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,o.owner_name,
+  const o = get(`SELECT o.id,o.code,o.status,o.qty_plan,o.owner_name,o.wage_type,o.hourly_rate,
       (SELECT COALESCE(qty_good,0) FROM order_steps WHERE order_id=o.id ORDER BY seq DESC LIMIT 1) qty_done,
       (SELECT COALESCE(SUM(qty_bad),0) FROM order_steps WHERE order_id=o.id) qty_bad,
       p.name product_name,p.spec

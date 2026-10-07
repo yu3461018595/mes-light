@@ -258,6 +258,12 @@ Views.orders = {
         <label class="field"><span>备注</span><input class="input" id="fRemark" value="${o ? UI.esc(o.remark || '') : ''}"></label>
         <label class="field"><span>计划开工</span><input class="input" type="date" id="fStart" value="${o ? o.plan_start : UI.today()}"></label>
         <label class="field"><span>计划完工</span><input class="input" type="date" id="fEnd" value="${o ? o.plan_end : UI.today()}"></label>
+        <label class="field"><span>工资核算方式</span>
+          <select class="input" id="fWageType">
+            <option value="piece"${!o || o.wage_type !== 'time' ? ' selected' : ''}>计件（合格数 × 工序单价）</option>
+            <option value="time"${o && o.wage_type === 'time' ? ' selected' : ''}>计时（实动工时 × 时薪）</option></select></label>
+        <label class="field" id="fRateWrap" style="${o && o.wage_type === 'time' ? '' : 'display:none'}"><span class="label-req">时薪（元/小时）</span>
+          <input class="input" id="fRate" type="number" min="0" step="0.01" value="${o && o.hourly_rate != null ? o.hourly_rate : 20}"></label>
         <label class="field" style="grid-column:1/-1"><span>责任人<span class="muted" style="font-weight:normal">（质量异常时首推此人处理；可选技术员/质检员/管理员，不含操作工）</span></span>
           <select class="input" id="fOwner">${ownerOpts}</select></label>
       </div>
@@ -277,8 +283,14 @@ Views.orders = {
         };
         mask.querySelector('#fProduct').onchange = syncRoutes;
         syncRoutes();
+        // 核算方式切换：计时才显示时薪输入
+        const wtSel = mask.querySelector('#fWageType');
+        const syncWage = () => { mask.querySelector('#fRateWrap').style.display = wtSel.value === 'time' ? '' : 'none'; };
+        wtSel.onchange = syncWage;
+        syncWage();
       },
       onOk: async (mask) => {
+        const wageType = mask.querySelector('#fWageType').value;
         const payload = {
           product_id: mask.querySelector('#fProduct').value,
           route_id: mask.querySelector('#fRoute').value,
@@ -289,9 +301,12 @@ Views.orders = {
           plan_start: mask.querySelector('#fStart').value,
           plan_end: mask.querySelector('#fEnd').value,
           owner_user_id: mask.querySelector('#fOwner').value || null,
+          wage_type: wageType,
+          hourly_rate: wageType === 'time' ? Number(mask.querySelector('#fRate').value) : null,
         };
         if (!payload.route_id) throw new Error('该产品没有工艺路线，请先到基础数据维护');
         if (!(payload.qty_plan > 0)) throw new Error('计划数量必须大于 0');
+        if (wageType === 'time' && !(payload.hourly_rate > 0)) throw new Error('计时核算需填写大于 0 的时薪');
         if (id) await API.put('/orders/' + id, payload);
         else {
           const r = await API.post('/orders', payload);
@@ -372,6 +387,7 @@ Views.orders = {
           <div class="small"><span class="muted">实际开工：</span>${UI.esc(o.start_time || '—')}</div>
           <div class="small"><span class="muted">实际完工：</span>${UI.esc(o.finish_time || '—')}</div>
           <div class="small"><span class="muted">负责人：</span>${o.owner_user_id ? `<b>${UI.esc(o.owner_name)}</b>` : '<span class="muted">未指定</span>'}</div>
+          <div class="small"><span class="muted">工资核算：</span>${o.wage_type === 'time' ? `<b style="color:var(--primary)">计时 ¥${UI.f2(o.hourly_rate || 0)}/小时</b>` : '<b>计件（按工序单价）</b>'}</div>
           <div class="small"><span class="muted">备注：</span>${UI.esc(o.remark || '—')}</div>
           ${o.close_reason ? `<div class="small"><span class="muted">关闭原因：</span><span class="chip chip-gray">${UI.esc(o.close_reason)}</span></div>` : ''}
         </div>
@@ -465,6 +481,10 @@ Views.orders = {
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span>` },
             { t: '不良原因', f: (r) => r.bad_reason ? `<span class="chip chip-danger">${UI.esc(r.bad_reason)}</span>` : '<span class="muted">—</span>' },
             { t: '工时', f: (r) => `<span class="small mono">${UI.f1(r.work_min / 60)} h</span>` },
+            { t: '工资', align: 'right', f: (r) => {
+              if (r.wage_type === 'time') return Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/时 × ${UI.f1(r.work_hours || 0)}h</div>` : '<span class="small muted">—</span>';
+              return Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/件</div>` : '<span class="small muted">—</span>';
+            } },
             { t: '', align: 'right', f: (r) => canEdit ? `<button class="btn btn-sm btn-ghost" data-del="${r.id}">撤销</button>` : '' },
           ], o.reports, { emptyText: '还没有报工记录' })}
         </div>

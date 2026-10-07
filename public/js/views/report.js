@@ -95,7 +95,9 @@ Views.report = {
               <div class="row" style="justify-content:space-between">
                 <div>
                   <b>${s.seq_no || s.seq} ${UI.esc(s.process_name)}</b>
-                  <div class="small muted">${UI.esc(s.wc_name || '未指定设备')} · 责任人 ${UI.esc(s.assignee_name || '暂无')}${Number(s.std_price) > 0 ? ' · <b style="color:var(--primary)">计件 ¥${UI.f2(s.std_price)}/件</b>' : ''}</div>
+                  <div class="small muted">${UI.esc(s.wc_name || '未指定设备')} · 责任人 ${UI.esc(s.assignee_name || '暂无')}${o.wage_type === 'time'
+                    ? (Number(o.hourly_rate) > 0 ? ` · <b style="color:var(--primary)">计时 ¥${UI.f2(o.hourly_rate)}/小时</b>` : '')
+                    : (Number(s.std_price) > 0 ? ` · <b style="color:var(--primary)">计件 ¥${UI.f2(s.std_price)}/件</b>` : '')}</div>
                 </div>
                 <div style="text-align:right">
                   ${UI.badge(s.status)}
@@ -120,7 +122,7 @@ Views.report = {
               <div class="small muted" id="leftTip"></div>
               <div class="small" id="wageTip" style="margin-top:2px;color:var(--primary)"></div>
             </div>
-            <label class="field"><span>实动工时（小时）</span>
+            <label class="field"><span class="${o.wage_type === 'time' ? 'label-req' : ''}">实动工时（小时）${o.wage_type === 'time' ? '<span class="muted" style="font-weight:normal">· 计时核算必填</span>' : ''}</span>
               <input class="input" id="fMin" type="number" min="0" step="0.5" value="0"></label>
           </div>
           <div class="field">
@@ -144,7 +146,11 @@ Views.report = {
           { t: '工序', f: (r) => UI.esc(r.process_name || '—') },
           { t: '报工人', f: (r) => UI.esc(r.worker_name || '—') },
           { t: '合格', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.qty_good)}</span>` },
-          { t: '计件', f: (r) => Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/件</div>` : '<span class="small muted">—</span>' },
+          { t: '工资', f: (r) => {
+            if (Number(r.amount) <= 0) return '<span class="small muted">—</span>';
+            const unit = r.wage_type === 'time' ? `¥${UI.f2(r.unit_price)}/时 × ${UI.f1(r.work_hours || 0)}h` : `¥${UI.f2(r.unit_price)}/件`;
+            return `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">${unit}</div>`;
+          } },
           { t: '不良', f: (r) => {
             if (r.bad_reasons && r.bad_reasons.length) {
               const parts = r.bad_reasons.map((x) => `${UI.esc(x.bad_reason)}${x.qty ? '×' + x.qty : ''}`);
@@ -155,9 +161,18 @@ Views.report = {
         ], o.reports.slice(0, 8), { emptyText: '暂无记录' })}</div>
       </div>`;
 
-    /* 计件工资实时试算：本次合格数 × 工序计件单价 */
+    /* 工资实时试算：计件=合格数×工序单价；计时=实动工时×工单时薪 */
+    const isTime = o.wage_type === 'time';
+    const minInput = el.querySelector('#fMin');
     const paintWage = () => {
       const tip = el.querySelector('#wageTip'); if (!tip) return;
+      if (isTime) {
+        const rate = Number(o.hourly_rate) || 0;
+        if (rate <= 0) { tip.textContent = ''; return; }
+        const hrs = Number(minInput.value) || 0;
+        tip.innerHTML = `本次计时工资 <b>¥${UI.f2(hrs * rate)}</b>（${UI.f1(hrs)} 小时 × ¥${UI.f2(rate)}/时）`;
+        return;
+      }
       const price = Number(pick.std_price) || 0;
       if (price <= 0) { tip.textContent = '该工序未维护计件单价，不计件（工序档案中可设置）'; return; }
       const amt = (Number(g.value) || 0) * price;
@@ -174,6 +189,7 @@ Views.report = {
     el.querySelector('#gDec').onclick = () => { add(g, -10); paintWage(); };
     el.querySelector('#gInc').onclick = () => { add(g, 10); paintWage(); };
     g.addEventListener('input', paintWage);
+    minInput.addEventListener('input', paintWage);
     bindQty();
 
     // 不良明细：支持一道工序多种不良，填一种自动出现下一种
@@ -239,10 +255,11 @@ Views.report = {
         remark: el.querySelector('#fRemark').value,
       };
       if (payload.qty_good + payload.qty_bad <= 0) return UI.toast('请填写合格数或不良数', 'err');
+      if (isTime && !(Number(el.querySelector('#fMin').value) > 0)) return UI.toast('计时核算工单需填写实动工时（小时）', 'err');
       try {
         const r = await API.post('/reports', payload);
         const auto = (r && r.steps || []).filter((s) => s.autoFinishIn);
-        const wageTxt = Number(r.total_wage) > 0 ? `，计件 ¥${UI.f2(r.total_wage)}` : '';
+        const wageTxt = Number(r.total_wage) > 0 ? `，工资 ¥${UI.f2(r.total_wage)}` : '';
         if (auto.length) {
           const qty = auto.reduce((a, s) => a + Number(s.autoFinishIn.qty), 0);
           UI.toast(`报工成功，末道工序已自动入库 ${qty} 件${wageTxt}`, 'ok');

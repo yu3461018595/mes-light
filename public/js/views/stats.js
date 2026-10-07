@@ -12,7 +12,7 @@ Views.stats = {
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <div class="tabs" style="margin:0;border:none">
           <div class="tab ${this.tab !== 'wage' ? 'active' : ''}" data-t="output">产量分析</div>
-          <div class="tab ${this.tab === 'wage' ? 'active' : ''}" data-t="wage">计件工资</div>
+          <div class="tab ${this.tab === 'wage' ? 'active' : ''}" data-t="wage">工资核算</div>
           ${[7, 14, 30].map((d) => `<div class="tab ${this.days === d ? 'active' : ''}" data-d="${d}">近 ${d} 天</div>`).join('')}
         </div>
         ${this.tab === 'wage' ? `<button class="btn" id="wageExport">${UI.icon('box')}导出 CSV</button>` : `<button class="btn" id="export">${UI.icon('box')}导出 CSV</button>`}
@@ -121,11 +121,11 @@ Views.stats = {
           <input type="radio" name="wmode" value="month" ${this.wageMonth ? 'checked' : ''}> 按月
         </label>
         <input class="input" id="wageMonth" type="month" value="${UI.esc(this.wageMonth || '')}" style="width:150px" ${this.wageMonth ? '' : 'disabled'}>
-        <span class="small muted">口径：报工合格数 × 计件单价（报工时快照，调价不影响历史）</span>
+        <span class="small muted">口径：计件 = 报工合格数 × 单价快照；计时 = 实动工时 × 时薪快照（报工时落库，调价不影响历史）</span>
       </div></div>
       <div class="grid g4" style="margin-bottom:14px">
         <div class="stat"><div class="stat-l">工资合计</div><div class="stat-v" style="color:var(--primary)">¥${UI.n2(totalWage)}</div>
-          <div class="stat-s">${periodTxt} · 计件口径</div></div>
+          <div class="stat-s">${periodTxt} · 计件+计时</div></div>
         <div class="stat"><div class="stat-l">计件合格数</div><div class="stat-v" style="color:var(--ok)">${UI.n2(totalGood)}</div>
           <div class="stat-s">件 · ${rows.length} 人参与</div></div>
         <div class="stat"><div class="stat-l">人均工资</div><div class="stat-v">¥${UI.n2(rows.length ? totalWage / rows.length : 0)}</div>
@@ -134,7 +134,7 @@ Views.stats = {
           <div class="stat-s">元 / 件（加权平均）</div></div>
       </div>
       <div class="card">
-        <div class="card-h"><h3>计件工资明细</h3><span class="small muted">点击「明细」查看该员工逐单核算记录</span></div>
+        <div class="card-h"><h3>工资核算明细</h3><span class="small muted">点击「明细」查看该员工逐单核算记录</span></div>
         <div class="card-b tight">${UI.table([
           { t: '排名', f: (r, i) => `<b style="color:${i < 3 ? 'var(--primary)' : 'var(--text3)'}">${i + 1}</b>` },
           { t: '姓名', k: 'name' }, { t: '班组', f: (r) => UI.esc(r.team || '—') },
@@ -142,7 +142,7 @@ Views.stats = {
           { t: '不良数', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.bad)}</span>` },
           { t: '报工次数', f: (r) => `<span class="mono">${UI.n2(r.cnt || 0)}</span>` },
           { t: '工时', f: (r) => `<span class="mono">${UI.f1((r.minu || 0) / 60)} h</span>` },
-          { t: '计件工资', f: (r) => `<b class="mono" style="color:var(--primary)">¥${UI.n2(r.wage || 0)}</b>` },
+          { t: '工资', f: (r) => `<b class="mono" style="color:var(--primary)">¥${UI.n2(r.wage || 0)}</b>` },
           { t: '件均工资', f: (r) => `<span class="mono">¥${r.good ? UI.f2(r.wage / r.good) : '—'}</span>` },
           { t: '', f: (r) => `<button class="btn btn-sm" data-wd="${r.id}">明细</button>` },
         ], rows, { emptyText: '所选区间没有报工数据' })}</div>
@@ -168,7 +168,8 @@ Views.stats = {
             { t: '工序', f: (x) => UI.esc(x.process_name || '—') },
             { t: '合格', f: (x) => `<span class="mono" style="color:var(--ok)">${UI.n2(x.qty_good)}</span>` },
             { t: '不良', f: (x) => `<span class="mono" style="color:var(--danger)">${UI.n2(x.qty_bad)}</span>` },
-            { t: '单价', f: (x) => `<span class="mono">¥${UI.f2(x.unit_price)}</span>` },
+            { t: '方式', f: (x) => x.wage_type === 'time' ? '<span class="chip chip-info">计时</span>' : '<span class="chip chip-gray">计件</span>' },
+            { t: '单价/时薪', f: (x) => `<span class="mono">¥${UI.f2(x.unit_price)}${x.wage_type === 'time' ? '/时 × ' + UI.f1(x.work_hours || 0) + 'h' : '/件'}</span>` },
             { t: '金额', f: (x) => `<b class="mono" style="color:var(--primary)">¥${UI.f2(x.amount)}</b>` },
           ], det, { emptyText: '该区间没有报工记录' })}</div></div>`;
         el.querySelector('#wageDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -177,15 +178,15 @@ Views.stats = {
   },
 
   exportWage(rows, periodTxt) {
-    const lines = ['姓名,班组,合格数,不良数,报工次数,工时(小时),计件工资(元),件均工资(元)'];
+    const lines = ['姓名,班组,合格数,不良数,报工次数,工时(小时),工资(元),件均工资(元)'];
     rows.forEach((r) => lines.push([r.name, r.team || '', r.good, r.bad, r.cnt || 0,
       UI.f1((r.minu || 0) / 60), r.wage || 0, r.good ? UI.f2(r.wage / r.good) : ''].join(',')));
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `计件工资_${(periodTxt || '').replace(/[^0-9\u4e00-\u9fa5a-zA-Z]/g, '') || UI.today()}.csv`;
+    a.download = `工资核算_${(periodTxt || '').replace(/[^0-9\u4e00-\u9fa5a-zA-Z]/g, '') || UI.today()}.csv`;
     a.click();
-    UI.toast('已导出计件工资 CSV', 'ok');
+    UI.toast('已导出工资核算 CSV', 'ok');
   },
 
   exportCsv() {

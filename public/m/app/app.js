@@ -472,7 +472,7 @@
               <input id="g${s.id}" type="number" inputmode="numeric" min="0" value="${esc(v.good)}">
               <button type="button" class="inc" data-inc="${s.id}" aria-label="增加"></button>
             </div></div>
-          <div class="field" style="margin-bottom:12px"><span>工时（小时，选填）</span>
+          <div class="field" style="margin-bottom:12px"><span>工时（小时${o.wage_type === 'time' ? '，计时核算必填' : '，选填'}）</span>
             <input id="w${s.id}" class="ipt" type="number" inputmode="decimal" min="0" step="0.5" placeholder="如 2" value="${esc(v.min)}"></div>
           <div class="field" style="margin-bottom:4px"><span>不良明细（可多种）</span>
             <div class="badrows" id="br${s.id}"></div></div>
@@ -481,7 +481,9 @@
         <div class="st-main">
           <div class="st-nm">${s.seq_no || s.seq}. ${esc(s.process_name)}</div>
           <div class="st-sub">${esc(s.process_code || '')} · 指派班组 ${esc(s.assignee_team || '暂无')}${
-            s.inspect_type ? ' · 检验点 ' + esc(INSPECT_LABEL[s.inspect_type] || '检验') : ''}<br>已报 ${s.qty_good}/${s.qty_plan}${s.qty_bad ? ' · 不良 ' + s.qty_bad : ''}${Number(s.std_price) > 0 ? ` · <b style="color:#1d4ed8">计件 ¥${Number(s.std_price).toFixed(2)}/件</b>` : ''}</div>
+            s.inspect_type ? ' · 检验点 ' + esc(INSPECT_LABEL[s.inspect_type] || '检验') : ''}<br>已报 ${s.qty_good}/${s.qty_plan}${s.qty_bad ? ' · 不良 ' + s.qty_bad : ''}${o.wage_type === 'time'
+              ? (Number(o.hourly_rate) > 0 ? ` · <b style="color:#1d4ed8">计时 ¥${Number(o.hourly_rate).toFixed(2)}/小时</b>` : '')
+              : (Number(s.std_price) > 0 ? ` · <b style="color:#1d4ed8">计件 ¥${Number(s.std_price).toFixed(2)}/件</b>` : '')}</div>
           ${note}
         </div>
         ${canReport(s) ? `<div class="st-tick">${sel ? '✓' : ''}</div>` : ''}
@@ -616,6 +618,7 @@
       return { order_step_id: s.id, qty_good: num(v.good), qty_bad: totalBad, bad_reasons: badRows, work_min: num(v.min) * 60 };
     }).filter((x) => (x.qty_good + x.qty_bad) > 0);
     if (!steps.length) return toast('请选择工序并填写合格/不良数量');
+    if (S.order.wage_type === 'time' && steps.some((x) => !(x.work_min > 0))) return toast('计时核算工单需为每道已选工序填写工时（小时）');
     const btn = $view.querySelector('#submit');
     btn.disabled = true; btn.textContent = '提交中…';
     try {
@@ -625,7 +628,7 @@
       const need = (r && r.steps || []).filter((x) => x.needInspect).length;
       const wage = Math.round((r.steps || []).reduce((a, x) => a + num(x.wage), 0) * 100) / 100;
       okMask('报工成功', [
-        wage > 0 ? `本次计件工资 <b style="color:#1d4ed8">¥${wage.toFixed(2)}</b>` : '',
+        wage > 0 ? `本次工资 <b style="color:#1d4ed8">¥${wage.toFixed(2)}</b>${S.order.wage_type === 'time' ? '（计时）' : '（计件）'}` : '',
         autoQty ? `末道工序已自动成品入库 ${autoQty} 件` : '',
         need ? `${need} 道工序已转入待检，质检员已收到通知` : '',
         '已通知对应技术员',
@@ -1502,7 +1505,7 @@
 
   async function renderProfile() {
     const me = await ensureMe();
-    $view.innerHTML = `<div class="card"><div class="card-h"><h3>我的计件工资</h3></div>
+    $view.innerHTML = `<div class="card"><div class="card-h"><h3>我的工资</h3></div>
         <div class="card-b" id="pWage"><div class="tiny muted">加载中…</div></div></div>
       <div class="card"><div class="card-h"><h3>修改姓名</h3></div><div class="card-b">
         <div class="field"><span>姓名</span><input class="ipt" id="pName" value="${esc(me.name)}"></div>
@@ -1520,12 +1523,12 @@
         const mine = rows.length ? rows[0] : null;
         box.innerHTML = mine
           ? `<div class="wage-grid">
-              <div class="wg-item"><b style="color:#1d4ed8;font-size:22px">¥${Number(mine.wage).toFixed(2)}</b><span>${month.slice(5)} 月计件工资</span></div>
+              <div class="wg-item"><b style="color:#1d4ed8;font-size:22px">¥${Number(mine.wage).toFixed(2)}</b><span>${month.slice(5)} 月工资</span></div>
               <div class="wg-item"><b style="color:#0f9d58;font-size:22px">${Number(mine.good)}</b><span>本月合格件数</span></div>
             </div>
-            <div class="tiny muted" style="margin-top:8px">工资=报工合格数×工序计件单价；不良不计件，返工重报合格后计。</div>`
-          : `<div class="tiny muted">本月暂无计件报工记录。</div>
-             <div class="tiny muted" style="margin-top:4px">在工单报工时选择已维护单价的工序即可计件。</div>`;
+            <div class="tiny muted" style="margin-top:8px">计件=合格数×工序单价；计时=实动工时×时薪；不良不计件，返工重报合格后计。</div>`
+          : `<div class="tiny muted">本月暂无计薪报工记录。</div>
+             <div class="tiny muted" style="margin-top:4px">计件工单报工按合格数×单价核算；计时工单报工需填写工时。</div>`;
       } catch (e) { box.innerHTML = `<div class="tiny muted">工资数据加载失败：${esc(e.message)}</div>`; }
     })();
     $view.querySelector('#pSave').onclick = async () => {
