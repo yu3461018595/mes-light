@@ -253,19 +253,25 @@
     try { notifyAfterReport(order, act, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
     return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
   }
-  // 报工后的负责人通知（操作工 → 技术员/质检员）
+  // 报工后的负责人通知：不良率达阈值（minor_ratio，默认5%）才提醒，收件人=责任人+质检员
   function notifyAfterReport(order, act, items, results, product) {
-    const tg = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0); void tg;
+    const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
     const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad || it.qty_bad || 0))), 0);
     if (totalBad > 0) {
-      const teams = [];
-      items.forEach((it) => { const s = find('order_steps', it.order_step_id); if (s && s.assignee_team && teams.indexOf(s.assignee_team) < 0) teams.push(s.assignee_team); });
-      const leaders = T('users').filter((u) => u.active && (u.role === 'admin' || (u.role === 'technician' && (!teams.length || teams.indexOf(u.team) >= 0))));
-      pushMessage({
-        source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
-        title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
-        body: `${act.name} 报工登记不良 ${totalBad} 件（${product ? product.name : '-'}）。请核实是否开异常单并跟进处置。`,
-      });
+      const threshold = Math.min(50, Math.max(0, num(getSetting('minor_ratio', 5), 5))) / 100;
+      const ratio = (totalGood + totalBad) > 0 ? totalBad / (totalGood + totalBad) : 1;
+      if (ratio >= threshold) {
+        const firstStep = items.length ? find('order_steps', items[0].order_step_id) : null;
+        const owner = order.owner_user_id ? find('users', order.owner_user_id) : null;
+        const resp = (owner && owner.active) ? owner : resolveIssueAssignee(firstStep, order);
+        const tos = [resp].concat(T('users').filter((u) => u.active && u.role === 'inspector' && u.id !== act.id && (!resp || u.id !== resp.id)));
+        const pct = Math.round(ratio * 1000) / 10;
+        pushMessage({
+          source: 'quality', toUsers: tos, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
+          title: `报工不良提醒：${order.code} 不良 ${totalBad} 件（${pct}%）`,
+          body: `${act.name} 报工登记合格 ${totalGood} 件、不良 ${totalBad} 件（${product ? product.name : '-'}），不良率 ${pct}% 已达提醒阈值。请核实是否开异常单并跟进处置。`,
+        });
+      }
     }
     const waiting = results.filter((r) => r.needInspect);
     if (waiting.length) {

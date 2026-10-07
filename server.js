@@ -959,22 +959,25 @@ function doReport(b, actor) {
 // 报工后的负责人通知（操作工 → 技术员/质检员）
 function notifyAfterReport(order, actor, items, results, product) {
   const workers = [actor];
-  // ① 有不良 → 通知该工单涉及班组的管理者（technician），提醒质量异常跟进
+  // ① 有不良 → 不良率达到提醒阈值（检验设置「一般不合格率下限」minor_ratio，默认 5%）才提醒；
+  //    收件人收敛为「责任人 + 质检员」：责任人=工单负责人→班组技术员→创建人→管理员兜底（单人），不再全员轰炸管理员
   const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
+  const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
   if (totalBad > 0) {
-    const teams = [...new Set(items.map((it) => {
-      const s = get('SELECT assignee_team FROM order_steps WHERE id=?', [it.order_step_id]);
-      return s ? s.assignee_team : null;
-    }).filter(Boolean))];
-    const ph = teams.map(() => '?').join(',');
-    const leaders = teams.length
-      ? all(`SELECT id,name FROM users WHERE active=1 AND role IN ('technician','admin') AND (team IN (${ph}) OR role='admin')`, teams)
-      : usersByRole('admin', 'technician');
-    pushMessage({
-      source: 'quality', toUsers: leaders, kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
-      title: `报工不良提醒：${order.code} 不良 ${totalBad} 件`,
-      body: `${actor.name} 报工登记不良 ${totalBad} 件（${product ? product.name : '-'}）。请核实是否开异常单并跟进处置。`,
-    });
+    const threshold = Math.min(50, Math.max(0, num(getSetting('minor_ratio', 5)))) / 100;
+    const ratio = (totalGood + totalBad) > 0 ? totalBad / (totalGood + totalBad) : 1;
+    if (ratio >= threshold) {
+      const firstStep = items.length ? get('SELECT * FROM order_steps WHERE id=?', [items[0].order_step_id]) : null;
+      const owner = order.owner_user_id ? get('SELECT id,name FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+      const resp = owner || resolveIssueAssignee(firstStep, order);
+      const inspectors = usersByRole('inspector').filter((x) => x.id !== actor.id && x.id !== resp.id);
+      const pct = Math.round(ratio * 1000) / 10;
+      pushMessage({
+        source: 'quality', toUsers: [resp, ...inspectors], kind: 'created', ref_type: 'order', ref_id: order.id, link: '#/quality',
+        title: `报工不良提醒：${order.code} 不良 ${totalBad} 件（${pct}%）`,
+        body: `${actor.name} 报工登记合格 ${totalGood} 件、不良 ${totalBad} 件（${product ? product.name : '-'}），不良率 ${pct}% 已达提醒阈值。请核实是否开异常单并跟进处置。`,
+      });
+    }
   }
   // ② 报工后落入待检 → 通知质检员
   const waiting = results.filter((r) => r.needInspect);

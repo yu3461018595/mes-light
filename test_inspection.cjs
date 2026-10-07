@@ -404,6 +404,38 @@ async function api(m, u, b, t) {
     chk('编辑清空责任人成功', ord8e3.ok && ord8e4.data.owner_user_id == null && !ord8e4.data.owner_name, ord8e4.data);
     const ord8bad = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: 999999 });
     chk('不存在的责任人被拒 400', ord8bad.ok === false, ord8bad);
+
+    // 17) 报工不良提醒：达阈值（检验设置 minor_ratio，默认 5%）才推送；收件人=责任人+质检员，不再全员轰炸管理员
+    console.log('\n--- 17) 报工不良提醒阈值与收件人 ---');
+    const sfx9 = String(Date.now() + 73).slice(-6);
+    const prod9 = await H('POST', '/api/products', { code: 'RA-' + sfx9, name: '提醒测试件' + sfx9, unit: '件', price: 5 });
+    const p9 = await H('POST', '/api/processes', { code: 'RPA-' + sfx9, name: '加工R' + sfx9, std_time: 5, std_price: 1 });
+    const rt9 = await H('POST', '/api/routes', { code: 'RTR-' + sfx9, name: '提醒路线' + sfx9, product_id: prod9.data.id, steps: [{ seq: 10, process_id: p9.data.id }] });
+    const uq9 = 'ra' + sfx9;
+    const ow9 = await H('POST', '/api/users', { username: uq9 + 'o', password: 'pass1234', name: '责任人九', role: 'technician', team: '甲班' });
+    const wk9 = await H('POST', '/api/users', { username: uq9 + 'w', password: 'pass1234', name: '工人九', role: 'worker', team: '甲班' });
+    chk('建提醒测试用户', ow9.ok && wk9.ok, { ow9, wk9 });
+    const ord9 = await H('POST', '/api/orders', { product_id: prod9.data.id, route_id: rt9.data.id, qty_plan: 5000, owner_user_id: ow9.data.id });
+    chk('建提醒测试工单(带责任人)', ord9.ok, ord9);
+    const owTok9 = (await api('POST', '/api/login', { username: uq9 + 'o', password: 'pass1234' }, lg.data.token)).data.token;
+    const wkTok9 = (await api('POST', '/api/login', { username: uq9 + 'w', password: 'pass1234' }, lg.data.token)).data.token;
+    const qcTok9 = (await api('POST', '/api/login', { username: 'qc01', password: '123456' }, lg.data.token)).data.token;
+    const st9 = (await H('GET', '/api/orders/' + ord9.data.id)).data.steps;
+    const cntRemind = async (t) => (((await api('GET', '/api/notifications', null, t)).data || []).filter((n) => /报工不良提醒/.test(n.title || ''))).length;
+    const ow0 = await cntRemind(owTok9), qc0 = await cntRemind(qcTok9), ad0 = await cntRemind(lg.data.token);
+    // 9.1 低于阈值（2% < 5%）→ 不推送
+    await api('POST', '/api/reports', { order_id: ord9.data.id, order_step_id: st9[0].id, qty_good: 980, qty_bad: 20, work_min: 10 }, wkTok9);
+    const ow1 = await cntRemind(owTok9), qc1 = await cntRemind(qcTok9), ad1 = await cntRemind(lg.data.token);
+    chk('低于阈值(2%<5%)不推送提醒', ow1 === ow0 && qc1 === qc0 && ad1 === ad0, { ow0, ow1, qc0, qc1, ad0, ad1 });
+    // 9.2 达到阈值（10% ≥ 5%）→ 推送给责任人 + 质检员，管理员（非责任人）不收
+    const rep9 = await api('POST', '/api/reports', { order_id: ord9.data.id, order_step_id: st9[0].id, qty_good: 90, qty_bad: 10, work_min: 5 }, wkTok9);
+    chk('达到阈值报工成功', rep9.ok, rep9);
+    const ow2 = await cntRemind(owTok9), qc2 = await cntRemind(qcTok9), ad2 = await cntRemind(lg.data.token);
+    chk('责任人收到不良提醒', ow2 === ow1 + 1, { ow1, ow2 });
+    chk('质检员收到不良提醒', qc2 === qc1 + 1, { qc1, qc2 });
+    chk('管理员(非责任人)不再收到不良提醒', ad2 === ad1, { ad1, ad2 });
+    const owMsgs = ((await api('GET', '/api/notifications', null, owTok9)).data || []).filter((n) => /报工不良提醒/.test(n.title || ''));
+    chk('提醒标题含不良率', /（10%）/.test(owMsgs[0] && owMsgs[0].title || ''), owMsgs[0] && owMsgs[0].title);
   } catch (e) {
     fail++;
     console.log('  异常: ' + e.message + '\n' + (e.stack || ''));
