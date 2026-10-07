@@ -3065,8 +3065,13 @@ route('GET', '/api/orders/(\\d+)/kit', [], (req, res, m) => {
   ok(res, { order_id: o.id, code: o.code, product_id: o.product_id, qty_plan: o.qty_plan, ...k });
 });
 
-// 排产看板：全部未完工工单 + 齐套概况（按优先级、交期排序）
+// 排产看板：全部未完工工单 + 齐套 + 进度/瓶颈/速率/完工预测/逾期分级（竞品对标增强版）
+// 口径：进度 qty_done = MIN(各工序 qty_good)（瓶颈）；速率取瓶颈工序近7天报工合格数日均值；逾期按计划完工日分级。
 route('GET', '/api/stats/kit', [], (req, res, _m, _b, _u, q) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const todayMs = new Date(today + 'T00:00:00Z').getTime();
+  const dayMs = 86400000;
+  const d7ago = new Date(todayMs - 7 * dayMs).toISOString().slice(0, 10);
   const list = all(`SELECT o.id, o.code, o.product_id, p.name product_name, p.code product_code,
       o.qty_plan, o.priority, o.plan_start, o.plan_end, o.status, c.name customer_name
     FROM orders o JOIN products p ON p.id=o.product_id LEFT JOIN customers c ON c.id=o.customer_id
@@ -3077,16 +3082,67 @@ route('GET', '/api/stats/kit', [], (req, res, _m, _b, _u, q) => {
   });
   const result = list.map((o) => {
     const k = kitForOrder(o);
+    /* ---- 进度与瓶颈（MIN 口径） ---- */
+    const steps = all(`SELECT s.id, s.seq, s.qty_plan, s.qty_good, s.status, pr.name pname
+      FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq`, [o.id]);
+    const goods = steps.map((s) => num(s.qty_good));
+    const qtyDone = goods.length ? Math.min(...goods) : 0;
+    const progressPct = num(o.qty_plan) > 0 ? Math.min(100, Math.round(qtyDone / num(o.qty_plan) * 100)) : 0;
+    /* 瓶颈工序：未完成工序中完成率最低者（并列取靠后工序——流水线堵点） */
+    let bottleneck = null;
+    const unfinished = steps.filter((s) => s.status !== 'done');
+    if (unfinished.length) {
+      const ranked = unfinished.map((s) => ({
+        s, pct: num(s.qty_plan) > 0 ? num(s.qty_good) / num(s.qty_plan) : 1,
+      })).sort((a, b) => (a.pct - b.pct) || (b.s.seq - a.s.seq));
+      bottleneck = { step_id: ranked[0].s.id, seq: ranked[0].s.seq, name: ranked[0].s.pname, pct: Math.floor(ranked[0].pct * 100) };
+    }
+    /* ---- 速率与完工预测：瓶颈工序近7天报工合格数日均值 ---- */
+    let dailyRate = 0;
+    if (bottleneck) {
+      const r = get(`SELECT IFNULL(SUM(qty_good),0) s FROM reports WHERE order_id=? AND order_step_id=? AND report_date>=?`,
+        [o.id, bottleneck.step_id, d7ago]).s;
+      dailyRate = Math.round((num(r) / 7) * 100) / 100;
+    } else if (steps.length) {
+      const r = get(`SELECT IFNULL(SUM(qty_good),0) s FROM reports WHERE order_id=? AND report_date>=?`, [o.id, d7ago]).s;
+      dailyRate = Math.round((num(r) / 7) * 100) / 100;
+    }
+    const remaining = Math.max(0, num(o.qty_plan) - qtyDone);
+    let forecastEnd = null; let delayDays = null;
+    if (remaining <= 0) { forecastEnd = today; }
+    else if (dailyRate > 0) {
+      forecastEnd = new Date(todayMs + Math.ceil(remaining / dailyRate) * dayMs).toISOString().slice(0, 10);
+    }
+    if (forecastEnd && o.plan_end) delayDays = Math.round((new Date(forecastEnd + 'T00:00:00Z') - new Date(o.plan_end + 'T00:00:00Z')) / dayMs);
+    /* ---- 逾期分级：none / due_soon(≤2天) / overdue_1_3 / overdue_3p ---- */
+    let dueClass = 'none';
+    if (o.plan_end) {
+      const diff = Math.round((todayMs - new Date(o.plan_end + 'T00:00:00Z').getTime()) / dayMs); // >0 已过期
+      if (diff > 0) dueClass = diff >= 3 ? 'overdue_3p' : 'overdue_1_3';
+      else if (diff >= -2) dueClass = 'due_soon';
+    }
     return { ...o, has_bom: k.has_bom, kit_pct: k.kit_pct, shortage: k.shortage,
-      shortages: k.lines.filter((l) => !l.ok).slice(0, 5).map((l) => l.name + ' 缺 ' + l.gap) };
+      shortages: k.lines.filter((l) => !l.ok).slice(0, 5).map((l) => l.name + ' 缺 ' + l.gap),
+      qty_done: qtyDone, progress_pct: progressPct, steps_total: steps.length,
+      steps_done: steps.filter((s) => s.status === 'done').length,
+      bottleneck, daily_rate: dailyRate, forecast_end: forecastEnd, delay_days: delayDays, due_class: dueClass };
   });
   ok(res, {
     orders: result,
+    today,
     summary: {
       total: result.length,
       full_kit: result.filter((r) => r.has_bom && r.kit_pct >= 100).length,
       shortage: result.filter((r) => r.has_bom && r.kit_pct < 100).length,
       no_bom: result.filter((r) => !r.has_bom).length,
+      due_today: result.filter((r) => r.plan_end === today).length,
+      due_soon: result.filter((r) => r.due_class === 'due_soon').length,
+      overdue: result.filter((r) => r.due_class.startsWith('overdue')).length,
+      delayed_forecast: result.filter((r) => r.delay_days !== null && r.delay_days > 0).length,
+      running: result.filter((r) => r.status === 'running').length,
+      paused: result.filter((r) => r.status === 'paused').length,
+      plan_qty: result.reduce((a, r) => a + num(r.qty_plan), 0),
+      done_qty: result.reduce((a, r) => a + r.qty_done, 0),
     },
   });
 });

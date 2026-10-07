@@ -54,15 +54,17 @@ Views.orders = {
     await this.loadList(el);
   },
 
-  /* ---------- 排产看板（P2）：甘特概览 + 齐套率 + 计划调整 ---------- */
+  /* ---------- 排产看板（P2 增强版）：KPI 概览 + 甘特(今日线/进度填充/逾期配色) + 明细(进度/瓶颈/预测) ---------- */
   async schedule(el) {
     el.innerHTML = `
       <div class="row" style="margin-bottom:12px">
         <button class="btn btn-sm" id="back">${UI.icon('back')}返回列表</button>
         <div class="spacer"></div>
-        <span class="small muted">按优先级与交期排序；点击工单条进入详情</span>
+        <span class="small muted">进度口径=各工序合格数最小值（瓶颈）；预测按瓶颈工序近7天日均产量推算</span>
       </div>
-      <div class="card"><div class="card-h"><h3>齐套与排产概览</h3><span id="sumStat" class="small muted"></span></div>
+      <div class="card"><div class="card-h"><h3>排产总览</h3><span id="sumStat" class="small muted"></span></div>
+        <div class="card-b" id="kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:12px"></div></div>
+      <div class="card"><div class="card-h"><h3>甘特排程</h3><span class="small muted">灰线=今日 · 条内深色=完成进度 · 红边=已逾期</span></div>
         <div class="card-b" id="gantt">加载中…</div></div>
       <div class="card"><div class="card-h"><h3>工单排产明细</h3></div>
         <div class="card-b tight" id="tbl">加载中…</div></div>`;
@@ -74,9 +76,22 @@ Views.orders = {
       return;
     }
     const canEdit = App.canEdit();
-    const { orders: list, summary } = d;
+    const { orders: list, summary, today } = d;
+
+    /* ---- KPI 卡 ---- */
+    const kpi = (label, val, color, tip) => `<div title="${UI.esc(tip || label)}" style="background:var(--bg2,#f6f8fa);border-radius:10px;padding:10px 12px">
+      <div class="small muted" style="display:flex;align-items:center;gap:6px"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:${color};flex:none"></span>${label}</div>
+      <div style="font-size:22px;font-weight:700;margin-top:4px;color:${color}">${val}</div></div>`;
     el.querySelector('#sumStat').textContent =
-      `在产 ${summary.total} 单：齐套 ${summary.full_kit} · 缺料 ${summary.shortage} · 未维护BOM ${summary.no_bom}`;
+      `在产 ${summary.total} 单 · 计划 ${UI.n2(summary.plan_qty)} 件 / 已完成 ${UI.n2(summary.done_qty)} 件（${summary.plan_qty ? Math.round(summary.done_qty / summary.plan_qty * 100) : 0}%）`;
+    el.querySelector('#kpis').innerHTML = [
+      kpi('今日应完工', summary.due_today, '#1d4ed8', '计划完工日=今天的在产工单数'),
+      kpi('已逾期', summary.overdue, summary.overdue ? '#d33' : '#2e9e5b', '计划完工日已过仍未完工的工单数'),
+      kpi('即将到期(2天)', summary.due_soon, '#d80', '距计划完工日不足2天的工单数'),
+      kpi('预测延期', summary.delayed_forecast, summary.delayed_forecast ? '#d33' : '#2e9e5b', '按当前速率推算将晚于计划完工的工单数'),
+      kpi('齐套正常', summary.full_kit, '#2e9e5b', '物料齐套率100%的工单数'),
+      kpi('缺料', summary.shortage, summary.shortage ? '#d80' : '#9aa', '物料齐套率不足100%的工单数'),
+    ].join('');
 
     const kitChip = (r) => {
       if (!r.has_bom) return '<span class="chip chip-gray" title="该产品未维护单耗BOM，无法评估齐套">无BOM</span>';
@@ -84,47 +99,82 @@ Views.orders = {
       const tip = (r.shortages || []).join('\n');
       return `<span class="chip ${cls}" title="${UI.esc(tip)}">${r.kit_pct}%${r.shortage ? ' · 缺' + r.shortage + '种' : ''}</span>`;
     };
+    const dueBadge = (r) => {
+      if (r.due_class === 'none') return '';
+      const M = { due_soon: ['chip-warn', '即将到期'], overdue_1_3: ['chip-danger', '逾期'], overdue_3p: ['chip-danger', '严重逾期(3天+)'] };
+      const [cls, txt] = M[r.due_class];
+      return `<span class="chip ${cls}">${txt}</span>`;
+    };
 
-    /* 甘特条：窗口取「最早开工−2天 ~ 最晚完工+2天」，至少 14 天 */
+    /* ---- 甘特条：今日竖线 + 进度填充 + 逾期配色 ---- */
     const dayMs = 86400000;
-    const today0 = UI.today();
     let t0 = null; let t1 = null;
     list.forEach((r) => {
-      const a = r.plan_start || today0; const b = r.plan_end || r.plan_start || today0;
+      const a = r.plan_start || today; const b = r.plan_end || r.plan_start || today;
       if (!t0 || a < t0) t0 = a; if (!t1 || b > t1) t1 = b;
     });
-    if (!t0) { t0 = today0; t1 = today0; }
+    if (!t0) { t0 = today; t1 = today; }
     t0 = new Date(new Date(t0).getTime() - 2 * dayMs);
     t1 = new Date(new Date(t1).getTime() + 2 * dayMs);
     if (t1 - t0 < 14 * dayMs) t1 = new Date(t0.getTime() + 14 * dayMs);
     const span = Math.max(1, Math.round((t1 - t0) / dayMs));
-    const dstr = (dt) => dt.toISOString().slice(0, 10);
-    const barColor = (r) => !r.has_bom ? 'var(--muted,#9aa)' : (r.kit_pct >= 100 ? 'var(--ok,#2e9e5b)' : (r.kit_pct >= 50 ? 'var(--warn,#d80)' : 'var(--danger,#d33)'));
+    const pctOf = (dateStr) => Math.max(0, Math.min(100, Math.round((new Date(dateStr + 'T00:00:00Z') - t0) / dayMs) / span * 100));
+    const todayPct = pctOf(today);
+    const barColor = (r) => r.due_class.startsWith('overdue') ? 'var(--danger,#d33)' : (!r.has_bom ? 'var(--muted,#9aa)' : (r.kit_pct >= 100 ? 'var(--ok,#2e9e5b)' : (r.kit_pct >= 50 ? 'var(--warn,#d80)' : 'var(--danger,#d33)')));
+    const fcText = (r) => {
+      if (r.qty_done >= r.qty_plan) return '已达计划量';
+      if (!r.forecast_end) return '速率不足，暂无法预测';
+      const dd = r.delay_days;
+      return `预计 ${r.forecast_end} 完工${dd > 0 ? `（超期 ${dd} 天）` : dd < 0 ? `（提前 ${-dd} 天）` : '（准时）'}`;
+    };
     const gantt = el.querySelector('#gantt');
-    gantt.innerHTML = list.length ? `<div class="tight">${list.map((r) => {
-      const a = new Date(r.plan_start || today0); const b = new Date(r.plan_end || r.plan_start || today0);
-      const left = Math.max(0, Math.round((a - t0) / dayMs) / span * 100);
-      const width = Math.min(100 - left, Math.max(2, (Math.round((b - a) / dayMs) + 1) / span * 100));
+    gantt.innerHTML = list.length ? `<div style="position:relative"><div style="position:absolute;top:0;bottom:0;left:calc(150px + 8px + (100% - 268px) * ${todayPct / 100});width:0;border-left:2px dashed #94a3b8;z-index:3;pointer-events:none" title="今日 ${today}"></div>
+      ${list.map((r) => {
+      const left = pctOf(r.plan_start || today);
+      const rightDate = r.plan_end || r.plan_start || today;
+      const width = Math.max(2, pctOf(rightDate) + (100 / span) - left);
+      const fillW = Math.min(100, r.progress_pct);
+      const tip = [`${r.plan_start || '—'} ~ ${r.plan_end || '—'}`,
+        `进度 ${r.progress_pct}%（${r.qty_done}/${r.qty_plan}）`,
+        r.bottleneck ? `瓶颈：第${r.bottleneck.seq}道 ${r.bottleneck.name}（${r.bottleneck.pct}%）` : '',
+        fcText(r), r.has_bom ? '齐套 ' + r.kit_pct + '%' : '无BOM'].filter(Boolean).join('\n');
       return `<div class="row" style="gap:8px;flex-wrap:nowrap;margin:3px 0">
         <span class="link small mono" data-id="${r.id}" style="width:150px;flex:none;overflow:hidden;text-overflow:ellipsis">${UI.esc(r.code)} ${UI.esc(r.product_name)}</span>
-        <div style="flex:1;position:relative;height:22px;background:var(--bg2,#f4f6f8);border-radius:4px">
-          <div data-id="${r.id}" class="link" title="${UI.esc(r.plan_start || '')} ~ ${UI.esc(r.plan_end || '')} · ${r.has_bom ? '齐套 ' + r.kit_pct + '%' : '无BOM'}"
-            style="position:absolute;left:${left}%;width:${width}%;top:3px;bottom:3px;background:${barColor(r)};opacity:.85;border-radius:4px"></div>
+        <div style="flex:1;position:relative;height:22px;background:var(--bg2,#f4f6f8);border-radius:4px;overflow:hidden">
+          <div data-id="${r.id}" class="link" title="${UI.esc(tip)}"
+            style="position:absolute;left:${left}%;width:${Math.min(width, 100 - left)}%;top:3px;bottom:3px;background:${barColor(r)};opacity:.38;border-radius:4px;${r.due_class.startsWith('overdue') ? 'outline:1.5px solid var(--danger,#d33);' : ''}"></div>
+          <div style="position:absolute;left:${left}%;width:${Math.min(width, 100 - left) * fillW / 100}%;top:3px;bottom:3px;background:${barColor(r)};opacity:.92;border-radius:4px;pointer-events:none"></div>
         </div>
-        <span style="width:110px;flex:none">${kitChip(r)}</span>
+        <span style="width:110px;flex:none;display:flex;gap:4px;align-items:center;flex-wrap:wrap">${kitChip(r)}${dueBadge(r)}</span>
       </div>`;
     }).join('')}</div>` : '<div class="empty">暂无在产工单</div>';
     gantt.querySelectorAll('[data-id]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.id);
 
-    /* 明细表：日期/优先级即时保存 */
+    /* ---- 明细表：进度/瓶颈/预测 + 日期/优先级即时保存 ---- */
     const PRIO = { 1: '高', 2: '中', 3: '低' };
+    const progCell = (r) => `<div style="display:flex;align-items:center;gap:6px">
+      <div style="flex:1;height:8px;background:var(--bg2,#eef1f4);border-radius:4px;min-width:56px;overflow:hidden">
+        <div style="height:100%;width:${r.progress_pct}%;background:${r.progress_pct >= 100 ? 'var(--ok,#2e9e5b)' : r.progress_pct >= 50 ? 'var(--primary,#1d4ed8)' : 'var(--warn,#d80)'};border-radius:4px"></div></div>
+      <span class="small mono" style="flex:none">${r.qty_done}/${UI.n2(r.qty_plan)}</span></div>`;
+    const btCell = (r) => r.bottleneck
+      ? `<span class="chip ${r.bottleneck.pct >= 80 ? 'chip-ok' : r.bottleneck.pct >= 50 ? 'chip-warn' : 'chip-danger'}" title="完成率最低的在产工序">${UI.esc(r.bottleneck.name)} ${r.bottleneck.pct}%</span>`
+      : '<span class="small muted">—</span>';
+    const fcCell = (r) => {
+      if (!r.forecast_end) return '<span class="small muted">速率不足</span>';
+      const cls = r.delay_days > 0 ? 'chip-danger' : r.delay_days < 0 ? 'chip-ok' : 'chip-gray';
+      const dtxt = r.delay_days > 0 ? `+${r.delay_days}天` : r.delay_days < 0 ? `${r.delay_days}天` : '准时';
+      return `<span class="small mono">${r.forecast_end}</span> <span class="chip ${cls}">${dtxt}</span>`;
+    };
     const tbl = el.querySelector('#tbl');
     tbl.innerHTML = UI.table([
-      { t: '工单 / 客户', f: (r) => `<b class="link" data-open="${r.id}">${UI.esc(r.code)}</b>
+      { t: '工单 / 客户', f: (r) => `<b class="link" data-open="${r.id}">${UI.esc(r.code)}</b>${dueBadge(r)}
           <div class="small muted">${UI.esc(r.customer_name || '无客户')}</div>` },
       { t: '产品', f: (r) => `${UI.esc(r.product_name)}<div class="small muted mono">${UI.esc(r.product_code || '')}</div>` },
       { t: '数量', f: (r) => `<span class="mono">${UI.n2(r.qty_plan)}</span>` },
+      { t: '进度', f: progCell },
+      { t: '瓶颈工序', f: btCell },
       { t: '齐套', f: kitChip },
+      { t: '预计完工', f: fcCell },
       { t: '状态', f: (r) => UI.badge(r.status) },
       canEdit ? { t: '优先级', f: (r) => `<select class="input input-sm" data-prio="${r.id}">
           ${[1, 2, 3].map((p) => `<option value="${p}"${r.priority == p ? ' selected' : ''}>${PRIO[p]}</option>`).join('')}</select>` } : { t: '优先级', f: (r) => PRIO[r.priority] || r.priority },

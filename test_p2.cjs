@@ -117,6 +117,39 @@ async function api(method, url, body, token) {
     chk('排产看板含该工单且齐套100%', !!row && row.kit_pct === 100, JSON.stringify(row));
     chk('看板汇总统计正确', statsKit.data.summary.full_kit >= 1, JSON.stringify(statsKit.data.summary));
 
+    // ---------- 4.5 排产看板增强：进度/瓶颈/速率/完工预测/逾期分级（日期相对化） ----------
+    const todayStr = statsKit.data.today;
+    const dstr = (off) => new Date(new Date(todayStr + 'T00:00:00Z').getTime() + off * 86400000).toISOString().slice(0, 10);
+    const odId = conv.data.order_id;
+    const odet = (await H('GET', '/api/orders/' + odId)).data;
+    const odSteps = odet.steps || [];
+    chk('转工单含≥2道工序', odSteps.length >= 2, JSON.stringify(odSteps.map((s) => s.id)));
+    let repAllOk = true;
+    for (const st of odSteps) {
+      const rr = await H('POST', '/api/reports', { order_id: odId, order_step_id: st.id, qty_good: 60, qty_bad: 0, work_min: 30 });
+      if (!rr.ok) repAllOk = false;
+    }
+    chk('各工序报工60成功', repAllOk, '');
+    const sk1 = await H('GET', '/api/stats/kit');
+    const r1 = sk1.data.orders.find((r) => r.id === odId);
+    chk('进度=MIN瓶颈口径 60/200=30%', r1.qty_done === 60 && r1.progress_pct === 30, JSON.stringify({ qd: r1.qty_done, pp: r1.progress_pct }));
+    chk('瓶颈=完成率最低未完成工序30%', r1.bottleneck && r1.bottleneck.pct === 30, JSON.stringify(r1.bottleneck));
+    chk('瓶颈工序日速率>0且预测晚于今天', r1.daily_rate > 0 && r1.forecast_end > todayStr, JSON.stringify({ dr: r1.daily_rate, fe: r1.forecast_end }));
+    await H('PUT', '/api/orders/' + odId + '/schedule', { plan_end: dstr(10) });
+    const r2 = (await H('GET', '/api/stats/kit')).data.orders.find((x) => x.id === odId);
+    chk('预测延期天数=预测完工-计划完工', r2.delay_days === Math.round((new Date(r2.forecast_end + 'T00:00:00Z') - new Date(dstr(10) + 'T00:00:00Z')) / 86400000), JSON.stringify({ fe: r2.forecast_end, dd: r2.delay_days }));
+    const dueCases = [[-5, 'overdue_3p'], [-1, 'overdue_1_3'], [1, 'due_soon'], [10, 'none']];
+    let dueAllOk = true;
+    for (const [off, want] of dueCases) {
+      await H('PUT', '/api/orders/' + odId + '/schedule', { plan_end: dstr(off) });
+      const rc = (await H('GET', '/api/stats/kit')).data.orders.find((x) => x.id === odId);
+      if (rc.due_class !== want) dueAllOk = false;
+    }
+    chk('逾期分级 4 档正确(-5/-1/+1/+10)', dueAllOk, '');
+    const sumK = sk1.data.summary;
+    chk('汇总含新KPI字段', ['due_today', 'due_soon', 'overdue', 'delayed_forecast', 'running', 'paused', 'plan_qty', 'done_qty'].every((k) => typeof sumK[k] === 'number'), JSON.stringify(sumK));
+    await H('PUT', '/api/orders/' + odId + '/schedule', { plan_end: dstr(10) }); // 还原合理交期供后续用例
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

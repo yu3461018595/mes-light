@@ -1399,10 +1399,60 @@
     return ok({ order_id: o.id, code: o.code, product_id: o.product_id, qty_plan: o.qty_plan, has_bom: false, kit_pct: null, shortage: 0, lines: [] });
   });
   R('GET', '/stats/kit', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const todayMs = new Date(today + 'T00:00:00Z').getTime();
+    const dayMs = 86400000;
+    const d7ago = new Date(todayMs - 7 * dayMs).toISOString().slice(0, 10);
     const list = T('orders').filter((o) => !['done', 'closed'].includes(o.status)).sort((a, b) => (a.priority - b.priority) || String(a.plan_end || '').localeCompare(String(b.plan_end || '')));
-    const view = (o) => { const p = find('products', o.product_id) || {}; const c = o.customer_id ? find('customers', o.customer_id) : null;
-      return { id: o.id, code: o.code, product_id: o.product_id, product_name: p.name || '', product_code: p.code || '', qty_plan: o.qty_plan, priority: o.priority, plan_start: o.plan_start, plan_end: o.plan_end, status: o.status, customer_name: c ? c.name : null, has_bom: false, kit_pct: null, shortage: 0, shortages: [] }; };
-    return ok({ orders: list.map(view), summary: { total: list.length, full_kit: 0, shortage: 0, no_bom: list.length } });
+    const view = (o) => {
+      const p = find('products', o.product_id) || {}; const c = o.customer_id ? find('customers', o.customer_id) : null;
+      /* 进度/瓶颈/预测：与 server 同口径（MIN 各工序 qty_good） */
+      const steps = T('order_steps').filter((s) => s.order_id === o.id).sort((a, b) => a.seq - b.seq)
+        .map((s) => ({ ...s, pname: (find('processes', s.process_id) || {}).name || '' }));
+      const goods = steps.map((s) => num(s.qty_good));
+      const qtyDone = goods.length ? Math.min(...goods) : 0;
+      const progressPct = num(o.qty_plan) > 0 ? Math.min(100, Math.round(qtyDone / num(o.qty_plan) * 100)) : 0;
+      let bottleneck = null;
+      const unfinished = steps.filter((s) => s.status !== 'done');
+      if (unfinished.length) {
+        const ranked = unfinished.map((s) => ({ s, pct: num(s.qty_plan) > 0 ? num(s.qty_good) / num(s.qty_plan) : 1 }))
+          .sort((a, b) => (a.pct - b.pct) || (b.s.seq - a.s.seq));
+        bottleneck = { step_id: ranked[0].s.id, seq: ranked[0].s.seq, name: ranked[0].s.pname, pct: Math.floor(ranked[0].pct * 100) };
+      }
+      let dailyRate = 0;
+      if (bottleneck) {
+        const r7 = T('reports').filter((x) => x.order_id === o.id && x.order_step_id === bottleneck.step_id && x.report_date >= d7ago);
+        dailyRate = Math.round((r7.reduce((a, x) => a + num(x.qty_good), 0) / 7) * 100) / 100;
+      } else if (steps.length) {
+        const r7 = T('reports').filter((x) => x.order_id === o.id && x.report_date >= d7ago);
+        dailyRate = Math.round((r7.reduce((a, x) => a + num(x.qty_good), 0) / 7) * 100) / 100;
+      }
+      const remaining = Math.max(0, num(o.qty_plan) - qtyDone);
+      let forecastEnd = null; let delayDays = null;
+      if (remaining <= 0) forecastEnd = today;
+      else if (dailyRate > 0) forecastEnd = new Date(todayMs + Math.ceil(remaining / dailyRate) * dayMs).toISOString().slice(0, 10);
+      if (forecastEnd && o.plan_end) delayDays = Math.round((new Date(forecastEnd + 'T00:00:00Z') - new Date(o.plan_end + 'T00:00:00Z')) / dayMs);
+      let dueClass = 'none';
+      if (o.plan_end) {
+        const diff = Math.round((todayMs - new Date(o.plan_end + 'T00:00:00Z').getTime()) / dayMs);
+        if (diff > 0) dueClass = diff >= 3 ? 'overdue_3p' : 'overdue_1_3';
+        else if (diff >= -2) dueClass = 'due_soon';
+      }
+      return { id: o.id, code: o.code, product_id: o.product_id, product_name: p.name || '', product_code: p.code || '', qty_plan: o.qty_plan, priority: o.priority, plan_start: o.plan_start, plan_end: o.plan_end, status: o.status, customer_name: c ? c.name : null, has_bom: false, kit_pct: null, shortage: 0, shortages: [],
+        qty_done: qtyDone, progress_pct: progressPct, steps_total: steps.length, steps_done: steps.filter((s) => s.status === 'done').length,
+        bottleneck, daily_rate: dailyRate, forecast_end: forecastEnd, delay_days: delayDays, due_class: dueClass };
+    };
+    const rs = list.map(view);
+    return ok({ orders: rs, today,
+      summary: { total: rs.length, full_kit: 0, shortage: 0, no_bom: rs.length,
+        due_today: rs.filter((r) => r.plan_end === today).length,
+        due_soon: rs.filter((r) => r.due_class === 'due_soon').length,
+        overdue: rs.filter((r) => r.due_class.startsWith('overdue')).length,
+        delayed_forecast: rs.filter((r) => r.delay_days !== null && r.delay_days > 0).length,
+        running: rs.filter((r) => r.status === 'running').length,
+        paused: rs.filter((r) => r.status === 'paused').length,
+        plan_qty: rs.reduce((a, r) => a + num(r.qty_plan), 0),
+        done_qty: rs.reduce((a, r) => a + r.qty_done, 0) } });
   });
   R('PUT', '/orders/(\\d+)/schedule', (m, b) => {
     if (requireRole('admin', 'technician')) return fail('无权限', 403);
