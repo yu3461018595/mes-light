@@ -63,8 +63,11 @@ main.has-tab { padding-bottom: calc(var(--tabh) + var(--safe-b) + 14px); }
 .tab {
   flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 3px; color: var(--ink-3); font-size: 11px; font-weight: 600; text-decoration: none;
-  position: relative; padding-top: 4px;
+  position: relative; padding-top: 5px; transition: color .15s;
 }
+.tab::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%) scaleX(0);
+  width: 26px; height: 3px; border-radius: 0 0 3px 3px; background: var(--blue); transition: transform .18s ease; }
+.tab.on::before { transform: translateX(-50%) scaleX(1); }
 .tab svg { width: 24px; height: 24px; }
 .tab.on { color: var(--blue); }
 .tab-badge {
@@ -109,13 +112,15 @@ input.ipt, select.ipt, textarea.ipt {
   width: 100%; height: 50px; border: 1.5px solid var(--line); border-radius: 12px;
   padding: 0 14px; font-size: 16px; background: #fff; -webkit-appearance: none; color: var(--ink);
 }
-input.ipt:focus, select.ipt:focus, textarea.ipt:focus { border-color: var(--blue); outline: none; }
+input.ipt:focus, select.ipt:focus, textarea.ipt:focus { border-color: var(--blue); outline: none;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, .12); }
 textarea.ipt { height: 84px; padding: 12px 14px; resize: none; line-height: 1.5; }
 select.ipt { background-image: linear-gradient(45deg, transparent 50%, #98a3b0 50%), linear-gradient(135deg, #98a3b0 50%, transparent 50%);
   background-position: calc(100% - 19px) 22px, calc(100% - 14px) 22px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 34px; }
 .btn {
   width: 100%; height: 52px; border: none; border-radius: 13px; font-size: 17px; font-weight: 700;
-  background: var(--blue); color: #fff; display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; display: flex; align-items: center; justify-content: center; gap: 6px;
+  box-shadow: 0 2px 8px rgba(29, 78, 216, .25);
 }
 .btn:active { transform: translateY(1px); }
 .btn[disabled] { opacity: .5; }
@@ -155,7 +160,7 @@ select.ipt { background-image: linear-gradient(45deg, transparent 50%, #98a3b0 5
   flex: 0 0 auto; border: 1px solid var(--line); background: #fff; color: var(--ink-2);
   height: 34px; padding: 0 14px; border-radius: 999px; font-size: 13.5px; font-weight: 600;
 }
-.seg button.on { background: var(--blue); border-color: var(--blue); color: #fff; }
+.seg button.on { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 2px 8px rgba(29, 78, 216, .3); }
 .seg button i { font-style: normal; opacity: .8; margin-left: 3px; }
 
 /* ---------- 进度条 ---------- */
@@ -216,6 +221,8 @@ select.ipt { background-image: linear-gradient(45deg, transparent 50%, #98a3b0 5
 .step { border: 1.5px solid var(--line); border-radius: 12px; padding: 12px 13px; margin-bottom: 10px;
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
 .step.sel { border-color: var(--blue); background: #f5f8ff; box-shadow: 0 0 0 2px rgba(29,78,216,.13); }
+.step { transition: border-color .15s, background .15s; }
+.step.sel .st-nm { color: var(--blue); }
 .step.locked { background: #f7f8fa; }
 .step .st-main { flex: 1 1 190px; min-width: 0; }
 .step .st-nm { font-weight: 700; font-size: 15px; overflow-wrap: anywhere; }
