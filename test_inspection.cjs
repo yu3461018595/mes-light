@@ -407,8 +407,12 @@ async function api(m, u, b, t) {
     // 操作工不能当责任人：创建 / 编辑 / 专用接口三处均拒绝
     const wkOwn = await H('POST', '/api/users', { username: 'wkown' + sfx6.slice(-4), password: 'pass1234', name: '操作工甲', role: 'worker', team: '甲班' });
     chk('建操作工账号', wkOwn.ok, wkOwn);
+    const logsBeforeOw = (await api('GET', '/api/logs?limit=500', null, lg.data.token)).data || [];
+    const lastCreateId = ((logsBeforeOw.find((x) => x.action === '创建工单')) || {}).id || 0;
     const owR1 = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: wkOwn.data.id });
     chk('创建工单选操作工当责任人被拒', owR1.ok === false, owR1);
+    const logsAfterOw = (await api('GET', '/api/logs?limit=500', null, lg.data.token)).data || [];
+    chk('创建被拒后不误写「创建工单」日志（校验在事务外）', !logsAfterOw.find((x) => x.action === '创建工单' && x.id > lastCreateId), logsAfterOw.slice(0, 3));
     const owR2 = await H('PUT', '/api/orders/' + ord8.data.id, { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, priority: 2, plan_start: '2026-10-06', plan_end: '2026-10-07', remark: '', owner_user_id: wkOwn.data.id });
     chk('编辑工单选操作工当责任人被拒', owR2.ok === false, owR2);
     const owR3 = await H('PUT', '/api/orders/' + ord8.data.id + '/owner', { owner_user_id: wkOwn.data.id });

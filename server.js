@@ -533,15 +533,17 @@ route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
   const code = b.code && b.code.trim() ? b.code.trim()
     : 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
   if (get('SELECT id FROM orders WHERE code=?', [code])) return fail(res, '工单号已存在');
+  // 责任人（accountable）：创建时可直接指定；校验存在且启用
+  // 注意：必须在 tx() 之外校验 —— fail() 不抛异常，写在事务回调内 return 只会退出回调，
+  // 导致拒绝时仍继续写「创建工单」日志并重复写响应
+  let ownerName = null;
+  if (b.owner_user_id) {
+    const ow = get('SELECT id,name,active,role FROM users WHERE id=?', [num(b.owner_user_id)]);
+    if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
+    if (ow.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
+    ownerName = ow.name;
+  }
   const id = tx(() => {
-    // 责任人（accountable）：创建时可直接指定；校验存在且启用
-    let ownerName = null;
-    if (b.owner_user_id) {
-      const ow = get('SELECT id,name,active,role FROM users WHERE id=?', [num(b.owner_user_id)]);
-      if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
-      if (ow.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
-      ownerName = ow.name;
-    }
     const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,owner_user_id,owner_name,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [code, b.product_id, b.route_id, b.customer_id || null, qty, num(b.priority, 2),
