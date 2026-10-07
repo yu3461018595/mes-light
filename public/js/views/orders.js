@@ -186,7 +186,7 @@ Views.orders = {
     if (id) o = await API.get('/orders/' + id);
     const routeOf = (pid) => meta.routes.find((r) => r.product_id == pid);
     const ownerOpts = '<option value="">不指定（沿用系统定责）</option>'
-      + (users || []).filter((u) => u.active)
+      + (users || []).filter((u) => u.active && u.role !== 'worker')
         .map((u) => `<option value="${u.id}"${o && Number(o.owner_user_id) === Number(u.id) ? ' selected' : ''}>${UI.esc(u.name)}（${UI.esc(u.role)}${u.team ? '·' + UI.esc(u.team) : ''}）</option>`)
         .join('');
 
@@ -208,7 +208,7 @@ Views.orders = {
         <label class="field"><span>备注</span><input class="input" id="fRemark" value="${o ? UI.esc(o.remark || '') : ''}"></label>
         <label class="field"><span>计划开工</span><input class="input" type="date" id="fStart" value="${o ? o.plan_start : UI.today()}"></label>
         <label class="field"><span>计划完工</span><input class="input" type="date" id="fEnd" value="${o ? o.plan_end : UI.today()}"></label>
-        <label class="field" style="grid-column:1/-1"><span>责任人<span class="muted" style="font-weight:normal">（质量异常时首推此人处理）</span></span>
+        <label class="field" style="grid-column:1/-1"><span>责任人<span class="muted" style="font-weight:normal">（质量异常时首推此人处理；可选技术员/质检员/管理员，不含操作工）</span></span>
           <select class="input" id="fOwner">${ownerOpts}</select></label>
       </div>
       ${o ? '' : `<div class="small muted">工单号自动生成；保存后按工艺路线展开工序，可再派工到人和设备。</div>`}`;
@@ -636,12 +636,12 @@ Views.orders = {
     if (ownerBtn) ownerBtn.onclick = async () => {
       const users = await API.get('/users');
       const opts = '<option value="">不指定（沿用系统定责）</option>'
-        + (users || []).filter((u) => u.active)
+        + (users || []).filter((u) => u.active && u.role !== 'worker')
           .map((u) => `<option value="${u.id}"${Number(o.owner_user_id) === Number(u.id) ? ' selected' : ''}>${UI.esc(u.name)}（${UI.esc(u.role)}${u.team ? '·' + UI.esc(u.team) : ''}）</option>`)
           .join('');
       UI.modal({
         title: '指派工单负责人 · ' + o.code,
-        body: `<div class="small muted" style="margin-bottom:8px">负责人为该工单的 accountable 责任人；当检验反馈（首检/过程检/终检判定）产生质量异常时，将首条通知推送给此人处理。</div>
+        body: `<div class="small muted" style="margin-bottom:8px">负责人为该工单的 accountable 责任人；当检验反馈（首检/过程检/终检判定）产生质量异常时，将首条通知推送给此人处理。可选范围为技术员/质检员/管理员，不含操作工。</div>
           <label class="field"><span>负责人</span><select class="input" id="ownerSel">${opts}</select></label>`,
         onOk: async (mask) => {
           const v = mask.querySelector('#ownerSel').value;

@@ -404,6 +404,15 @@ async function api(m, u, b, t) {
     chk('编辑清空责任人成功', ord8e3.ok && ord8e4.data.owner_user_id == null && !ord8e4.data.owner_name, ord8e4.data);
     const ord8bad = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: 999999 });
     chk('不存在的责任人被拒 400', ord8bad.ok === false, ord8bad);
+    // 操作工不能当责任人：创建 / 编辑 / 专用接口三处均拒绝
+    const wkOwn = await H('POST', '/api/users', { username: 'wkown' + sfx6.slice(-4), password: 'pass1234', name: '操作工甲', role: 'worker', team: '甲班' });
+    chk('建操作工账号', wkOwn.ok, wkOwn);
+    const owR1 = await H('POST', '/api/orders', { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, owner_user_id: wkOwn.data.id });
+    chk('创建工单选操作工当责任人被拒', owR1.ok === false, owR1);
+    const owR2 = await H('PUT', '/api/orders/' + ord8.data.id, { product_id: prod6.data.id, route_id: rt6.data.id, qty_plan: 5, priority: 2, plan_start: '2026-10-06', plan_end: '2026-10-07', remark: '', owner_user_id: wkOwn.data.id });
+    chk('编辑工单选操作工当责任人被拒', owR2.ok === false, owR2);
+    const owR3 = await H('PUT', '/api/orders/' + ord8.data.id + '/owner', { owner_user_id: wkOwn.data.id });
+    chk('专用接口选操作工当责任人被拒', owR3.ok === false, owR3);
 
     // 17) 报工不良提醒：达阈值（检验设置 minor_ratio，默认 5%）才推送；收件人=责任人+质检员，不再全员轰炸管理员
     console.log('\n--- 17) 报工不良提醒阈值与收件人 ---');

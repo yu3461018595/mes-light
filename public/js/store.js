@@ -262,8 +262,9 @@
       const ratio = (totalGood + totalBad) > 0 ? totalBad / (totalGood + totalBad) : 1;
       if (ratio >= threshold) {
         const firstStep = items.length ? find('order_steps', items[0].order_step_id) : null;
-        const owner = order.owner_user_id ? find('users', order.owner_user_id) : null;
-        const resp = (owner && owner.active) ? owner : resolveIssueAssignee(firstStep, order);
+        const ownerRaw = order.owner_user_id ? find('users', order.owner_user_id) : null;
+        const owner = (ownerRaw && ownerRaw.active && ownerRaw.role !== 'worker') ? ownerRaw : null;
+        const resp = owner || resolveIssueAssignee(firstStep, order);
         const tos = [resp].concat(T('users').filter((u) => u.active && u.role === 'inspector' && u.id !== act.id && (!resp || u.id !== resp.id)));
         const pct = Math.round(ratio * 1000) / 10;
         pushMessage({
@@ -430,8 +431,9 @@
     const oid = insert('orders', {
       id: 0, code, product_id: num(b.product_id), route_id: num(b.route_id), customer_id: b.customer_id ? num(b.customer_id) : null,
       qty_plan: qty, priority: num(b.priority, 2), plan_start: b.plan_start || today(), plan_end: b.plan_end || today(),
-      status: 'created', remark: b.remark || '', created_by: actor().id, owner_user_id: b.owner_user_id ? num(b.owner_user_id) : null,
-      owner_name: b.owner_user_id ? (find('users', b.owner_user_id) || {}).name || null : null,
+      status: 'created', remark: b.remark || '', created_by: actor().id,
+      owner_user_id: b.owner_user_id ? num(b.owner_user_id) : null,
+      owner_name: b.owner_user_id ? ((u8) => (u8 && u8.active && u8.role !== 'worker' ? u8.name : null))(find('users', b.owner_user_id)) : null,
       created_at: nowISO(), start_time: null, finish_time: null, close_reason: '',
     });
     T('route_steps').filter((s) => s.route_id === route.id).sort((a, b) => a.seq - b.seq)
@@ -447,9 +449,15 @@
     const route = find('routes', b.route_id);
     if (!route) return fail('工艺路线不存在');
     const ownerPatch = {};
-    if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id')) {
-      ownerPatch.owner_user_id = b.owner_user_id ? num(b.owner_user_id) : null;
-      ownerPatch.owner_name = b.owner_user_id ? (find('users', b.owner_user_id) || {}).name || null : null;
+    if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id') && b.owner_user_id) {
+      const u9 = find('users', b.owner_user_id);
+      if (!u9 || !u9.active) return fail('所选责任人不存在或未启用', 400);
+      if (u9.role === 'worker') return fail('责任人不能选操作工，请选技术员/质检员/管理员', 400);
+      ownerPatch.owner_user_id = num(b.owner_user_id);
+      ownerPatch.owner_name = u9.name;
+    } else if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id')) {
+      ownerPatch.owner_user_id = null;
+      ownerPatch.owner_name = null;
     }
     update('orders', before.id, {
       product_id: num(b.product_id), route_id: num(b.route_id), customer_id: b.customer_id ? num(b.customer_id) : null,
@@ -475,6 +483,7 @@
     if (uid) {
       const u = find('users', uid);
       if (!u || !u.active) return fail('所选用户不存在或未启用', 400);
+      if (u.role === 'worker') return fail('责任人不能选操作工，请选技术员/质检员/管理员', 400);
       uname = u.name;
     }
     update('orders', o.id, { owner_user_id: uid, owner_name: uname });

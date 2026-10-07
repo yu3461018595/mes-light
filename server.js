@@ -537,8 +537,9 @@ route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
     // 责任人（accountable）：创建时可直接指定；校验存在且启用
     let ownerName = null;
     if (b.owner_user_id) {
-      const ow = get('SELECT id,name,active FROM users WHERE id=?', [num(b.owner_user_id)]);
+      const ow = get('SELECT id,name,active,role FROM users WHERE id=?', [num(b.owner_user_id)]);
       if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
+      if (ow.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
       ownerName = ow.name;
     }
     const oid = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,owner_user_id,owner_name,created_at)
@@ -586,8 +587,9 @@ route('PUT', '/api/orders/(\\d+)/owner', ['admin', 'technician'], (req, res, m, 
   const uid = b.owner_user_id ? num(b.owner_user_id) : null;
   let uname = null;
   if (uid) {
-    const u = get('SELECT id,name,active FROM users WHERE id=?', [uid]);
+    const u = get('SELECT id,name,active,role FROM users WHERE id=?', [uid]);
     if (!u || !u.active) return fail(res, '所选用户不存在或未启用', 400);
+    if (u.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
     uname = u.name;
   }
   run('UPDATE orders SET owner_user_id=?, owner_name=? WHERE id=?', [uid, uname, oid]);
@@ -730,8 +732,9 @@ route('PUT', '/api/orders/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) 
   if (Object.prototype.hasOwnProperty.call(b, 'owner_user_id')) {
     let ownerName = null;
     if (b.owner_user_id) {
-      const ow = get('SELECT id,name,active FROM users WHERE id=?', [num(b.owner_user_id)]);
+      const ow = get('SELECT id,name,active,role FROM users WHERE id=?', [num(b.owner_user_id)]);
       if (!ow || !ow.active) return fail(res, '所选责任人不存在或未启用', 400);
+      if (ow.role === 'worker') return fail(res, '责任人不能选操作工，请选技术员/质检员/管理员', 400);
       ownerName = ow.name;
       ownerParams.push(num(b.owner_user_id), ownerName);
     } else {
@@ -968,7 +971,9 @@ function notifyAfterReport(order, actor, items, results, product) {
     const ratio = (totalGood + totalBad) > 0 ? totalBad / (totalGood + totalBad) : 1;
     if (ratio >= threshold) {
       const firstStep = items.length ? get('SELECT * FROM order_steps WHERE id=?', [items[0].order_step_id]) : null;
-      const owner = order.owner_user_id ? get('SELECT id,name FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+      // 责任人不含操作工：负责人是操作工时视为未指定，走定责链（技术员→创建人→管理员）
+      const ownerRaw = order.owner_user_id ? get('SELECT id,name,active,role FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+      const owner = ownerRaw && ownerRaw.role !== 'worker' ? ownerRaw : null;
       const resp = owner || resolveIssueAssignee(firstStep, order);
       const inspectors = usersByRole('inspector').filter((x) => x.id !== actor.id && x.id !== resp.id);
       const pct = Math.round(ratio * 1000) / 10;
@@ -1900,7 +1905,9 @@ function createQualityIssue(opt) {  const ts = now();
   const step = opt.order_step_id ? get('SELECT * FROM order_steps WHERE id=?', [opt.order_step_id]) : null;
   const order = opt.order_id ? get('SELECT * FROM orders WHERE id=?', [opt.order_id]) : null;
   // 工单负责人优先：若工单指定了负责人，则该工单的检验反馈异常首推负责人处理；否则沿用原定责链路
-  const orderOwner = (order && order.owner_user_id) ? get('SELECT id,name FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+  // 工单负责人优先（不含操作工：历史脏数据兜底走定责链）；否则沿用原定责链路
+  const ownerRaw2 = (order && order.owner_user_id) ? get('SELECT id,name,active,role FROM users WHERE id=? AND active=1', [order.owner_user_id]) : null;
+  const orderOwner = ownerRaw2 && ownerRaw2.role !== 'worker' ? ownerRaw2 : null;
   const assignee = orderOwner || resolveIssueAssignee(step, order);
   const id = insert(`INSERT INTO quality_issues(code,level,source,order_id,order_step_id,inspection_id,product_id,product_name,order_code,process_name,
       qty_affected,bad_summary,status,assignee_user_id,assignee_name,claimed_at,due_at,escalated,cause,action,disposition,verifier,closed_at,created_by,created_at,supplier)
