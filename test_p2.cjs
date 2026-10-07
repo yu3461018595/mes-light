@@ -150,6 +150,31 @@ async function api(method, url, body, token) {
     chk('汇总含新KPI字段', ['due_today', 'due_soon', 'overdue', 'delayed_forecast', 'running', 'paused', 'plan_qty', 'done_qty'].every((k) => typeof sumK[k] === 'number'), JSON.stringify(sumK));
     await H('PUT', '/api/orders/' + odId + '/schedule', { plan_end: dstr(10) }); // 还原合理交期供后续用例
 
+    // ---------- 4.6 计件工资核算：报工快照单价 + 按月核算 + 个人明细 + 隐私 ----------
+    const workerId = lw.data.user.id;
+    const odSteps2 = (await H('GET', '/api/orders/' + odId)).data.steps;
+    const procId0 = odSteps2[0].process_id;
+    const upPr1 = await H('PUT', '/api/processes/' + procId0, { std_price: 0.5 });
+    chk('工序单价维护为0.5元/件', upPr1.ok, JSON.stringify(upPr1));
+    const repW = await api('POST', '/api/reports', { order_id: odId, order_step_id: odSteps2[0].id, qty_good: 50, qty_bad: 0, work_min: 30 }, wTok);
+    chk('操作工报工返回本次计件50×0.5=25', repW.ok && Math.abs((repW.data.total_wage || 0) - 25) < 0.001 && Math.abs((repW.data.steps[0].wage || 0) - 25) < 0.001, JSON.stringify(repW.data));
+    // 单价快照：报工后把单价改成 1 元，历史工资不变
+    await H('PUT', '/api/processes/' + procId0, { std_price: 1 });
+    const pw1 = await H('GET', '/api/stats/piece_wage?days=1');
+    const rowW = pw1.data.rows.find((r) => r.id === workerId);
+    chk('单价调后历史工资仍按快照0.5计（25元）', !!rowW && Math.abs(rowW.wage - 25) < 0.001, JSON.stringify(pw1.data.rows));
+    const pwM = await H('GET', '/api/stats/piece_wage?month=' + todayStr.slice(0, 7));
+    const rowM = pwM.data.rows.find((r) => r.id === workerId);
+    const pwMD = await H('GET', '/api/stats/piece_wage?month=' + todayStr.slice(0, 7) + '&worker_id=' + workerId + '&detail=1');
+    const detSum = (pwMD.data.detail || []).reduce((a, x) => a + (x.amount || 0), 0);
+    const hasNew = (pwMD.data.detail || []).some((x) => Math.abs(x.unit_price - 0.5) < 0.001 && Math.abs(x.amount - 25) < 0.001);
+    chk('按月核算命中且明细与汇总自洽', !!rowM && Math.abs(rowM.wage - detSum) < 0.01 && hasNew, JSON.stringify({ wage: rowM && rowM.wage, detSum, hasNew }));
+    const pwD = await H('GET', '/api/stats/piece_wage?days=1&worker_id=' + workerId + '&detail=1');
+    const hasSnap = (pwD.data.detail || []).some((x) => Math.abs(x.unit_price - 0.5) < 0.001 && Math.abs(x.amount - 25) < 0.001);
+    chk('个人明细逐单列出且单价快照0.5', pwD.ok && (pwD.data.detail || []).length >= 1 && hasSnap, JSON.stringify(pwD.data));
+    const pwSelf = await api('GET', '/api/stats/piece_wage?days=30', null, wTok);
+    chk('操作工仅能查本人工资', pwSelf.ok && pwSelf.data.self_only === true && (pwSelf.data.rows || []).every((r) => r.id === workerId), JSON.stringify(pwSelf.data));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

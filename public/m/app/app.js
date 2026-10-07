@@ -481,7 +481,7 @@
         <div class="st-main">
           <div class="st-nm">${s.seq_no || s.seq}. ${esc(s.process_name)}</div>
           <div class="st-sub">${esc(s.process_code || '')} · 指派班组 ${esc(s.assignee_team || '暂无')}${
-            s.inspect_type ? ' · 检验点 ' + esc(INSPECT_LABEL[s.inspect_type] || '检验') : ''}<br>已报 ${s.qty_good}/${s.qty_plan}${s.qty_bad ? ' · 不良 ' + s.qty_bad : ''}</div>
+            s.inspect_type ? ' · 检验点 ' + esc(INSPECT_LABEL[s.inspect_type] || '检验') : ''}<br>已报 ${s.qty_good}/${s.qty_plan}${s.qty_bad ? ' · 不良 ' + s.qty_bad : ''}${Number(s.std_price) > 0 ? ` · <b style="color:#1d4ed8">计件 ¥${Number(s.std_price).toFixed(2)}/件</b>` : ''}</div>
           ${note}
         </div>
         ${canReport(s) ? `<div class="st-tick">${sel ? '✓' : ''}</div>` : ''}
@@ -623,11 +623,13 @@
       const auto = (r && r.steps || []).filter((x) => x.autoFinishIn);
       const autoQty = auto.reduce((a, x) => a + num(x.autoFinishIn.qty), 0);
       const need = (r && r.steps || []).filter((x) => x.needInspect).length;
+      const wage = Math.round((r.steps || []).reduce((a, x) => a + num(x.wage), 0) * 100) / 100;
       okMask('报工成功', [
+        wage > 0 ? `本次计件工资 <b style="color:#1d4ed8">¥${wage.toFixed(2)}</b>` : '',
         autoQty ? `末道工序已自动成品入库 ${autoQty} 件` : '',
         need ? `${need} 道工序已转入待检，质检员已收到通知` : '',
         '已通知对应技术员',
-      ].filter(Boolean).join('<br>'), [
+      ].filter(Boolean).join('<br>') || ' ', [
         { text: '继续报工本单', cls: 'ghost', onClick: () => renderOrder(S.order.id) },
         { text: '返回工作台', onClick: () => nav('#/home') },
       ]);
@@ -1500,12 +1502,32 @@
 
   async function renderProfile() {
     const me = await ensureMe();
-    $view.innerHTML = `<div class="card"><div class="card-h"><h3>修改姓名</h3></div><div class="card-b">
+    $view.innerHTML = `<div class="card"><div class="card-h"><h3>我的计件工资</h3></div>
+        <div class="card-b" id="pWage"><div class="tiny muted">加载中…</div></div></div>
+      <div class="card"><div class="card-h"><h3>修改姓名</h3></div><div class="card-b">
         <div class="field"><span>姓名</span><input class="ipt" id="pName" value="${esc(me.name)}"></div>
         <div class="field"><span>账号 / 工号</span><input class="ipt" value="${esc(me.username || '')}" disabled></div>
         <div class="field"><span>班组</span><input class="ipt" value="${esc(me.team || '未分组')}" disabled></div>
         <button class="btn" id="pSave">保存</button>
       </div></div><div style="height:10px"></div>`;
+    /* 我的计件工资：本月 + 近30天（服务端对普通员工强制只返回本人数据） */
+    (async () => {
+      const box = $view.querySelector('#pWage'); if (!box) return;
+      const month = new Date().toISOString().slice(0, 7);
+      try {
+        const r = await get('/api/stats/piece_wage?month=' + month);
+        const rows = (r && r.rows) || [];
+        const mine = rows.length ? rows[0] : null;
+        box.innerHTML = mine
+          ? `<div class="wage-grid">
+              <div class="wg-item"><b style="color:#1d4ed8;font-size:22px">¥${Number(mine.wage).toFixed(2)}</b><span>${month.slice(5)} 月计件工资</span></div>
+              <div class="wg-item"><b style="color:#0f9d58;font-size:22px">${Number(mine.good)}</b><span>本月合格件数</span></div>
+            </div>
+            <div class="tiny muted" style="margin-top:8px">工资=报工合格数×工序计件单价；不良不计件，返工重报合格后计。</div>`
+          : `<div class="tiny muted">本月暂无计件报工记录。</div>
+             <div class="tiny muted" style="margin-top:4px">在工单报工时选择已维护单价的工序即可计件。</div>`;
+      } catch (e) { box.innerHTML = `<div class="tiny muted">工资数据加载失败：${esc(e.message)}</div>`; }
+    })();
     $view.querySelector('#pSave').onclick = async () => {
       const name = $view.querySelector('#pName').value.trim();
       if (!name) return toast('姓名不能为空');

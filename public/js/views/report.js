@@ -95,7 +95,7 @@ Views.report = {
               <div class="row" style="justify-content:space-between">
                 <div>
                   <b>${s.seq_no || s.seq} ${UI.esc(s.process_name)}</b>
-                  <div class="small muted">${UI.esc(s.wc_name || '未指定设备')} · 责任人 ${UI.esc(s.assignee_name || '暂无')}</div>
+                  <div class="small muted">${UI.esc(s.wc_name || '未指定设备')} · 责任人 ${UI.esc(s.assignee_name || '暂无')}${Number(s.std_price) > 0 ? ' · <b style="color:var(--primary)">计件 ¥${UI.f2(s.std_price)}/件</b>' : ''}</div>
                 </div>
                 <div style="text-align:right">
                   ${UI.badge(s.status)}
@@ -118,6 +118,7 @@ Views.report = {
                 <button class="qbtn" id="gInc">+</button>
               </div>
               <div class="small muted" id="leftTip"></div>
+              <div class="small" id="wageTip" style="margin-top:2px;color:var(--primary)"></div>
             </div>
             <label class="field"><span>实动工时（小时）</span>
               <input class="input" id="fMin" type="number" min="0" step="0.5" value="0"></label>
@@ -143,6 +144,7 @@ Views.report = {
           { t: '工序', f: (r) => UI.esc(r.process_name || '—') },
           { t: '报工人', f: (r) => UI.esc(r.worker_name || '—') },
           { t: '合格', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.qty_good)}</span>` },
+          { t: '计件', f: (r) => Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/件</div>` : '<span class="small muted">—</span>' },
           { t: '不良', f: (r) => {
             if (r.bad_reasons && r.bad_reasons.length) {
               const parts = r.bad_reasons.map((x) => `${UI.esc(x.bad_reason)}${x.qty ? '×' + x.qty : ''}`);
@@ -153,16 +155,26 @@ Views.report = {
         ], o.reports.slice(0, 8), { emptyText: '暂无记录' })}</div>
       </div>`;
 
+    /* 计件工资实时试算：本次合格数 × 工序计件单价 */
+    const paintWage = () => {
+      const tip = el.querySelector('#wageTip'); if (!tip) return;
+      const price = Number(pick.std_price) || 0;
+      if (price <= 0) { tip.textContent = '该工序未维护计件单价，不计件（工序档案中可设置）'; return; }
+      const amt = (Number(g.value) || 0) * price;
+      tip.innerHTML = `本次计件 <b>¥${UI.f2(amt)}</b>（${UI.n2(Number(g.value) || 0)} 件 × ¥${UI.f2(price)}）`;
+    };
     const bindQty = () => {
       const left = Math.max(0, pick.qty_plan - pick.qty_good);
       el.querySelector('#leftTip').innerHTML = `本工序剩余待报 <b>${UI.n2(left)}</b> 件`;
+      paintWage();
     };
-    bindQty();
 
     const g = el.querySelector('#fGood');
     const add = (input, n) => { input.value = Math.max(0, (Number(input.value) || 0) + n); };
-    el.querySelector('#gDec').onclick = () => add(g, -10);
-    el.querySelector('#gInc').onclick = () => add(g, 10);
+    el.querySelector('#gDec').onclick = () => { add(g, -10); paintWage(); };
+    el.querySelector('#gInc').onclick = () => { add(g, 10); paintWage(); };
+    g.addEventListener('input', paintWage);
+    bindQty();
 
     // 不良明细：支持一道工序多种不良，填一种自动出现下一种
     const reasons = (o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons) || [];
@@ -230,11 +242,12 @@ Views.report = {
       try {
         const r = await API.post('/reports', payload);
         const auto = (r && r.steps || []).filter((s) => s.autoFinishIn);
+        const wageTxt = Number(r.total_wage) > 0 ? `，计件 ¥${UI.f2(r.total_wage)}` : '';
         if (auto.length) {
           const qty = auto.reduce((a, s) => a + Number(s.autoFinishIn.qty), 0);
-          UI.toast('报工成功，末道工序已自动入库 ' + qty + ' 件', 'ok');
+          UI.toast(`报工成功，末道工序已自动入库 ${qty} 件${wageTxt}`, 'ok');
         } else {
-          UI.toast('报工成功', 'ok');
+          UI.toast('报工成功' + wageTxt, 'ok');
         }
         this.showOrder(el, orderId, pick.id);
       } catch (e) { UI.toast(e.message, 'err'); }

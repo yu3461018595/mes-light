@@ -100,19 +100,32 @@ Views.stats = {
     el.querySelectorAll('[data-o]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.o);
   },
 
-  /* 计件工资：合格数 × 工序计件单价（processes.std_price），按人汇总 */
+  /* 计件工资：合格数 × 计件单价（报工时快照），支持按月核算与个人逐单明细 */
   async renderWage(el) {
     let data;
-    try { data = await API.get('/stats/piece_wage?days=' + this.days); }
+    const q = this.wageMonth ? ('?month=' + this.wageMonth) : ('?days=' + this.days);
+    try { data = await API.get('/stats/piece_wage' + q); }
     catch (e) { el.querySelector('#panel').innerHTML = `<p class="small" style="color:var(--danger)">${UI.esc(e.message)}</p>`; return; }
     const rows = data.rows || [];
     const totalWage = rows.reduce((s, r) => s + (r.wage || 0), 0);
     const totalGood = rows.reduce((s, r) => s + (r.good || 0), 0);
-    el.querySelector('#wageExport').onclick = () => this.exportWage(rows);
+    const periodTxt = data.month ? `${data.month} 月` : `近 ${data.days} 天`;
+    el.querySelector('#wageExport').onclick = () => this.exportWage(rows, periodTxt);
     el.querySelector('#panel').innerHTML = `
+      <div class="card" style="margin-bottom:14px"><div class="card-b" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <span class="small muted">核算周期</span>
+        <label class="row" style="gap:6px;align-items:center;cursor:pointer">
+          <input type="radio" name="wmode" value="days" ${!this.wageMonth ? 'checked' : ''}> 按天数（上方页签切换）
+        </label>
+        <label class="row" style="gap:6px;align-items:center;cursor:pointer">
+          <input type="radio" name="wmode" value="month" ${this.wageMonth ? 'checked' : ''}> 按月
+        </label>
+        <input class="input" id="wageMonth" type="month" value="${UI.esc(this.wageMonth || '')}" style="width:150px" ${this.wageMonth ? '' : 'disabled'}>
+        <span class="small muted">口径：报工合格数 × 计件单价（报工时快照，调价不影响历史）</span>
+      </div></div>
       <div class="grid g4" style="margin-bottom:14px">
         <div class="stat"><div class="stat-l">工资合计</div><div class="stat-v" style="color:var(--primary)">¥${UI.n2(totalWage)}</div>
-          <div class="stat-s">近 ${data.days} 天 · 计件口径</div></div>
+          <div class="stat-s">${periodTxt} · 计件口径</div></div>
         <div class="stat"><div class="stat-l">计件合格数</div><div class="stat-v" style="color:var(--ok)">${UI.n2(totalGood)}</div>
           <div class="stat-s">件 · ${rows.length} 人参与</div></div>
         <div class="stat"><div class="stat-l">人均工资</div><div class="stat-v">¥${UI.n2(rows.length ? totalWage / rows.length : 0)}</div>
@@ -121,7 +134,7 @@ Views.stats = {
           <div class="stat-s">元 / 件（加权平均）</div></div>
       </div>
       <div class="card">
-        <div class="card-h"><h3>计件工资明细</h3><span class="small muted">工资 = 报工合格数 × 工序计件单价（工序档案中维护）</span></div>
+        <div class="card-h"><h3>计件工资明细</h3><span class="small muted">点击「明细」查看该员工逐单核算记录</span></div>
         <div class="card-b tight">${UI.table([
           { t: '排名', f: (r, i) => `<b style="color:${i < 3 ? 'var(--primary)' : 'var(--text3)'}">${i + 1}</b>` },
           { t: '姓名', k: 'name' }, { t: '班组', f: (r) => UI.esc(r.team || '—') },
@@ -131,18 +144,46 @@ Views.stats = {
           { t: '工时', f: (r) => `<span class="mono">${UI.f1((r.minu || 0) / 60)} h</span>` },
           { t: '计件工资', f: (r) => `<b class="mono" style="color:var(--primary)">¥${UI.n2(r.wage || 0)}</b>` },
           { t: '件均工资', f: (r) => `<span class="mono">¥${r.good ? UI.f2(r.wage / r.good) : '—'}</span>` },
+          { t: '', f: (r) => `<button class="btn btn-sm" data-wd="${r.id}">明细</button>` },
         ], rows, { emptyText: '所选区间没有报工数据' })}</div>
-      </div>`;
+      </div>
+      <div id="wageDetail"></div>`;
+    el.querySelectorAll('input[name="wmode"]').forEach((r) => r.onchange = () => {
+      this.wageMonth = r.value === 'month' ? (this.wageMonth || UI.today().slice(0, 7)) : '';
+      this.render(el);
+    });
+    const mi = el.querySelector('#wageMonth');
+    if (mi) mi.onchange = () => { this.wageMonth = mi.value || ''; this.render(el); };
+    el.querySelectorAll('[data-wd]').forEach((b) => b.onclick = async () => {
+      const q2 = (this.wageMonth ? 'month=' + this.wageMonth : 'days=' + this.days) + '&worker_id=' + b.dataset.wd + '&detail=1';
+      try {
+        const d = await API.get('/stats/piece_wage?' + q2);
+        const det = d.detail || [];
+        const name = (rows.find((x) => String(x.id) === String(b.dataset.wd)) || {}).name || '';
+        el.querySelector('#wageDetail').innerHTML = `<div class="card" style="margin-top:14px">
+          <div class="card-h"><h3>${UI.esc(name)} · 逐单核算明细</h3><span class="small muted">${periodTxt} · 共 ${det.length} 笔 · 合计 ¥${UI.n2(det.reduce((a, x) => a + (x.amount || 0), 0))}</span></div>
+          <div class="card-b tight">${UI.table([
+            { t: '日期', k: 'report_date' },
+            { t: '工单', k: 'order_code' },
+            { t: '工序', f: (x) => UI.esc(x.process_name || '—') },
+            { t: '合格', f: (x) => `<span class="mono" style="color:var(--ok)">${UI.n2(x.qty_good)}</span>` },
+            { t: '不良', f: (x) => `<span class="mono" style="color:var(--danger)">${UI.n2(x.qty_bad)}</span>` },
+            { t: '单价', f: (x) => `<span class="mono">¥${UI.f2(x.unit_price)}</span>` },
+            { t: '金额', f: (x) => `<b class="mono" style="color:var(--primary)">¥${UI.f2(x.amount)}</b>` },
+          ], det, { emptyText: '该区间没有报工记录' })}</div></div>`;
+        el.querySelector('#wageDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (e) { UI.toast(e.message, 'err'); }
+    });
   },
 
-  exportWage(rows) {
+  exportWage(rows, periodTxt) {
     const lines = ['姓名,班组,合格数,不良数,报工次数,工时(小时),计件工资(元),件均工资(元)'];
     rows.forEach((r) => lines.push([r.name, r.team || '', r.good, r.bad, r.cnt || 0,
       UI.f1((r.minu || 0) / 60), r.wage || 0, r.good ? UI.f2(r.wage / r.good) : ''].join(',')));
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `计件工资_${UI.today()}.csv`;
+    a.download = `计件工资_${(periodTxt || '').replace(/[^0-9\u4e00-\u9fa5a-zA-Z]/g, '') || UI.today()}.csv`;
     a.click();
     UI.toast('已导出计件工资 CSV', 'ok');
   },

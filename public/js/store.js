@@ -1048,21 +1048,37 @@
   });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */
-  /* 计件工资（静态镜像）：合格数 × 工序计件单价 */
+  /* 计件工资（静态镜像）：合格数 × 计件单价（报工快照优先，回退工序档案）；普通员工仅本人 */
   R('GET', '/stats/piece_wage', (_p, _b, q) => {
+    const me = Store.currentUser || {};
+    const canAll = ['admin', 'technician'].includes(me.role);
+    const month = /^\d{4}-\d{2}$/.test(String(q.month || '')) ? q.month : null;
     const days = Math.min(180, Math.max(1, num(q.days, 30)));
-    const from = dayOffset(-(days - 1));
+    const selfId = canAll ? (num(q.worker_id) || null) : me.id;
+    const inRange = (d) => month ? String(d || '').slice(0, 7) === month : d >= dayOffset(-(days - 1));
     const map = {};
     for (const r of T('reports')) {
-      if (r.report_date < from) continue;
+      if (!inRange(r.report_date)) continue;
+      if (selfId && num(r.worker_id) !== selfId) continue;
       const u = find('users', r.worker_id) || { name: '?', team: '' };
       const s = r.order_step_id ? find('order_steps', r.order_step_id) : null;
       const pr = s ? find('processes', s.process_id) : null;
+      const price = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : num(pr && pr.std_price);
       const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0, cnt: 0, wage: 0 });
       e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); e.cnt++;
-      e.wage = Math.round((e.wage + num(r.qty_good) * num(pr && pr.std_price)) * 100) / 100;
+      e.wage = Math.round((e.wage + num(r.qty_good) * price) * 100) / 100;
     }
-    return ok({ days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good) });
+    let detail = null;
+    if (selfId && q.detail) {
+      const oById = {}; T('orders').forEach((o) => oById[o.id] = o);
+      detail = T('reports').filter((r) => num(r.worker_id) === selfId && inRange(r.report_date))
+        .map((r) => { const s = r.order_step_id ? find('order_steps', r.order_step_id) : null; const pr = s ? find('processes', s.process_id) : null;
+          const price = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : num(pr && pr.std_price);
+          return { report_date: r.report_date, qty_good: r.qty_good, qty_bad: r.qty_bad, unit_price: price,
+            amount: Math.round(num(r.qty_good) * price * 100) / 100, order_code: (oById[r.order_id] || {}).code || '', process_name: pr ? pr.name : '' }; })
+        .sort((a, b) => String(b.report_date).localeCompare(String(a.report_date)));
+    }
+    return ok({ month, days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good), detail, self_only: !canAll });
   });
 
   /* 批次/工单双向追溯（静态镜像） */

@@ -473,7 +473,7 @@ route('GET', '/api/orders', [], (req, res, _m, _b, _u, query) => {
 route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   const o = get(ORDER_SQL + ' WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, w.name wc_name, s.assignee_team,
+  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, pr.std_price, w.name wc_name, s.assignee_team,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s
     JOIN processes pr ON pr.id=s.process_id
@@ -486,7 +486,9 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   o.steps.forEach((s) => { s.reporter_names = repMap[s.id] ? [...repMap[s.id]] : []; });
   // 班组下拉数据源
   o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team);
-  o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name
+  o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name,
+      COALESCE(rp.unit_price, pr.std_price, 0) unit_price,
+      ROUND(rp.qty_good * COALESCE(rp.unit_price, pr.std_price, 0), 2) amount
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE rp.order_id=? ORDER BY rp.id DESC LIMIT 100`, [m[1]]);
@@ -911,11 +913,13 @@ function doReport(b, actor) {
       }
       it._bad = bad;
       if (good + bad <= 0) throw new Error('工序「' + step.seq + '」合格数与不良数不能同时为 0');
-      const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      // 计件单价快照：报工时刻的工序单价，后续调价不影响历史工资
+      const unitPrice = num(get('SELECT std_price FROM processes WHERE id=?', [step.process_id]).std_price) || 0;
+      const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at,unit_price)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,
           good, bad, badEntries[0] ? badEntries[0].bad_reason : '', badEntries[0] ? badEntries[0].bad_reason_id : null, num(it.work_min),
-          it.report_date || today(), it.remark || '', now()]);
+          it.report_date || today(), it.remark || '', now(), unitPrice]);
       // 写入不良明细
       for (const e of badEntries) {
         insert('INSERT INTO report_bad_reasons(report_id,bad_reason_id,bad_reason,bad_reason_detail,qty) VALUES(?,?,?,?,?)',
@@ -945,7 +949,7 @@ function doReport(b, actor) {
       if (step.id === lastStepId && good > 0 && !needInspect) {
         autoIn = autoFinishIn(order, product, good, actor, step.id, rid);
       }
-      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn });
+      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn, wage: Math.round(good * unitPrice * 100) / 100 });
     }
 
     // 全部工序完成 → 工单完工（检验点未放行的工序状态仍为 running，天然阻止误判完工）
@@ -955,10 +959,11 @@ function doReport(b, actor) {
 
   const totalGood = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it.qty_good))), 0);
   const totalBad = items.reduce((a, it) => a + Math.max(0, Math.floor(num(it._bad) || 0)), 0);
+  const totalWage = Math.round(results.reduce((a, r) => a + (r.wage || 0), 0) * 100) / 100;
   writeLog(actor, '生产报工', order.code + (items.length > 1 ? ' 多工序×' + items.length : '') + ' 合格 ' + totalGood + ' / 不良 ' + totalBad);
   // 通知对应负责人：① 报工环节出现不良 → 质量异常待跟进；② 报工后工序需检验 → 质检员待检
   try { notifyAfterReport(order, actor, items, results, product); } catch (e) { /* 通知失败不阻塞报工 */ }
-  return { count: items.length, steps: results, finished: results.some((r) => r.finished) };
+  return { count: items.length, steps: results, finished: results.some((r) => r.finished), total_wage: totalWage };
 }
 
 // 报工后的负责人通知（操作工 → 技术员/质检员）
@@ -1339,21 +1344,43 @@ route('GET', '/api/trace/([^/]+)', [], (req, res, m) => {
 
 /* ------------------------------ 升级：计件工资统计 ------------------------------ */
 /* 口径：工资 = 报工合格数 × 工序计件单价(processes.std_price)；支持 ?days=N 与 ?format=csv */
-route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, _u, q) => {
+/* 计件工资核算：工资 = 报工合格数 × 计件单价（报工时快照 unit_price，旧数据回退工序档案当前单价）
+ * 支持 days（近N天）与 month（YYYY-MM 按月核算，二选一）；
+ * 隐私：操作工/质检员仅能查本人工资，管理员/技术员可查全员（可传 worker_id 过滤 + detail=1 展开逐单明细）。 */
+route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, u, q) => {
+  const month = /^\d{4}-\d{2}$/.test(String(q.month || '')) ? q.month : null;
   const days = Math.min(180, Math.max(1, num(q.days, 30)));
+  const canAll = u && ['admin', 'technician'].includes(u.role);
+  const selfId = canAll ? (num(q.worker_id) || null) : (u ? u.id : null);
+  const COND = month ? `strftime('%Y-%m', r.report_date)=?` : `r.report_date >= date('now', ?)`;
+  const ARGS = month ? [month] : ['-' + (days - 1) + ' day'];
+  const SELF = selfId ? ' AND r.worker_id=?' : '';
+  const FULL_ARGS = ARGS.concat(selfId ? [selfId] : []);
   const rows = all(`SELECT u.id, u.name, u.team,
       SUM(r.qty_good) good, SUM(r.qty_bad) bad, SUM(r.work_min) minu, COUNT(*) cnt,
-      ROUND(SUM(r.qty_good * COALESCE(pr.std_price, 0)), 2) wage
+      ROUND(SUM(r.qty_good * COALESCE(r.unit_price, pr.std_price, 0)), 2) wage
     FROM reports r JOIN users u ON u.id=r.worker_id
     LEFT JOIN order_steps s ON s.id=r.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
-    WHERE r.report_date >= date('now', ?)
-    GROUP BY u.id ORDER BY wage DESC, good DESC`, ['-' + (days - 1) + ' day']);
+    WHERE ${COND}${SELF}
+    GROUP BY u.id ORDER BY wage DESC, good DESC`, FULL_ARGS);
   if (q.format === 'csv') {
-    return sendCSV(res, `计件工资_${days}天.csv`, ['姓名', '班组', '合格数', '不良数', '工时(分)', '报工次数', '计件工资(元)'],
+    return sendCSV(res, `计件工资_${month || days + '天'}.csv`, ['姓名', '班组', '合格数', '不良数', '工时(分)', '报工次数', '计件工资(元)'],
       rows.map((r) => [r.name, r.team || '', r.good, r.bad, r.minu, r.cnt, r.wage]));
   }
-  ok(res, { days, rows });
+  /* 单人逐单明细（核算对账用） */
+  let detail = null;
+  if (selfId && q.detail) {
+    detail = all(`SELECT r.report_date, r.qty_good, r.qty_bad,
+        COALESCE(r.unit_price, pr.std_price, 0) unit_price,
+        ROUND(r.qty_good * COALESCE(r.unit_price, pr.std_price, 0), 2) amount,
+        o.code order_code, pr.name process_name
+      FROM reports r JOIN orders o ON o.id=r.order_id
+      LEFT JOIN order_steps s ON s.id=r.order_step_id
+      LEFT JOIN processes pr ON pr.id=s.process_id
+      WHERE r.worker_id=? AND ${COND} ORDER BY r.report_date DESC, r.id DESC`, [selfId].concat(ARGS));
+  }
+  ok(res, { month, days, rows, detail, self_only: !canAll });
 });
 
 /* ------------------------------ 升级：车间看板大屏（公开只读） ------------------------------ */
@@ -1407,7 +1434,7 @@ route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
   if (!o) return fail(res, '工单不存在', 404);
   const canManage = ['admin', 'technician'].includes(u.role);
   const steps = all(`SELECT s.id,s.seq,s.qty_plan,s.qty_good,s.qty_bad,s.status,s.assignee_team,s.allow_report,
-      s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code,
+      s.inspect_type,s.inspect_status,pr.name process_name,pr.code process_code,pr.std_price,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s JOIN processes pr ON pr.id=s.process_id WHERE s.order_id=? ORDER BY s.seq`, [m[1]]);
   for (const s of steps) {
