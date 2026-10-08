@@ -1067,6 +1067,36 @@
       .sort((a, b) => a.priority - b.priority || (a.plan_end > b.plan_end ? 1 : -1));
     return ok(list.slice(0, 200));
   });
+  /* 设备稼动分析（静态镜像）：稼动率=实动工时÷(N天×8h基准)，上限100% */
+  R('GET', '/stats/equip_util', (_p, _b, q) => {
+    const days = Math.min(90, Math.max(3, num(q.days, 7)));
+    const from = dayOffset(-(days - 1));
+    const CAP = days * 8 * 60;
+    const acc = {};
+    for (const r of T('reports')) {
+      if (r.report_date < from || !r.work_center_id) continue;
+      const e = acc[r.work_center_id] || (acc[r.work_center_id] = { cnt: 0, good: 0, bad: 0, minu: 0 });
+      e.cnt++; e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min);
+    }
+    const rows = T('work_centers').map((w) => {
+      const e = acc[w.id] || { cnt: 0, good: 0, bad: 0, minu: 0 };
+      return Object.assign({}, w, e, {
+        util_pct: Math.min(100, Math.round(e.minu * 1000 / CAP) / 10),
+        rate_pct: Math.round(e.good * 1000 / Math.max(1, e.good + e.bad)) / 10,
+      });
+    }).sort((a, b) => b.minu - a.minu || String(a.code).localeCompare(String(b.code)));
+    const used = rows.filter((r) => r.cnt > 0);
+    return ok({
+      days,
+      summary: {
+        total_machines: rows.length, used_machines: used.length,
+        total_hours: Math.round(used.reduce((s, r) => s + r.minu, 0) / 6) / 10,
+        avg_util: used.length ? Math.round(used.reduce((s, r) => s + r.util_pct, 0) / used.length * 10) / 10 : 0,
+        good: used.reduce((s, r) => s + r.good, 0), bad: used.reduce((s, r) => s + r.bad, 0),
+      },
+      rows,
+    });
+  });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */
   /* 工资核算（静态镜像）：计件=合格数×单价快照；计时=工时×时薪快照；普通员工仅本人；

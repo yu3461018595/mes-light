@@ -40,9 +40,11 @@ Views.dashboard = {
           <div style="font-size:19px;font-weight:700">生产看板</div>
           <div class="small muted">${dateStr} · 数据实时来自报工记录 · 每30秒刷新（${updStr}）</div>
         </div>
-        <button class="btn btn-primary" id="quickReport">${UI.icon('report')}快速报工</button>
+        <div style="display:flex;gap:10px">
+          <button class="btn" id="tvMode">${UI.icon('dash')}车间大屏</button>
+          <button class="btn btn-primary" id="quickReport">${UI.icon('report')}快速报工</button>
+        </div>
       </div>
-
       <div class="grid g4" style="margin-bottom:14px">
         <div class="stat">
           <div class="stat-l"><i class="dot" style="background:var(--ok)"></i>今日合格产量</div>
@@ -154,6 +156,7 @@ Views.dashboard = {
       </div>`;
 
       el.querySelector('#quickReport').onclick = () => location.hash = '#/report';
+      el.querySelector('#tvMode').onclick = () => window.open('/board.html', '_blank');
       el.querySelector('#allOrders').onclick = () => location.hash = '#/orders';
       const tq = el.querySelector('#toQuality');
       if (tq) tq.onclick = () => location.hash = '#/quality';

@@ -155,6 +155,17 @@ async function raw(method, url, body, token) {
     const wSop = await api('POST', '/api/processes/' + proc.id + '/sop', { name: 'a.png', data: png.toString('base64') }, wTok);
     chk('操作工上传 SOP 被拒 403', wSop.ok === false, JSON.stringify(wSop));
 
+    // 9.5 设备稼动分析（轻量 OEE）
+    const wcNew = await H('POST', '/api/work_centers', { code: 'WC-T9', name: '稼动测试机', workshop: '测试车间' });
+    chk('测试工位创建成功', wcNew.ok && !!wcNew.data.id, JSON.stringify(wcNew));
+    const util1 = await H('GET', '/api/stats/equip_util?days=7');
+    chk('稼动接口返回 summary', util1.ok && typeof util1.data.summary.avg_util === 'number' && util1.data.summary.total_machines >= 1, JSON.stringify(util1.data && util1.data.summary));
+    const wcRow = (util1.data.rows || []).find((r) => r.code === 'WC-T9');
+    chk('新工位出现在稼动表且未使用', !!wcRow && wcRow.cnt === 0 && wcRow.util_pct === 0, JSON.stringify(wcRow));
+    const util30 = await H('GET', '/api/stats/equip_util?days=30');
+    chk('30 天口径可用且基准更大', util30.ok && util30.data.days === 30, JSON.stringify(util30.data && util30.data.days));
+    await H('DELETE', '/api/work_centers/' + wcNew.data.id).catch(() => {});
+
     // 10. 清理测试数据
     await H('DELETE', '/api/equipments/' + add.data.id);
     const after = (await H('GET', '/api/equipments')).data.filter((e) => e.code === 'EQ-T1');

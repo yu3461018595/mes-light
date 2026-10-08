@@ -69,6 +69,56 @@
   /* ---------------- 基础设施：请求 / toast / 弹层 ---------------- */
   async function get(path) { return API.raw('GET', path); }
   async function post(path, body) { return API.raw('POST', path, body); }
+
+  /* ---------------- 离线报工队列（对标黑湖：车间信号差先报工，有网自动同步） ---------------- */
+  const OQ_KEY = 'mes_offline_reports';
+  function oqLoad() { try { return JSON.parse(localStorage.getItem(OQ_KEY) || '[]'); } catch (e) { return []; } }
+  function oqSave(q) { try { localStorage.setItem(OQ_KEY, JSON.stringify(q)); } catch (e) { /* ignore */ } }
+  function oqCount() { return oqLoad().length; }
+  function isNetError(e) {
+    if (!navigator.onLine) return true;
+    const msg = String((e && e.message) || '');
+    return /failed to fetch|networkerror|网络|服务返回异常/i.test(msg);
+  }
+  /* 尝试同步离线队列；网络仍不通时保留队列，业务被拒（如工序已完工）的条目丢弃并提示 */
+  async function oqFlush(silent) {
+    const q = oqLoad();
+    if (!q.length) return;
+    const remain = []; const dropped = [];
+    for (const item of q) {
+      try {
+        await post('/api/app/reports', item.body);
+      } catch (e) {
+        if (isNetError(e)) { remain.push(item); break; }  // 网络仍不通：本条及之后全部保留
+        dropped.push(`${item.order_code}：${e.message}`);
+      }
+    }
+    oqSave(remain);
+    if (!silent) {
+      const okN = q.length - remain.length - dropped.length;
+      if (okN > 0) toast(`已同步 ${okN} 条离线报工`, 'ok');
+      if (dropped.length) toast(`有 ${dropped.length} 条离线报工被系统拒绝：${dropped[0]}`);
+    }
+    paintOfflineBanner();
+  }
+  function oqEnqueue(orderCode, body) {
+    const q = oqLoad();
+    q.push({ ts: Date.now(), order_code: orderCode, body });
+    oqSave(q);
+  }
+  function paintOfflineBanner() {
+    const n = oqCount();
+    document.querySelectorAll('.offline-bar').forEach((b) => b.remove());
+    if (!n) return;
+    const bar = document.createElement('div');
+    bar.className = 'offline-bar';
+    bar.style.cssText = 'background:#fff7e6;color:#ad6800;border:1px solid #ffd591;border-radius:10px;padding:10px 12px;font-size:13px;margin:0 12px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center';
+    bar.innerHTML = `<span>📡 有 <b>${n}</b> 条离线报工待同步</span><b>点击重试 ›</b>`;
+    bar.onclick = () => oqFlush(false);
+    const mount = document.querySelector('#view') || document.body;
+    mount.parentNode.insertBefore(bar, mount);
+  }
+  window.addEventListener('online', () => oqFlush(false));
   function toast(msg, ms) {
     const box = document.getElementById('toastBox');
     box.innerHTML = '';   // 同一时刻只显示一条，避免旧提示残留造成误解
@@ -153,6 +203,7 @@
     $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip'].includes(name);
     $title.textContent = TITLES[name] || '智工';
     $view.innerHTML = '<div class="loading">加载中…</div>';
+    if (token()) paintOfflineBanner();   // 每次切页刷新离线报工横幅
 
     try {
       switch (name) {
@@ -641,6 +692,19 @@
       ]);
     } catch (e) {
       btn.disabled = false; btn.textContent = '提交报工';
+      if (isNetError(e)) {
+        /* 离线兜底：车间信号差/断网时先存本地，网络恢复自动同步 */
+        oqEnqueue(S.order.code, { order_id: S.order.id, steps, report_date: today(), remark: '' });
+        btn.disabled = true; btn.textContent = '已存离线队列';
+        okMask('当前网络不可用，报工已暂存', [
+          `本次报工已保存在本机（共 <b>${oqCount()}</b> 条待同步）`,
+          '网络恢复后将<b style="color:#0f9d58">自动同步</b>到系统，无需重复报工',
+          '也可在工作台点击顶部「离线报工待同步」手动重试',
+        ], [
+          { text: '返回工作台', onClick: () => nav('#/home') },
+        ]);
+        return;
+      }
       toast(e.message);
     }
   }
@@ -1633,7 +1697,7 @@
       toast('登录已过期，请重新登录');
       nav('#/login', true);
     });
-    if (token()) { startPoll(); refreshUnread(); }
+    if (token()) { startPoll(); refreshUnread(); oqFlush(true); }   // 启动静默同步离线报工
     await route();
   }
   $back.onclick = () => {

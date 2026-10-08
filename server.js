@@ -1214,6 +1214,36 @@ route('GET', '/api/stats/orders', [], (req, res) => {
     WHERE o.status NOT IN ('closed') ORDER BY o.priority, o.plan_end LIMIT 200`));
 });
 
+/* ------------------------------ 设备稼动分析（轻量 OEE：产出视角） ------------------------------
+ * 口径：稼动率 = 近 N 天该设备上报实动工时 ÷（N 天 × 8h 班制基准），上限 100%；
+ * 产出 = 报工合格数，质量 = 合格率。数据全部来自报工流水，无需额外录入。 */
+route('GET', '/api/stats/equip_util', [], (req, res, _m, _b, _u, q) => {
+  const days = Math.min(90, Math.max(3, num(q.days, 7)));
+  const CAP = days * 8 * 60; // 分钟
+  const rows = all(`SELECT w.id, w.code, w.name, w.workshop, w.status,
+      COUNT(r.id) cnt, COALESCE(SUM(r.qty_good),0) good, COALESCE(SUM(r.qty_bad),0) bad,
+      COALESCE(SUM(r.work_min),0) minu,
+      MIN(100, ROUND(COALESCE(SUM(r.work_min),0) * 100.0 / ${CAP}, 1)) util_pct,
+      ROUND(SUM(r.qty_good) * 100.0 / MAX(1, SUM(r.qty_good) + SUM(r.qty_bad)), 1) rate_pct
+    FROM work_centers w LEFT JOIN reports r
+      ON r.work_center_id = w.id AND r.report_date >= date('now', ?)
+    GROUP BY w.id ORDER BY minu DESC, w.code`, ['-' + (days - 1) + ' day']);
+  const used = rows.filter((r) => r.cnt > 0);
+  ok(res, {
+    days,
+    summary: {
+      total_machines: rows.length,
+      used_machines: used.length,
+      total_hours: Math.round(used.reduce((s, r) => s + r.minu, 0) / 60 * 10) / 10,
+      avg_util: used.length ? Math.round(used.reduce((s, r) => s + r.util_pct, 0) / used.length * 10) / 10 : 0,
+      good: used.reduce((s, r) => s + r.good, 0),
+      bad: used.reduce((s, r) => s + r.bad, 0),
+    },
+    rows,
+  });
+});
+
+
 /* ------------------------------ 工单 ⇄ 仓储 闭环对账报表（分产品） ------------------------------
  * 把「工单完工（末道工序合格）→ 自动成品入库 → 库存」串成一张按产品的对账表：
  *   计划  = 该产品的工单 qty_plan 合计

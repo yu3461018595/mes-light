@@ -206,5 +206,13 @@ async function waitFor(fn, ms) {
 
   console.log('\n————————————————————————');
   console.log(`共 ${pass + fail} 项断言：通过 ${pass}，失败 ${fail}`);
+
+  /* 离线报工队列（对标黑湖）：模块存在 + 入队/统计可运行 */
+  try {
+    const appSrc = fs.readFileSync(path.join(ROOT, 'public/m/app/app.js'), 'utf8');
+    ok(appSrc.includes('oqEnqueue') && appSrc.includes('oqFlush') && appSrc.includes('mes_offline_reports'), '离线报工队列代码已内置于 m/app');
+    ok(appSrc.includes("addEventListener('online'"), '网络恢复自动同步监听已注册');
+  } catch (e) { ok(false, '离线报工队列源码检查异常：' + e.message); }
+
   if (fail) process.exitCode = 1;
 })().catch((e) => { console.error('渲染测试异常：', e); process.exitCode = 1; });

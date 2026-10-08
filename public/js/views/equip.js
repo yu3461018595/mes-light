@@ -8,7 +8,39 @@ Views.equip = {
     const [eqs, canEdit] = [await API.get('/equipments'), App.canEdit()];
     this.data = eqs;
     const today = new Date().toISOString().slice(0, 10);
+    const util = await API.get('/stats/equip_util?days=' + (this.utilDays || 7)).catch(() => null);
     el.innerHTML = `
+      ${util ? `
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h">
+          <h3>设备稼动分析（近 ${util.days} 天）</h3>
+          <div class="tabs" style="border-bottom:none;margin-bottom:0">
+            <div class="tab ${this.utilDays !== 30 ? 'active' : ''}" data-ud="7" style="padding:6px 12px">近 7 天</div>
+            <div class="tab ${this.utilDays === 30 ? 'active' : ''}" data-ud="30" style="padding:6px 12px">近 30 天</div>
+          </div>
+        </div>
+        <div class="card-b">
+          <div class="grid g4" style="margin-bottom:12px">
+            <div class="stat"><div class="stat-l">平均稼动率</div>
+              <div class="stat-v" style="color:${util.summary.avg_util >= 60 ? 'var(--ok)' : util.summary.avg_util >= 30 ? 'var(--warn)' : 'var(--danger)'}">${UI.f1(util.summary.avg_util)}%</div>
+              <div class="stat-s">${util.summary.used_machines}/${util.summary.total_machines} 台设备有报工</div></div>
+            <div class="stat"><div class="stat-l">实动工时合计</div><div class="stat-v">${UI.f1(util.summary.total_hours)}<span class="small muted"> h</span></div>
+              <div class="stat-s">按 8h/天班制基准折算</div></div>
+            <div class="stat"><div class="stat-l">加工合格</div><div class="stat-v" style="color:var(--ok)">${UI.n2(util.summary.good)}</div>
+              <div class="stat-s">件 · 经该设备报工</div></div>
+            <div class="stat"><div class="stat-l">综合合格率</div><div class="stat-v">${UI.f1(util.summary.good + util.summary.bad ? util.summary.good * 100 / (util.summary.good + util.summary.bad) : 100)}%</div>
+              <div class="stat-s">不良 ${UI.n2(util.summary.bad)} 件</div></div>
+          </div>
+          ${UI.table([
+            { t: '设备', f: (r) => `<b>${UI.esc(r.code)}</b> <span class="small muted">${UI.esc(r.name)}</span>` },
+            { t: '车间', f: (r) => UI.esc(r.workshop || '—') },
+            { t: '实动工时', f: (r) => `<span class="mono">${UI.f1(r.minu / 60)}</span> h` },
+            { t: '稼动率', f: (r) => `${UI.progress(r.util_pct, r.util_pct >= 60 ? 'ok' : r.util_pct >= 30 ? 'warn' : 'danger')} <span class="mono small">${UI.f1(r.util_pct)}%</span>` },
+            { t: '合格/不良', f: (r) => r.cnt ? `<span class="mono" style="color:var(--ok)">${UI.n2(r.good)}</span> / <span class="mono" style="color:var(--danger)">${UI.n2(r.bad)}</span>` : '<span class="muted">未使用</span>' },
+          ], util.rows, { emptyText: '暂无设备' })}
+          <div class="small muted" style="margin-top:8px">稼动率 = 设备实动工时 ÷（${util.days} 天 × 8 小时班制基准），上限 100%；数据来自工序报工自动累计，无需额外录入。</div>
+        </div>
+      </div>` : ''}
       <div class="card">
         <div class="card-h">
           <h3>设备台账（${eqs.length} 台）</h3>
@@ -32,6 +64,7 @@ Views.equip = {
       <p class="small muted" style="margin-top:10px">点检规则：异常点检可勾选「生成质量异常单」，走统一异常口径（非检验员上报为待定级，申报重大时通知检验员及时定级；检验员可直接定级）。</p>`;
 
     if (canEdit) el.querySelector('#eqAdd').onclick = () => this.form();
+    el.querySelectorAll('[data-ud]').forEach((b) => b.onclick = () => { this.utilDays = Number(b.dataset.ud); this.render(el); });
     el.querySelectorAll('[data-check]').forEach((b) => b.onclick = () => this.checkForm(Number(b.dataset.check)));
     el.querySelectorAll('[data-hist]').forEach((b) => b.onclick = () => this.history(Number(b.dataset.hist)));
     if (canEdit) el.querySelectorAll('[data-eqr]').forEach((b) => b.onclick = async () => {
