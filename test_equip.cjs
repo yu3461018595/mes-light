@@ -164,6 +164,16 @@ async function raw(method, url, body, token) {
     chk('新工位出现在稼动表且未使用', !!wcRow && wcRow.cnt === 0 && wcRow.util_pct === 0, JSON.stringify(wcRow));
     const util30 = await H('GET', '/api/stats/equip_util?days=30');
     chk('30 天口径可用且基准更大', util30.ok && util30.data.days === 30, JSON.stringify(util30.data && util30.data.days));
+    // 班制基准可配置（settings.shift_hours，默认 8）
+    const es1 = await H('GET', '/api/equip/settings');
+    chk('稼动设置默认 8h', es1.ok && es1.data.shift_hours === 8, JSON.stringify(es1));
+    const es2 = await H('POST', '/api/equip/settings', { shift_hours: 10 });
+    chk('管理员改班制为 10h', es2.ok && es2.data.shift_hours === 10, JSON.stringify(es2));
+    const utilAfter = await H('GET', '/api/stats/equip_util?days=7');
+    chk('稼动率按新班制计算', utilAfter.ok && utilAfter.data.shift_hours === 10, JSON.stringify(utilAfter.data && utilAfter.data.shift_hours));
+    const es3 = await api('POST', '/api/equip/settings', { shift_hours: 6 }, wTok);
+    chk('操作工改班制被拒 403', es3.ok === false, JSON.stringify(es3));
+    await H('POST', '/api/equip/settings', { shift_hours: 8 });
     await H('DELETE', '/api/work_centers/' + wcNew.data.id).catch(() => {});
 
     // 10. 清理测试数据

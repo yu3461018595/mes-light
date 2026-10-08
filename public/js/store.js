@@ -1067,11 +1067,12 @@
       .sort((a, b) => a.priority - b.priority || (a.plan_end > b.plan_end ? 1 : -1));
     return ok(list.slice(0, 200));
   });
-  /* 设备稼动分析（静态镜像）：稼动率=实动工时÷(N天×8h基准)，上限100% */
+  /* 设备稼动分析（静态镜像）：稼动率=实动工时÷(N天×班制基准 shift_hours，默认8h)，上限100% */
   R('GET', '/stats/equip_util', (_p, _b, q) => {
     const days = Math.min(90, Math.max(3, num(q.days, 7)));
+    const sh = Math.min(24, Math.max(1, num(getSetting('shift_hours', 8))));
     const from = dayOffset(-(days - 1));
-    const CAP = days * 8 * 60;
+    const CAP = days * sh * 60;
     const acc = {};
     for (const r of T('reports')) {
       if (r.report_date < from || !r.work_center_id) continue;
@@ -1087,7 +1088,7 @@
     }).sort((a, b) => b.minu - a.minu || String(a.code).localeCompare(String(b.code)));
     const used = rows.filter((r) => r.cnt > 0);
     return ok({
-      days,
+      days, shift_hours: sh,
       summary: {
         total_machines: rows.length, used_machines: used.length,
         total_hours: Math.round(used.reduce((s, r) => s + r.minu, 0) / 6) / 10,
@@ -1096,6 +1097,16 @@
       },
       rows,
     });
+  });
+  R('GET', '/equip/settings', () => {
+    return ok({ shift_hours: Math.min(24, Math.max(1, num(getSetting('shift_hours', 8)))) });
+  });
+  R('POST', '/equip/settings', (_p, b) => {
+    const me = Store.currentUser || {};
+    if (me.role !== 'admin') return { ok: false, msg: '仅管理员可修改' };
+    const v = Math.min(24, Math.max(1, num(b.shift_hours, 8)));
+    setSetting('shift_hours', String(v));
+    return ok({ shift_hours: v });
   });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */

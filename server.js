@@ -1215,11 +1215,12 @@ route('GET', '/api/stats/orders', [], (req, res) => {
 });
 
 /* ------------------------------ 设备稼动分析（轻量 OEE：产出视角） ------------------------------
- * 口径：稼动率 = 近 N 天该设备上报实动工时 ÷（N 天 × 8h 班制基准），上限 100%；
+ * 口径：稼动率 = 近 N 天该设备上报实动工时 ÷（N 天 × shift_hours 班制基准，默认 8h 可配置），上限 100%；
  * 产出 = 报工合格数，质量 = 合格率。数据全部来自报工流水，无需额外录入。 */
 route('GET', '/api/stats/equip_util', [], (req, res, _m, _b, _u, q) => {
   const days = Math.min(90, Math.max(3, num(q.days, 7)));
-  const CAP = days * 8 * 60; // 分钟
+  const shiftH = Math.min(24, Math.max(1, num(getSetting('shift_hours', 8))));
+  const CAP = days * shiftH * 60; // 分钟
   const rows = all(`SELECT w.id, w.code, w.name, w.workshop, w.status,
       COUNT(r.id) cnt, COALESCE(SUM(r.qty_good),0) good, COALESCE(SUM(r.qty_bad),0) bad,
       COALESCE(SUM(r.work_min),0) minu,
@@ -1231,6 +1232,7 @@ route('GET', '/api/stats/equip_util', [], (req, res, _m, _b, _u, q) => {
   const used = rows.filter((r) => r.cnt > 0);
   ok(res, {
     days,
+    shift_hours: shiftH,
     summary: {
       total_machines: rows.length,
       used_machines: used.length,
@@ -1241,6 +1243,19 @@ route('GET', '/api/stats/equip_util', [], (req, res, _m, _b, _u, q) => {
     },
     rows,
   });
+});
+
+/* 设备稼动设置：班制基准工时（元数据 settings.shift_hours） */
+route('GET', '/api/equip/settings', [], (req, res) => {
+  ok(res, { shift_hours: Math.min(24, Math.max(1, num(getSetting('shift_hours', 8)))) });
+});
+route('POST', '/api/equip/settings', ['admin'], (req, res, _m, b, u) => {
+  const v = Math.min(24, Math.max(1, num(b.shift_hours, 8)));
+  const ex = get('SELECT key FROM settings WHERE key=?', ['shift_hours']);
+  if (ex) run('UPDATE settings SET value=? WHERE key=?', [String(v), 'shift_hours']);
+  else insert('INSERT INTO settings(key,value) VALUES(?,?)', ['shift_hours', String(v)]);
+  writeLog(u, '修改设备稼动设置', '班制基准 ' + v + ' 小时/天');
+  ok(res, { shift_hours: v });
 });
 
 

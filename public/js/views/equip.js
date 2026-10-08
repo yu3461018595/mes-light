@@ -38,7 +38,13 @@ Views.equip = {
             { t: '稼动率', f: (r) => `${UI.progress(r.util_pct, r.util_pct >= 60 ? 'ok' : r.util_pct >= 30 ? 'warn' : 'danger')} <span class="mono small">${UI.f1(r.util_pct)}%</span>` },
             { t: '合格/不良', f: (r) => r.cnt ? `<span class="mono" style="color:var(--ok)">${UI.n2(r.good)}</span> / <span class="mono" style="color:var(--danger)">${UI.n2(r.bad)}</span>` : '<span class="muted">未使用</span>' },
           ], util.rows, { emptyText: '暂无设备' })}
-          <div class="small muted" style="margin-top:8px">稼动率 = 设备实动工时 ÷（${util.days} 天 × 8 小时班制基准），上限 100%；数据来自工序报工自动累计，无需额外录入。</div>
+          <div class="small muted" style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <span>稼动率 = 设备实动工时 ÷（${util.days} 天 × <b id="shiftH">${util.shift_hours}</b> 小时/天班制基准），上限 100%；数据来自工序报工自动累计。</span>
+            ${App.isAdmin() ? `<span style="display:inline-flex;gap:6px;align-items:center">
+              <input class="input" id="shiftInput" type="number" min="1" max="24" step="0.5" value="${util.shift_hours}" style="width:70px;padding:2px 8px">
+              <button class="btn btn-sm" id="shiftSave">改班制</button>
+            </span>` : ''}
+          </div>
         </div>
       </div>` : ''}
       <div class="card">
@@ -64,6 +70,16 @@ Views.equip = {
       <p class="small muted" style="margin-top:10px">点检规则：异常点检可勾选「生成质量异常单」，走统一异常口径（非检验员上报为待定级，申报重大时通知检验员及时定级；检验员可直接定级）。</p>`;
 
     if (canEdit) el.querySelector('#eqAdd').onclick = () => this.form();
+    const shiftSave = el.querySelector('#shiftSave');
+    if (shiftSave) shiftSave.onclick = async () => {
+      const v = Number(el.querySelector('#shiftInput').value);
+      if (!(v >= 1 && v <= 24)) return UI.toast('班制基准需在 1~24 小时之间', 'err');
+      try {
+        await API.post('/equip/settings', { shift_hours: v });
+        UI.toast('班制基准已改为 ' + v + ' 小时/天', 'ok');
+        this.render(el);
+      } catch (e) { UI.toast(e.message, 'err'); }
+    };
     el.querySelectorAll('[data-ud]').forEach((b) => b.onclick = () => { this.utilDays = Number(b.dataset.ud); this.render(el); });
     el.querySelectorAll('[data-check]').forEach((b) => b.onclick = () => this.checkForm(Number(b.dataset.check)));
     el.querySelectorAll('[data-hist]').forEach((b) => b.onclick = () => this.history(Number(b.dataset.hist)));
