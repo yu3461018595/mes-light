@@ -165,6 +165,7 @@
         case 'report_issue': return await renderReportIssue();
         case 'issue': return await renderIssue(args[0]);
         case 'stocks': return await renderStocks();
+        case 'wage': return await renderWagePage();
         case 'pick': return await renderPick();
         case 'stocktake': return await renderStocktake();
       case 'incoming': return await renderIncoming();
@@ -400,6 +401,8 @@
     if (isManager) {
       blocks.push(`<div class="card"><div class="card-h"><h3>管理快捷入口</h3></div>
         <div class="card-b" style="padding:6px 0 0">
+          <div class="item" data-go="wage"><div class="avatar" style="background:#e8efff">💰</div>
+            <div class="body"><div class="t1">工资统计</div><div class="t2">全员计件/计时工资汇总 · 班组成本 · 排行</div></div><div class="chev">›</div></div>
           <div class="item" data-go="stocks"><div class="avatar" style="background:#fff3e0">📦</div>
             <div class="body"><div class="t1">库存预警</div><div class="t2">${stocks.length ? '当前 ' + stocks.length + ' 项物料低于安全库存' : '库存状态正常'}</div></div><div class="chev">›</div></div>
         </div></div>`);
@@ -1150,6 +1153,57 @@
         refreshUnread(); renderStocks();
       } catch (e) { toast(e.message); }
     };
+  }
+
+  /* ---------------- 页面：工资统计（管理员/技术员管理视角） ---------------- */
+  async function renderWagePage() {
+    const me = await ensureMe();
+    if (me.role !== 'admin' && me.role !== 'technician') return renderError('工资统计仅管理员/技术员可查看');
+    S.wageMode = S.wageMode || 'month';
+    const month = new Date().toISOString().slice(0, 7);
+    const r = await get('/api/stats/piece_wage' + (S.wageMode === 'month' ? '?month=' + month : '?days=30'));
+    const sum = r.summary || {};
+    const teams = r.teams || [];
+    const rows = r.rows || [];
+    const maxW = Math.max(...rows.map((x) => Number(x.wage) || 0), 1);
+    const period = S.wageMode === 'month' ? month.slice(5) + ' 月' : '近 30 天';
+    $view.innerHTML = `
+      <div class="card"><div class="card-b">
+        <div class="ocode">工资统计</div>
+        <div class="pname">${period} · 全员（计件+计时）</div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn ghost sm" data-wm="month" style="flex:1;${S.wageMode === 'month' ? 'background:#e8efff;color:#1d4ed8' : ''}">本月</button>
+          <button class="btn ghost sm" data-wm="days" style="flex:1;${S.wageMode === 'days' ? 'background:#e8efff;color:#1d4ed8' : ''}">近30天</button>
+        </div>
+      </div></div>
+      <div class="wage-grid">
+        <div class="wg-item"><b style="color:#1d4ed8;font-size:22px">¥${(Number(sum.total_wage) || 0).toFixed(2)}</b><span>工资总额</span></div>
+        <div class="wg-item"><b style="color:#0f9d58;font-size:22px">${sum.headcount || 0}</b><span>参与人数</span></div>
+        <div class="wg-item"><b style="color:#0f9d58;font-size:16px">¥${(Number(sum.piece_wage) || 0).toFixed(2)}</b><span>计件工资</span></div>
+        <div class="wg-item"><b style="color:#b06f00;font-size:16px">¥${(Number(sum.time_wage) || 0).toFixed(2)}</b><span>计时工资</span></div>
+        <div class="wg-item"><b style="color:#0f9d58;font-size:16px">${(Number(sum.total_hours) || 0).toFixed(1)} h</b><span>总工时</span></div>
+        <div class="wg-item"><b style="color:#1d4ed8;font-size:16px">${sum.cnt || 0}</b><span>报工次数</span></div>
+      </div>
+      ${teams.length ? `<div class="card"><div class="card-h"><h3>班组人工成本</h3></div><div class="card-b">
+        ${teams.map((t) => { const pct = sum.total_wage > 0 ? Math.round((t.wage || 0) / sum.total_wage * 100) : 0;
+          return `<div style="margin-bottom:12px">
+            <div class="row" style="justify-content:space-between"><b style="font-size:14px">${esc(t.team)}</b><span style="font-weight:700;color:#1d4ed8">¥${(t.wage || 0).toFixed(2)}</span></div>
+            <div class="bar" style="margin-top:4px"><i style="width:${pct}%"></i></div>
+            <div class="tiny muted">${t.headcount} 人 · 合格 ${t.good} 件 · ${(Number(t.hours) || 0).toFixed(1)} h · 占 ${pct}%</div>
+          </div>`; }).join('')}
+      </div></div>` : ''}
+      <div class="card"><div class="card-h"><h3>员工排行</h3></div><div class="card-b">
+        ${rows.length ? rows.slice(0, 15).map((x, i) => `
+          <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div style="min-width:0;flex:1"><b style="font-size:14px">${i + 1}. ${esc(x.name)}</b>
+              <div class="tiny muted">${esc(x.team || '未分组')} · 合格 ${x.good} 件 · ${((x.minu || 0) / 60).toFixed(1)} h</div></div>
+            <div style="width:70px;flex:none"><div class="bar"><i style="width:${Math.max(4, Math.round((x.wage || 0) / maxW * 100))}%"></i></div></div>
+            <b style="color:#1d4ed8;flex:none;margin-left:8px">¥${(x.wage || 0).toFixed(2)}</b>
+          </div>`).join('') : '<div class="tiny muted">暂无计薪报工记录</div>'}
+      </div></div>
+      <div class="tiny muted center" style="padding:0 15px 10px">计件=合格数×单价快照；计时=工时×时薪快照；调价不影响历史工资。</div>
+      <div style="height:10px"></div>`;
+    $view.querySelectorAll('[data-wm]').forEach((b) => b.onclick = () => { S.wageMode = b.dataset.wm; renderWagePage(); });
   }
 
   /* ---------------- 页面：领料申请（工人/技术员/管理员，限本班组工单） ---------------- */

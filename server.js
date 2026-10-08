@@ -1406,7 +1406,34 @@ route('GET', '/api/stats/piece_wage', [], (req, res, _m, _b, u, q) => {
       LEFT JOIN processes pr ON pr.id=s.process_id
       WHERE r.worker_id=? AND ${COND} ORDER BY r.report_date DESC, r.id DESC`, [selfId].concat(ARGS));
   }
-  ok(res, { month, days, rows, detail, self_only: !canAll });
+  /* 管理层汇总：工资总额与计件/计时构成、总工时、参与人数（口径与明细一致，操作工仅见本人） */
+  const WJOIN = `FROM reports r JOIN users u ON u.id=r.worker_id
+    LEFT JOIN orders o ON o.id=r.order_id
+    LEFT JOIN order_steps s ON s.id=r.order_step_id
+    LEFT JOIN processes pr ON pr.id=s.process_id`;
+  const HOURS_EXPR = `COALESCE(r.work_hours, r.work_min/60.0, 0)`;
+  const summary = get(`SELECT
+      ROUND(SUM(${WAGE_EXPR}), 2) total_wage,
+      ROUND(SUM(CASE WHEN r.wage_type='time' THEN ${WAGE_EXPR} ELSE 0 END), 2) time_wage,
+      ROUND(SUM(CASE WHEN r.wage_type<>'time' THEN ${WAGE_EXPR} ELSE 0 END), 2) piece_wage,
+      ROUND(SUM(${HOURS_EXPR}), 1) total_hours,
+      SUM(r.qty_good) total_good, SUM(r.qty_bad) total_bad,
+      COUNT(DISTINCT r.worker_id) headcount, COUNT(*) cnt
+    ${WJOIN} WHERE ${COND}${SELF}`, FULL_ARGS) || {};
+  /* 班组汇总：管理层按班组看人工成本分布 */
+  const teams = all(`SELECT IFNULL(NULLIF(u.team,''),'未分组') team, COUNT(DISTINCT r.worker_id) headcount,
+      SUM(r.qty_good) good, ROUND(SUM(${HOURS_EXPR}), 1) hours, COUNT(*) cnt,
+      ROUND(SUM(${WAGE_EXPR}), 2) wage
+    ${WJOIN} WHERE ${COND}${SELF}
+    GROUP BY team ORDER BY wage DESC`, FULL_ARGS);
+  /* 近6月工资趋势（不受所选周期影响，便于管理层看走势；仍按 worker 权限过滤） */
+  const trend = all(`SELECT strftime('%Y-%m', r.report_date) ym,
+      ROUND(SUM(${WAGE_EXPR}), 2) wage,
+      ROUND(SUM(CASE WHEN r.wage_type='time' THEN ${WAGE_EXPR} ELSE 0 END), 2) time_wage,
+      ROUND(SUM(${HOURS_EXPR}), 1) hours
+    ${WJOIN} WHERE r.report_date >= date('now','-5 month','start of month')${SELF}
+    GROUP BY ym ORDER BY ym`, selfId ? [selfId] : []);
+  ok(res, { month, days, rows, detail, summary, teams, trend, self_only: !canAll });
 });
 
 /* ------------------------------ 升级：车间看板大屏（公开只读） ------------------------------ */

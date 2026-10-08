@@ -194,6 +194,16 @@ async function api(method, url, body, token) {
     const rowT = pwT.data.rows.find((r) => r.id === workerId);
     chk('计时工资并入员工汇总（25+60=85）', !!rowT && Math.abs(rowT.wage - 85) < 0.01, JSON.stringify(pwT.data.rows));
 
+    // 4.7b 管理层汇总呈现：总额/构成/班组/趋势
+    const pwS = await H('GET', '/api/stats/piece_wage?days=1');
+    const sm = pwS.data.summary || {};
+    chk('汇总构成：计件+计时=总额且计时=60', Math.abs((sm.time_wage || 0) - 60) < 0.01 && Math.abs((sm.piece_wage || 0) + (sm.time_wage || 0) - (sm.total_wage || 0)) < 0.01, JSON.stringify(sm));
+    chk('汇总字段完整（工时/人数/次数/合格）', ['total_hours', 'headcount', 'cnt', 'total_good'].every((k) => typeof sm[k] === 'number'), JSON.stringify(sm));
+    chk('班组汇总与总额自洽', Math.abs((pwS.data.teams || []).reduce((a, t) => a + (t.wage || 0), 0) - (sm.total_wage || 0)) < 0.05, JSON.stringify(pwS.data.teams));
+    chk('近6月趋势含当月且计时≥60', (pwS.data.trend || []).some((t) => t.ym === todayStr.slice(0, 7) && (t.time_wage || 0) >= 60), JSON.stringify(pwS.data.trend));
+    const pwSW = await api('GET', '/api/stats/piece_wage?days=30', null, wTok);
+    chk('操作工视角汇总仅本人（计时=60）', Math.abs(((pwSW.data.summary || {}).time_wage) - 60) < 0.01, JSON.stringify(pwSW.data.summary));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

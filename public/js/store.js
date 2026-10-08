@@ -1069,7 +1069,8 @@
   });
 
   /* 二维码 + 免登录（静态版无需令牌，直接返回可访问链接） */
-  /* 工资核算（静态镜像）：计件=合格数×单价快照；计时=工时×时薪快照；普通员工仅本人 */
+  /* 工资核算（静态镜像）：计件=合格数×单价快照；计时=工时×时薪快照；普通员工仅本人；
+   * 附管理层汇总 summary（总额/构成/工时/人数）、teams 班组汇总、trend 近6月趋势 */
   R('GET', '/stats/piece_wage', (_p, _b, q) => {
     const me = Store.currentUser || {};
     const canAll = ['admin', 'technician'].includes(me.role);
@@ -1077,34 +1078,71 @@
     const days = Math.min(180, Math.max(1, num(q.days, 30)));
     const selfId = canAll ? (num(q.worker_id) || null) : me.id;
     const inRange = (d) => month ? String(d || '').slice(0, 7) === month : d >= dayOffset(-(days - 1));
-    const map = {};
-    for (const r of T('reports')) {
-      if (!inRange(r.report_date)) continue;
-      if (selfId && num(r.worker_id) !== selfId) continue;
-      const u = find('users', r.worker_id) || { name: '?', team: '' };
+    const wageOf = (r) => {
       const s = r.order_step_id ? find('order_steps', r.order_step_id) : null;
       const pr = s ? find('processes', s.process_id) : null;
       const o = r.order_id ? find('orders', r.order_id) : null;
       const isTime = String(r.wage_type) === 'time';
       const rate = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : (isTime ? num(o && o.hourly_rate) : num(pr && pr.std_price));
-      const amt = isTime ? num(r.work_hours) * rate : num(r.qty_good) * rate;
+      return { isTime, rate, hrs: num(r.work_hours) || num(r.work_min) / 60 || 0, amt: isTime ? (num(r.work_hours) || num(r.work_min) / 60 || 0) * rate : num(r.qty_good) * rate };
+    };
+    const map = {};
+    for (const r of T('reports')) {
+      if (!inRange(r.report_date)) continue;
+      if (selfId && num(r.worker_id) !== selfId) continue;
+      const u = find('users', r.worker_id) || { name: '?', team: '' };
+      const w = wageOf(r);
       const e = map[r.worker_id] || (map[r.worker_id] = { id: r.worker_id, name: u.name, team: u.team, good: 0, bad: 0, minu: 0, cnt: 0, wage: 0 });
       e.good += num(r.qty_good); e.bad += num(r.qty_bad); e.minu += num(r.work_min); e.cnt++;
-      e.wage = Math.round((e.wage + amt) * 100) / 100;
+      e.wage = Math.round((e.wage + w.amt) * 100) / 100;
     }
+    /* 管理层汇总 */
+    const sum = { total_wage: 0, time_wage: 0, piece_wage: 0, total_hours: 0, total_good: 0, total_bad: 0, headcount: 0, cnt: 0 };
+    const tMap = {};
+    for (const r of T('reports')) {
+      if (!inRange(r.report_date)) continue;
+      if (selfId && num(r.worker_id) !== selfId) continue;
+      const w = wageOf(r);
+      const u = find('users', r.worker_id) || {};
+      const team = u.team || '未分组';
+      const t = tMap[team] || (tMap[team] = { team, headcount: 0, good: 0, hours: 0, cnt: 0, wage: 0, _ids: {} });
+      if (!t._ids[r.worker_id]) { t._ids[r.worker_id] = 1; t.headcount++; }
+      t.good += num(r.qty_good); t.hours = Math.round((t.hours + w.hrs) * 10) / 10; t.cnt++;
+      t.wage = Math.round((t.wage + w.amt) * 100) / 100;
+      sum.total_wage = Math.round((sum.total_wage + w.amt) * 100) / 100;
+      if (w.isTime) sum.time_wage = Math.round((sum.time_wage + w.amt) * 100) / 100;
+      else sum.piece_wage = Math.round((sum.piece_wage + w.amt) * 100) / 100;
+      sum.total_hours = Math.round((sum.total_hours + w.hrs) * 10) / 10;
+      sum.total_good += num(r.qty_good); sum.total_bad += num(r.qty_bad); sum.cnt++;
+    }
+    sum.headcount = Object.keys(map).length;
+    Object.values(tMap).forEach((t) => delete t._ids);
+    const teams = Object.values(tMap).sort((a, b) => b.wage - a.wage);
+    const ymNow = new Date().toISOString().slice(0, 7);
+    const trendMap = {};
+    for (const r of T('reports')) {
+      const ym = String(r.report_date || '').slice(0, 7);
+      if (!ym || ym > ymNow) continue;
+      if (ym < new Date(new Date(ymNow + '-15').setMonth(new Date(ymNow + '-15').getMonth() - 5)).toISOString().slice(0, 7)) continue;
+      if (selfId && num(r.worker_id) !== selfId) continue;
+      const w = wageOf(r);
+      const t = trendMap[ym] || (trendMap[ym] = { ym, wage: 0, time_wage: 0, hours: 0 });
+      t.wage = Math.round((t.wage + w.amt) * 100) / 100;
+      if (w.isTime) t.time_wage = Math.round((t.time_wage + w.amt) * 100) / 100;
+      t.hours = Math.round((t.hours + w.hrs) * 10) / 10;
+    }
+    const trend = Object.values(trendMap).sort((a, b) => a.ym.localeCompare(b.ym));
     let detail = null;
     if (selfId && q.detail) {
       const oById = {}; T('orders').forEach((o) => oById[o.id] = o);
       detail = T('reports').filter((r) => num(r.worker_id) === selfId && inRange(r.report_date))
         .map((r) => { const s = r.order_step_id ? find('order_steps', r.order_step_id) : null; const pr = s ? find('processes', s.process_id) : null;
-          const o = oById[r.order_id] || {};
-          const isTime = String(r.wage_type) === 'time';
-          const rate = r.unit_price !== undefined && r.unit_price !== null ? num(r.unit_price) : (isTime ? num(o.hourly_rate) : num(pr && pr.std_price));
-          return { report_date: r.report_date, qty_good: r.qty_good, qty_bad: r.qty_bad, wage_type: r.wage_type, work_hours: num(r.work_hours), unit_price: rate,
-            amount: Math.round((isTime ? num(r.work_hours) * rate : num(r.qty_good) * rate) * 100) / 100, order_code: o.code || '', process_name: pr ? pr.name : '' }; })
+          const w = wageOf(r);
+          return { report_date: r.report_date, qty_good: r.qty_good, qty_bad: r.qty_bad, wage_type: r.wage_type, work_hours: w.hrs, unit_price: w.rate,
+            amount: Math.round(w.amt * 100) / 100, order_code: (oById[r.order_id] || {}).code || '', process_name: pr ? pr.name : '' }; })
         .sort((a, b) => String(b.report_date).localeCompare(String(a.report_date)));
     }
-    return ok({ month, days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good), detail, self_only: !canAll });
+    return ok({ month, days, rows: Object.values(map).sort((a, b) => b.wage - a.wage || b.good - a.good), detail, summary: sum, teams, trend, self_only: !canAll });
   });
 
   /* 批次/工单双向追溯（静态镜像） */

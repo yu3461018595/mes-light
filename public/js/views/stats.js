@@ -109,8 +109,18 @@ Views.stats = {
     const rows = data.rows || [];
     const totalWage = rows.reduce((s, r) => s + (r.wage || 0), 0);
     const totalGood = rows.reduce((s, r) => s + (r.good || 0), 0);
+    const sum = data.summary || {};
+    const teams = data.teams || [];
+    const trend = data.trend || [];
     const periodTxt = data.month ? `${data.month} 月` : `近 ${data.days} 天`;
+    const tw = Number(sum.total_wage) || totalWage;
+    const pw = Number(sum.piece_wage) || 0;
+    const twg = Number(sum.time_wage) || 0;
+    const hrs = Number(sum.total_hours) || 0;
+    const heads = Number(sum.headcount) || rows.length;
+    const piecePct = tw > 0 ? Math.round(pw / tw * 100) : 0;
     el.querySelector('#wageExport').onclick = () => this.exportWage(rows, periodTxt);
+    const trendMax = Math.max(...trend.map((t) => Number(t.wage) || 0), 1);
     el.querySelector('#panel').innerHTML = `
       <div class="card" style="margin-bottom:14px"><div class="card-b" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
         <span class="small muted">核算周期</span>
@@ -124,15 +134,47 @@ Views.stats = {
         <span class="small muted">口径：计件 = 报工合格数 × 单价快照；计时 = 实动工时 × 时薪快照（报工时落库，调价不影响历史）</span>
       </div></div>
       <div class="grid g4" style="margin-bottom:14px">
-        <div class="stat"><div class="stat-l">工资合计</div><div class="stat-v" style="color:var(--primary)">¥${UI.n2(totalWage)}</div>
-          <div class="stat-s">${periodTxt} · 计件+计时</div></div>
-        <div class="stat"><div class="stat-l">计件合格数</div><div class="stat-v" style="color:var(--ok)">${UI.n2(totalGood)}</div>
-          <div class="stat-s">件 · ${rows.length} 人参与</div></div>
-        <div class="stat"><div class="stat-l">人均工资</div><div class="stat-v">¥${UI.n2(rows.length ? totalWage / rows.length : 0)}</div>
-          <div class="stat-s">元 / 人</div></div>
-        <div class="stat"><div class="stat-l">件均单价</div><div class="stat-v">¥${UI.f2(totalGood ? totalWage / totalGood : 0)}</div>
-          <div class="stat-s">元 / 件（加权平均）</div></div>
+        <div class="stat"><div class="stat-l">工资总额</div><div class="stat-v" style="color:var(--primary)">¥${UI.n2(tw)}</div>
+          <div class="stat-s">${periodTxt} · ${data.self_only ? '本人' : '全员'}</div></div>
+        <div class="stat"><div class="stat-l">计件 / 计时构成</div>
+          <div class="stat-v" style="font-size:18px"><span style="color:var(--ok)">计件 ¥${UI.n2(pw)}</span> <span class="muted" style="font-size:13px">/</span> <span style="color:#b06f00">计时 ¥${UI.n2(twg)}</span></div>
+          <div class="stat-s">计件占 ${piecePct}% · 计时占 ${100 - piecePct}%</div></div>
+        <div class="stat"><div class="stat-l">总工时 / 报工次数</div><div class="stat-v">${UI.f1(hrs)} h</div>
+          <div class="stat-s">${UI.n2(sum.cnt || 0)} 次报工 · 合格 ${UI.n2(sum.total_good || 0)} 件</div></div>
+        <div class="stat"><div class="stat-l">参与人数 / 人均</div><div class="stat-v">${UI.n2(heads)} 人</div>
+          <div class="stat-s">人均 ¥${UI.n2(heads ? tw / heads : 0)} · 时均 ¥${hrs > 0 ? UI.f2(tw / hrs) : '0.00'}</div></div>
       </div>
+      ${trend.length ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>近 6 个月工资趋势</h3><span class="small muted">每月工资总额（元）· 绿段为计件</span></div>
+        <div class="card-b">
+          ${trend.map((t) => {
+            const w = Number(t.wage) || 0;
+            const tp = Number(t.time_wage) || 0;
+            const barW = Math.max(w > 0 ? 4 : 0, Math.round(w / trendMax * 100));
+            const timeW = w > 0 ? Math.min(100, Math.round(tp / trendMax * 100)) : 0;
+            return `<div class="row" style="gap:10px;align-items:center;margin-bottom:8px">
+              <span class="small mono muted" style="width:52px;flex:none">${t.ym}</span>
+              <div style="flex:1;background:var(--line2,#eee);border-radius:4px;height:16px;position:relative;overflow:hidden">
+                <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:var(--ok,#0f9d58);opacity:.85"></div>
+                ${tp > 0 ? `<div style="position:absolute;right:${Math.max(0, barW - timeW)}%;top:0;bottom:0;width:${Math.min(timeW, barW)}%;background:#e0a100"></div>` : ''}
+              </div>
+              <b class="mono" style="width:100px;flex:none;text-align:right;color:var(--primary)">¥${UI.n2(w)}</b>
+              <span class="small mono muted" style="width:86px;flex:none;text-align:right">${UI.f1(t.hours || 0)} h</span>
+            </div>`;
+          }).join('')}
+        </div></div>` : ''}
+      ${teams.length > 1 || (teams.length === 1 && !data.self_only) ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>班组人工成本</h3><span class="small muted">${periodTxt} · 按工资降序</span></div>
+        <div class="card-b tight">${UI.table([
+          { t: '班组', f: (r) => `<b>${UI.esc(r.team)}</b>` },
+          { t: '人数', f: (r) => `<span class="mono">${UI.n2(r.headcount)}</span>` },
+          { t: '合格数', f: (r) => `<span class="mono" style="color:var(--ok)">${UI.n2(r.good)}</span>` },
+          { t: '工时', f: (r) => `<span class="mono">${UI.f1(r.hours || 0)} h</span>` },
+          { t: '工资', f: (r) => `<b class="mono" style="color:var(--primary)">¥${UI.n2(r.wage || 0)}</b>` },
+          { t: '占比', w: '160px', f: (r) => `<div class="row" style="gap:8px;flex-wrap:nowrap">
+              ${UI.progress(tw > 0 ? Math.round((r.wage || 0) / tw * 100) : 0)}
+              <span class="small mono">${tw > 0 ? Math.round((r.wage || 0) / tw * 100) : 0}%</span></div>` },
+        ], teams, { emptyText: '暂无数据' })}</div></div>` : ''}
       <div class="card">
         <div class="card-h"><h3>工资核算明细</h3><span class="small muted">点击「明细」查看该员工逐单核算记录</span></div>
         <div class="card-b tight">${UI.table([
