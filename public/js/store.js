@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [], patrol_records: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -2416,6 +2416,115 @@
     save();
     return ok(true);
   });
+
+  /* ---- 现场巡检（静态镜像）：自由巡检在产工单，异常联动质量异常单 ---- */
+  const patrolOut = (r) => {
+    const o = find('orders', r.order_id) || {};
+    const p = o.product_id ? find('products', o.product_id) : null;
+    const s = r.order_step_id ? find('order_steps', r.order_step_id) : null;
+    const pr = s ? find('processes', s.process_id) : null;
+    return Object.assign({}, r, {
+      order_code: o.code || '', product_name: p ? p.name : '', step_seq: s ? s.seq : null, step_name: pr ? pr.name : '',
+      checklist_result: r.checklist_result ? (typeof r.checklist_result === 'string' ? JSON.parse(r.checklist_result) : r.checklist_result) : null,
+      photos: r.photos ? (typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos) : [],
+    });
+  };
+  R('GET', '/patrols', (_p, _b, q) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const days = Math.min(180, Math.max(1, num(q.days, 7)));
+    const from = dayOffset(-(days - 1));
+    return ok(T('patrol_records')
+      .filter((r) => String(r.created_at).slice(0, 10) >= from && (q.mine !== '1' || r.inspector_id === (Store.currentUser || {}).id) && (!q.result || r.result === q.result))
+      .sort((a, b) => b.id - a.id).slice(0, 200).map(patrolOut));
+  });
+  R('POST', '/patrols', (_p, b) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const me = Store.currentUser || {};
+    const result = String(b.result || '') === 'abnormal' ? 'abnormal' : 'normal';
+    const order = b.order_id ? find('orders', b.order_id) : null;
+    if (!order || ['closed', 'cancelled'].includes(order.status)) return { ok: false, msg: '请选择要巡查的在产工单' };
+    const step = b.order_step_id ? find('order_steps', b.order_step_id) : null;
+    const cl = (Array.isArray(b.checklist) ? b.checklist : []).filter((c) => String(c.name || '').trim());
+    const ng = cl.filter((c) => c.result === 'ng');
+    const findings = String(b.findings || '').trim();
+    if (result === 'normal' && (num(b.qty_bad) > 0 || ng.length)) return { ok: false, msg: '存在不良或 NG 检查项，不能记为正常' };
+    if (result === 'abnormal' && !findings && !ng.length && !num(b.qty_bad)) return { ok: false, msg: '异常巡检请填写异常描述或勾选 NG 检查项' };
+    let issue = null;
+    if (result === 'abnormal' && b.create_issue !== false) {
+      const level = ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'major';
+      const product = order.product_id ? find('products', order.product_id) : null;
+      const summary = ng.map((c) => c.name + (c.qty ? '×' + c.qty : '')).concat(findings ? [findings] : []).join('；');
+      const assignee = resolveIssueAssignee(step, order);
+      issue = insert('quality_issues', {
+        id: nextId('quality_issues'), code: genCode('QA'), level, source: 'patrol',
+        order_id: order.id, order_step_id: step ? step.id : null, inspection_id: null,
+        product_id: product ? product.id : null, product_name: product ? product.name : null,
+        order_code: order.code, process_name: step && step.process_id ? (find('processes', step.process_id) || {}).name : null,
+        qty_affected: num(b.qty_bad) || num(b.qty_checked) || 0, bad_summary: summary || '现场巡检发现异常',
+        status: 'open', assignee_user_id: assignee.id, assignee_name: assignee.name, claimed_at: null,
+        due_at: nowISO().slice(0, 19), escalated: 0, cause: null, action: null, disposition: null,
+        verifier: null, closed_at: null, created_by: me.id, created_at: nowISO(), supplier: null,
+      });
+      issue = find('quality_issues', issue);
+    }
+    const day = String(new Date().getFullYear()).slice(2) + pad(new Date().getMonth() + 1) + pad(new Date().getDate());
+    const n = T('patrol_records').filter((x) => String(x.code || '').indexOf('XL' + day) === 0).length + 1;
+    const rec = insert('patrol_records', {
+      id: nextId('patrol_records'), code: 'XL' + day + String(100 + n).slice(1),
+      inspector_id: me.id, inspector_name: me.name, order_id: order.id, order_step_id: step ? step.id : null,
+      checklist_id: num(b.checklist_id) || null,
+      checklist_result: cl.length ? JSON.stringify(cl) : null, result,
+      qty_checked: Math.max(0, Math.floor(num(b.qty_checked))), qty_bad: Math.max(0, Math.floor(num(b.qty_bad))),
+      findings: findings || (ng.length ? '检查项 NG：' + ng.map((c) => c.name).join('、') : ''),
+      issue_id: issue ? issue.id : null, photos: '[]', created_at: nowISO(),
+    });
+    writeLog(me, '现场巡检', order.code + ' ' + (result === 'normal' ? '正常' : '异常' + (issue ? '（开单 ' + issue.code + '）' : '')));
+    save();
+    return ok({ id: rec, code: (find('patrol_records', rec) || {}).code, issue: issue ? { id: issue.id, code: issue.code, assignee_name: issue.assignee_name } : null });
+  });
+  R('GET', '/patrols/(\\d+)', (m) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const r = find('patrol_records', m[1]);
+    if (!r) return { ok: false, msg: '巡检记录不存在', status: 404 };
+    return ok(patrolOut(r));
+  });
+  R('POST', '/patrols/(\\d+)/photos', (m, b) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const r = find('patrol_records', m[1]);
+    if (!r) return { ok: false, msg: '巡检记录不存在', status: 404 };
+    const photos = r.photos ? (typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos) : [];
+    if (photos.length >= 6) return { ok: false, msg: '每条巡检最多 6 张照片' };
+    photos.push({ file: 'static_' + Date.now(), name: String(b.name || 'photo.jpg').slice(-120), at: nowISO() });
+    r.photos = JSON.stringify(photos);
+    save();
+    return ok({ photos });
+  });
+  R('GET', '/stats/patrol', () => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const t10 = today();
+    const week = T('patrol_records').filter((r) => String(r.created_at).slice(0, 10) >= dayOffset(-6));
+    const todayRows = T('patrol_records').filter((r) => String(r.created_at).slice(0, 10) === t10);
+    const byUser = {};
+    week.forEach((r) => {
+      const e = byUser[r.inspector_id] || (byUser[r.inspector_id] = { id: r.inspector_id, name: r.inspector_name, total: 0, abnormal: 0 });
+      e.total++; if (r.result === 'abnormal') e.abnormal++;
+    });
+    const trend = {};
+    week.forEach((r) => {
+      const d = String(r.created_at).slice(0, 10);
+      const e = trend[d] || (trend[d] = { d, total: 0, abnormal: 0 });
+      e.total++; if (r.result === 'abnormal') e.abnormal++;
+    });
+    return ok({
+      today: { total: todayRows.length, abnormal: todayRows.filter((r) => r.result === 'abnormal').length },
+      week: { total: week.length, abnormal: week.filter((r) => r.result === 'abnormal').length,
+        rate: week.length ? Math.round(week.filter((r) => r.result === 'abnormal').length * 1000 / week.length) / 10 : 0,
+        inspectors: Object.keys(byUser).length },
+      by_user: Object.values(byUser).sort((a, b) => b.total - a.total),
+      trend: Object.values(trend).sort((a, b) => String(a.d).localeCompare(String(b.d))),
+    });
+  });
+
 
   R('GET', '/stats/quality', () => {
     const openRows = T('quality_issues').filter((x) => ['open', 'processing', 'verifying'].includes(x.status));

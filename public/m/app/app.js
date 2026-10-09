@@ -180,6 +180,7 @@
     home: '工作台', messages: '消息', mine: '我的', order: '报工', inspect: '质检台',
     quality: '质量异常', issue: '异常详情', stocks: '库存预警', profile: '个人资料', password: '修改密码',
     pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验', equip: '设备点检',
+    patrol: '现场巡检',
   };
   function nav(hash, replace) {
     if (replace) location.replace(hash); else location.hash = hash;
@@ -200,7 +201,7 @@
     $tabbar.hidden = !['home', 'messages', 'mine'].includes(name);
     $view.className = $tabbar.hidden ? '' : 'has-tab';
     $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
-    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip'].includes(name);
+    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip', 'patrol'].includes(name);
     $title.textContent = TITLES[name] || '智工';
     $view.innerHTML = '<div class="loading">加载中…</div>';
     if (token()) paintOfflineBanner();   // 每次切页刷新离线报工横幅
@@ -212,6 +213,7 @@
         case 'mine': return await renderMine();
         case 'order': return await renderOrder(args[0]);
         case 'inspect': return await renderInspect();
+        case 'patrol': return await renderPatrol();
         case 'quality': return await renderQuality();
         case 'report_issue': return await renderReportIssue();
         case 'issue': return await renderIssue(args[0]);
@@ -443,8 +445,9 @@
     if (isInspector) {
       blocks.push(`<div class="card"><div class="card-h"><h3>质检快捷</h3></div>
         <div class="card-b" style="display:flex;gap:8px;padding:10px 12px;flex-wrap:wrap">
-          <button class="btn ghost sm" data-go="report_issue" style="flex:1">⚠️ 异常上报</button>
+          <button class="btn ghost sm" data-go="patrol" style="flex:1">🧭 现场巡检</button>
           <button class="btn ghost sm" data-go="inspect" style="flex:1">🔍 质检台</button>
+          <button class="btn ghost sm" data-go="report_issue" style="flex:1">⚠️ 异常上报</button>
           <button class="btn ghost sm" data-go="incoming" style="flex:1">📥 来料检验</button>
         </div></div>`);
     }
@@ -454,6 +457,8 @@
         <div class="card-b" style="padding:6px 0 0">
           <div class="item" data-go="wage"><div class="avatar" style="background:#e8efff">💰</div>
             <div class="body"><div class="t1">工资统计</div><div class="t2">全员计件/计时工资汇总 · 班组成本 · 排行</div></div><div class="chev">›</div></div>
+          <div class="item" data-go="patrol"><div class="avatar" style="background:#e6f4ea">🧭</div>
+            <div class="body"><div class="t1">现场巡检</div><div class="t2">巡查在产工单 · 异常一键开单</div></div><div class="chev">›</div></div>
           <div class="item" data-go="stocks"><div class="avatar" style="background:#fff3e0">📦</div>
             <div class="body"><div class="t1">库存预警</div><div class="t2">${stocks.length ? '当前 ' + stocks.length + ' 项物料低于安全库存' : '库存状态正常'}</div></div><div class="chev">›</div></div>
         </div></div>`);
@@ -864,6 +869,185 @@
         '已通知对应班组',
       ].filter(Boolean).join('<br>'), [{ text: '继续判定', onClick: () => renderInspect() }]);
     } catch (e) { toast(e.message); }
+  }
+
+  /* ---------------- 页面：现场巡检（主动巡查在产工单，异常一键开单） ---------------- */
+  async function renderPatrol() {
+    const [orders, stats, todays] = await Promise.all([
+      get('/api/orders?status=running,paused,released'),
+      get('/api/stats/patrol').catch(() => null),
+      get('/api/patrols?days=1').catch(() => []),
+    ]);
+    S.patrol = S.patrol || { orderId: '', stepId: '', result: 'normal', photos: [] };
+    const st = stats || { today: { total: 0, abnormal: 0 } };
+    $view.innerHTML = `
+      <div class="card"><div class="card-b" style="display:flex;gap:10px;text-align:center">
+        <div style="flex:1"><div style="font-size:24px;font-weight:700;color:#1d4ed8">${st.today.total}</div><div class="t3">今日巡检</div></div>
+        <div style="flex:1"><div style="font-size:24px;font-weight:700;color:${st.today.abnormal ? '#d93b3b' : '#0f9d58'}">${st.today.abnormal}</div><div class="t3">异常检出</div></div>
+        <div style="flex:1"><div style="font-size:24px;font-weight:700">${st.week ? st.week.rate + '%' : '—'}</div><div class="t3">近7天异常率</div></div>
+      </div></div>
+
+      <div class="card"><div class="card-b">
+        <div class="ocode">本次巡检</div>
+        <div class="field" style="margin-top:8px"><span>在产工单</span>
+          <select class="ipt" id="ptOrder"><option value="">选择工单…</option>
+            ${(orders.orders || orders || []).filter((o) => !['closed', 'cancelled'].includes(o.status)).slice(0, 50).map((o) => `<option value="${o.id}" ${S.patrol.orderId === o.id ? 'selected' : ''}>${esc(o.code)} · ${esc(o.product_name || '')}</option>`).join('')}
+          </select></div>
+        <div class="field" id="ptStepWrap" hidden><span>当前工序（可选）</span>
+          <select class="ipt" id="ptStep"></select></div>
+        <div id="ptClWrap" class="field" hidden><span>检查项</span><div id="ptCl"></div></div>
+        <div class="seg" style="margin-top:10px">
+          <button id="ptNormal" class="${S.patrol.result === 'normal' ? 'on' : ''}">✅ 正常</button>
+          <button id="ptAbnormal" class="${S.patrol.result === 'abnormal' ? 'on' : ''}">⚠️ 异常</button>
+        </div>
+        <div id="ptAbArea" ${S.patrol.result === 'abnormal' ? '' : 'hidden'}>
+          <div class="field" style="margin-top:10px"><span>异常严重程度</span>
+            <select class="ipt" id="ptLevel"><option value="minor">轻微（提示改进）</option><option value="major" selected>严重（需处理）</option><option value="critical">致命（停产处置）</option></select></div>
+          <div class="field"><span>抽检数（件，选填）</span><input class="ipt" id="ptChecked" type="number" inputmode="numeric" min="0" placeholder="如 5"></div>
+          <div class="field"><span>发现不良数（件）</span><input class="ipt" id="ptBad" type="number" inputmode="numeric" min="0" value="0"></div>
+          <div class="field"><span>异常描述</span><textarea class="ipt" id="ptFindings" rows="2" placeholder="如：极片边缘出现波浪褶皱，位于操作侧…"></textarea></div>
+          <div class="field"><span>现场照片（选填，最多 6 张）</span>
+            <div id="ptPhotos" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+            <input type="file" id="ptFile" accept="image/jpeg,image/png,image/webp" multiple hidden>
+            <button class="btn ghost sm" id="ptAddPhoto" style="margin-top:6px">📷 拍照 / 相册</button>
+          </div>
+          <div class="mask-hint">提交后将自动生成质量异常单，责任管理人员会收到待办通知。</div>
+        </div>
+        <button class="btn ok" id="ptSubmit" style="width:100%;margin-top:12px">提交巡检记录</button>
+      </div></div>
+
+      <div class="card"><div class="card-h"><h3>今日巡检记录（${todays.length}）</h3></div><div class="card-b" style="padding-top:4px">
+        ${todays.length ? todays.map((p) => `<div class="item" data-pissue="${p.issue_id || ''}" style="cursor:${p.issue_id ? 'pointer' : 'default'}">
+          <div class="avatar" style="background:${p.result === 'abnormal' ? '#fde8e8' : '#e6f4ea'}">${p.result === 'abnormal' ? '⚠️' : '✅'}</div>
+          <div class="body"><div class="t1">${esc(p.order_code || '—')}${p.step_name ? ' · ' + esc(p.step_name) : ''}</div>
+            <div class="t2">${esc(p.inspector_name || '')} ${String(p.created_at).slice(11, 16)}${p.findings ? ' · ' + esc(p.findings).slice(0, 30) : ''}</div></div>
+          <div class="chev">${p.issue_id ? '›' : ''}</div></div>`).join('')
+        : '<div class="t3 center" style="padding:14px 0">今天还没有巡检记录</div>'}
+      </div></div>
+      <div style="height:10px"></div>`;
+
+    const $ = (s) => $view.querySelector(s);
+    const paintPhotos = () => {
+      const box = $('#ptPhotos');
+      box.innerHTML = S.patrol.photos.map((f, i) => `<div style="position:relative"><img src="${f.thumb}" style="width:56px;height:56px;object-fit:cover;border-radius:8px"><button class="pt-del" data-i="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px">✕</button></div>`).join('');
+      box.querySelectorAll('.pt-del').forEach((b) => b.onclick = () => { S.patrol.photos.splice(Number(b.dataset.i), 1); paintPhotos(); });
+    };
+    paintPhotos();
+    const setSeg = (r) => {
+      S.patrol.result = r;
+      $('#ptNormal').classList.toggle('on', r === 'normal');
+      $('#ptAbnormal').classList.toggle('on', r === 'abnormal');
+      $('#ptAbArea').hidden = r !== 'abnormal';
+    };
+    $('#ptNormal').onclick = () => setSeg('normal');
+    $('#ptAbnormal').onclick = () => setSeg('abnormal');
+
+    $('#ptOrder').onchange = async () => {
+      const oid = Number($('#ptOrder').value);
+      S.patrol.orderId = oid; S.patrol.stepId = ''; S.patrol.checklist = [];
+      const wrap = $('#ptStepWrap'); const clWrap = $('#ptClWrap');
+      if (!oid) { wrap.hidden = true; clWrap.hidden = true; return; }
+      try {
+        const d = await get('/api/orders/' + oid);
+        const steps = (d.steps || []).filter((s) => !['done', 'passed'].includes(s.status) && s.qty_good < s.qty_plan);
+        wrap.hidden = false;
+        $('#ptStep').innerHTML = `<option value="">整单巡查 / 未指定工序</option>` +
+          steps.map((s) => `<option value="${s.id}">第 ${s.seq_no || s.seq} 道 ${esc(s.process_name)}（已报 ${s.qty_good}/${s.qty_plan}）</option>`).join('');
+        $('#ptStep').onchange = async () => {
+          S.patrol.stepId = Number($('#ptStep').value) || '';
+          const pid = (d.steps || []).find((s) => s.id === S.patrol.stepId);
+          if (!pid) { clWrap.hidden = true; S.patrol.checklist = []; return; }
+          try {
+            const cls = await get('/api/checklists');
+            const hit = (cls || []).find((c) => c.process_id === pid.process_id && Array.isArray(c.items) && c.items.length);
+            if (hit) {
+              S.patrol.checklist = hit.items.map((it) => ({ name: it.name, standard: it.standard || '', result: 'skip', qty: 0 }));
+              clWrap.hidden = false;
+              $('#ptCl').innerHTML = `<div class="t3" style="margin-bottom:4px">模板：${esc(hit.name)}</div>` +
+                S.patrol.checklist.map((it, i) => `<div class="cl-item" data-ci="${i}" style="display:flex;gap:8px;align-items:center;margin:4px 0">
+                  <span style="flex:1">${esc(it.name)}</span>
+                  <select class="ipt pt-cres" style="width:84px"><option value="skip">未检</option><option value="ok">OK</option><option value="ng">NG</option></select>
+                  <input class="ipt pt-cqty" type="number" inputmode="numeric" min="0" placeholder="NG数" style="width:70px" hidden></div>`).join('');
+              $('#ptCl').querySelectorAll('.cl-item').forEach((ci) => {
+                ci.querySelector('.pt-cres').onchange = () => {
+                  S.patrol.checklist[Number(ci.dataset.ci)].result = ci.querySelector('.pt-cres').value;
+                  ci.querySelector('.pt-cqty').hidden = ci.querySelector('.pt-cres').value !== 'ng';
+                };
+                ci.querySelector('.pt-cqty').oninput = () => { S.patrol.checklist[Number(ci.dataset.ci)].qty = Math.max(0, Math.floor(num(ci.querySelector('.pt-cqty').value))); };
+              });
+            } else { clWrap.hidden = true; S.patrol.checklist = []; }
+          } catch (e) { clWrap.hidden = true; S.patrol.checklist = []; }
+        };
+      } catch (e) { toast(e.message); }
+    };
+    if (S.patrol.orderId) { $('#ptOrder').value = S.patrol.orderId; $('#ptOrder').onchange(); }
+    $('#ptAddPhoto').onclick = () => $('#ptFile').click();
+    $('#ptFile').onchange = async () => {
+      const files = [...$('#ptFile').files];
+      $('#ptFile').value = '';
+      for (const f of files) {
+        if (S.patrol.photos.length >= 6) { toast('最多 6 张照片'); break; }
+        try { S.patrol.photos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (e) { toast('照片读取失败'); }
+      }
+      paintPhotos();
+    };
+    $view.querySelectorAll('[data-pissue]').forEach((el) => {
+      if (el.dataset.pissue) el.onclick = () => nav('#/issue/' + el.dataset.pissue);
+    });
+    $('#ptSubmit').onclick = async () => {
+      if (!S.patrol.orderId) return toast('请选择要巡查的在产工单');
+      const r = S.patrol.result;
+      const payload = {
+        order_id: S.patrol.orderId, order_step_id: S.patrol.stepId || null,
+        result: r, checklist: S.patrol.checklist || [],
+        qty_checked: Math.max(0, Math.floor(num(($('#ptChecked') || {}).value))),
+      };
+      if (r === 'abnormal') {
+        payload.level = $('#ptLevel').value;
+        payload.qty_bad = Math.max(0, Math.floor(num($('#ptBad').value)));
+        payload.findings = $('#ptFindings').value.trim();
+        if (!payload.qty_bad && !payload.findings && !(S.patrol.checklist || []).some((c) => c.result === 'ng')) return toast('异常巡检请填写描述、不良数或勾选 NG 项');
+      }
+      const btn = $('#ptSubmit'); btn.disabled = true; btn.textContent = '提交中…';
+      try {
+        const res = await post('/api/patrols', payload);
+        let photoN = 0;
+        for (const p of S.patrol.photos) {
+          try {
+            const b64 = await new Promise((resolve, reject) => { const rd = new FileReader(); rd.onload = () => resolve(rd.result); rd.onerror = reject; rd.readAsDataURL(p.blob); });
+            await post('/api/patrols/' + res.id + '/photos', { name: p.name, data: b64 });
+            photoN++;
+          } catch (e) { /* 单张失败不阻塞 */ }
+        }
+        S.patrol = { orderId: '', stepId: '', result: 'normal', photos: [] };
+        okMask('巡检已记录（' + res.code + '）', [
+          r === 'abnormal' && res.issue ? `已生成质量异常单 <b>${res.issue.code}</b>，责任人 ${esc(res.issue.assignee_name || '—')} 已收到待办` : '',
+          photoN ? `已上传 ${photoN} 张现场照片` : '',
+          r === 'normal' ? '本次巡查记录为正常' : '',
+        ].filter(Boolean).join('<br>') || ' ', [
+          { text: '继续巡检', cls: 'ghost', onClick: () => renderPatrol() },
+          { text: '返回工作台', onClick: () => nav('#/home') },
+        ]);
+      } catch (e) { btn.disabled = false; btn.textContent = '提交巡检记录'; toast(e.message); }
+    };
+  }
+
+  /* 照片压缩：最长边 1600px / JPEG 0.8，避免手机原图超过上传限制 */
+  function compressImage(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        URL.revokeObjectURL(url);
+        resolve(cv.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load fail')); };
+      img.src = url;
+    });
   }
 
   /* ---------------- 页面：质量异常 ---------------- */
@@ -1701,7 +1885,7 @@
     await route();
   }
   $back.onclick = () => {
-    if (['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password'].includes(S.route)) nav('#/home');
+    if (['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'patrol'].includes(S.route)) nav('#/home');
     else nav('#/home');
   };
   $title.onclick = () => { if (token()) nav('#/home'); };

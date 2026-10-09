@@ -58,6 +58,7 @@ Views.quality = {
       if (this.tab === 'pending') await this.renderPending(body);
       else if (this.tab === 'incoming') await this.renderIncoming(body);
       else if (this.tab === 'issues') await this.renderIssues(body);
+      else if (this.tab === 'patrols') await this.renderPatrols(body);
       else if (this.tab === 'records') await this.renderRecords(body);
       else if (this.tab === 'dash') await this.renderDash(body);
       else if (this.tab === 'setup') await this.renderSetup(body);
@@ -67,7 +68,7 @@ Views.quality = {
   },
 
   tabs() {
-    const t = [['pending', '待检队列'], ['incoming', '来料检验'], ['issues', '质量异常单'], ['records', '检验记录'], ['dash', '质量看板']];
+    const t = [['pending', '待检队列'], ['incoming', '来料检验'], ['issues', '质量异常单'], ['patrols', '巡检记录'], ['records', '检验记录'], ['dash', '质量看板']];
     if (App.user && ['admin', 'technician'].includes(App.user.role)) t.push(['setup', '检验设置']);
     return t;
   },
@@ -374,6 +375,58 @@ Views.quality = {
   },
 
   /* ---------------- 检验记录 ---------------- */
+  /* ---------------- 巡检记录（现场巡查留痕，异常联动异常单） ---------------- */
+  async renderPatrols(el) {
+    const days = this.patrolDays || 7;
+    const [rows, stats] = await Promise.all([
+      API.get('/patrols?days=' + days + (this.patrolResult ? '&result=' + this.patrolResult : '')),
+      API.get('/stats/patrol').catch(() => null),
+    ]);
+    const st = stats || { today: { total: 0, abnormal: 0 }, week: { total: 0, abnormal: 0, rate: 0, inspectors: 0 }, by_user: [] };
+    el.innerHTML = `
+      <div class="grid g4" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-l">今日巡检</div><div class="stat-v" style="color:var(--primary)">${UI.n2(st.today.total)}</div>
+          <div class="stat-s">异常检出 ${UI.n2(st.today.abnormal)} 次</div></div>
+        <div class="stat"><div class="stat-l">近 7 天巡检</div><div class="stat-v">${UI.n2(st.week.total)}</div>
+          <div class="stat-s">${st.week.inspectors} 人参与巡查</div></div>
+        <div class="stat"><div class="stat-l">异常检出率</div><div class="stat-v" style="color:${st.week.rate > 30 ? 'var(--warn)' : 'var(--ok)'}">${UI.f1(st.week.rate)}%</div>
+          <div class="stat-s">异常 ${UI.n2(st.week.abnormal)} / 巡检 ${UI.n2(st.week.total)}</div></div>
+        <div class="stat"><div class="stat-l">巡查人员排行</div><div class="stat-v small" style="font-size:15px;line-height:1.5;padding-top:4px">
+          ${(st.by_user || []).slice(0, 3).map((x) => `${UI.esc(x.name)} ${x.total}次`).join('<br>') || '<span class="muted">暂无</span>'}</div></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>巡检明细</h3>
+          <span class="small muted">巡检为主动过程抽查，不占用报工待检队列；异常可一键生成质量异常单</span>
+          <div class="spacer"></div>
+          <select class="input" id="ptDays" style="width:110px">
+            <option value="7" ${days === 7 ? 'selected' : ''}>近 7 天</option>
+            <option value="30" ${days === 30 ? 'selected' : ''}>近 30 天</option>
+            <option value="90" ${days === 90 ? 'selected' : ''}>近 90 天</option>
+          </select>
+          <select class="input" id="ptResult" style="width:100px">
+            <option value="">全部结果</option>
+            <option value="normal" ${this.patrolResult === 'normal' ? 'selected' : ''}>正常</option>
+            <option value="abnormal" ${this.patrolResult === 'abnormal' ? 'selected' : ''}>异常</option>
+          </select>
+        </div>
+        <div class="card-b">
+          ${rows.length ? UI.table([
+            { t: '单号', f: (r) => `<span class="mono small">${UI.esc(r.code)}</span>` },
+            { t: '时间', f: (r) => `<span class="small">${UI.esc(String(r.created_at).slice(5, 16))}</span>` },
+            { t: '巡检人', f: (r) => UI.esc(r.inspector_name || '—') },
+            { t: '工单/工序', f: (r) => `<b>${UI.esc(r.order_code || '—')}</b>${r.step_name ? ` · 第 ${r.step_seq} 道 ${UI.esc(r.step_name)}` : ' · 整单巡查'}` },
+            { t: '结果', f: (r) => r.result === 'abnormal' ? '<span class="chip chip-danger">异常</span>' : '<span class="chip chip-ok">正常</span>' },
+            { t: '抽检/不良', f: (r) => r.qty_checked || r.qty_bad ? `<span class="mono">${UI.n2(r.qty_checked)}</span> / <span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span>` : '<span class="muted">—</span>' },
+            { t: '描述', f: (r) => `<span class="small">${UI.esc(r.findings || '—')}</span>` },
+            { t: '照片', f: (r) => (r.photos || []).length ? (r.photos || []).map((p) => `<a href="/uploads/${encodeURIComponent(p.file)}" target="_blank" rel="noopener" title="${UI.esc(p.name)}">📷</a>`).join(' ') : '<span class="muted">—</span>' },
+            { t: '异常单', f: (r) => r.issue_id ? `<a href="#/quality/issue/${r.issue_id}" class="mono small" style="color:var(--danger)">查看 ›</a>` : '<span class="muted">—</span>' },
+          ], rows, { emptyText: '暂无巡检记录' }) : `<div class="muted" style="padding:22px 6px">该时段暂无巡检记录。检验员可在手机 APP「工作台 → 质检快捷 → 现场巡检」提交巡查。</div>`}
+        </div>
+      </div>`;
+    el.querySelector('#ptDays').onchange = (e) => { this.patrolDays = Number(e.target.value); this.renderPatrols(el); };
+    el.querySelector('#ptResult').onchange = (e) => { this.patrolResult = e.target.value; this.renderPatrols(el); };
+  },
+
   async renderRecords(el) {
     const rows = await API.get('/inspections');
     el.innerHTML = `

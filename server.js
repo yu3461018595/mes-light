@@ -2506,6 +2506,120 @@ route('DELETE', '/api/checklists/(\\d+)', ['admin'], (req, res, m, _b, u) => {
   ok(res, true);
 });
 
+/* ------------------------------ 现场巡检记录（检验员手机 APP · 主动巡查留痕） ------------------------------
+ * 与「报工后待检判定」互补：巡检不占用待检队列、不打乱检验流；
+ * 巡检异常可一键生成质量异常单（source=patrol，复用定责与通知链路）。 */
+const PATROL_PHOTO_EXT = ['.jpg', '.jpeg', '.png', '.webp'];
+function patrolOut(r) {
+  let cl = null, photos = [];
+  try { cl = r.checklist_result ? JSON.parse(r.checklist_result) : null; } catch (e) { /* 忽略 */ }
+  try { photos = r.photos ? JSON.parse(r.photos) : []; } catch (e) { /* 忽略 */ }
+  return Object.assign({}, r, { checklist_result: cl, photos });
+}
+route('GET', '/api/patrols', ['admin', 'technician', 'inspector'], (req, res, _m, _b, u, q) => {
+  const days = Math.min(180, Math.max(1, num(q.days, 7)));
+  const w = ["date(p.created_at) >= date('now', ?)"];
+  const a = ['-' + (days - 1) + ' day'];
+  if (q.mine === '1') { w.push('p.inspector_id=?'); a.push(u.id); }
+  if (['normal', 'abnormal'].includes(q.result)) { w.push('p.result=?'); a.push(q.result); }
+  const rows = all(`SELECT p.*, o.code order_code, pr.name product_name, s.seq step_seq, os.name step_name
+    FROM patrol_records p LEFT JOIN orders o ON o.id=p.order_id LEFT JOIN products pr ON pr.id=o.product_id
+    LEFT JOIN order_steps s ON s.id=p.order_step_id LEFT JOIN processes os ON os.id=s.process_id
+    WHERE ${w.join(' AND ')} ORDER BY p.id DESC LIMIT 200`, a);
+  ok(res, rows.map(patrolOut));
+});
+route('POST', '/api/patrols', ['admin', 'technician', 'inspector'], (req, res, _m, b, u) => {
+  const result = String(b.result || '') === 'abnormal' ? 'abnormal' : 'normal';
+  const order = b.order_id ? get('SELECT o.*, p.name product_name, p.id pid FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?', [num(b.order_id)]) : null;
+  if (!order) return fail(res, '请选择要巡查的在产工单');
+  if (['closed', 'cancelled'].includes(order.status)) return fail(res, '该工单已完工/作废，无需巡检');
+  let step = null;
+  if (b.order_step_id) {
+    step = get('SELECT s.*, pr.name process_name FROM order_steps s LEFT JOIN processes pr ON pr.id=s.process_id WHERE s.id=?', [num(b.order_step_id)]);
+    if (!step || step.order_id !== order.id) return fail(res, '工序与工单不匹配');
+  }
+  const qtyChecked = Math.max(0, Math.floor(num(b.qty_checked)));
+  const qtyBad = Math.max(0, Math.floor(num(b.qty_bad)));
+  // 检查项（可选，来自工序绑定模板或手动）：NG 项不允许判正常
+  const clResults = [];
+  for (const c of (Array.isArray(b.checklist) ? b.checklist : [])) {
+    const nm = String(c.name || '').trim();
+    if (!nm) continue;
+    clResults.push({ name: nm, standard: String(c.standard || '').trim(),
+      result: ['ok', 'ng', 'skip'].includes(c.result) ? c.result : 'skip',
+      qty: Math.max(0, Math.floor(num(c.qty))), remark: String(c.remark || '').trim() });
+  }
+  const ngItems = clResults.filter((c) => c.result === 'ng');
+  const findings = String(b.findings || '').trim();
+  if (result === 'normal' && (qtyBad > 0 || ngItems.length)) return fail(res, '存在不良或 NG 检查项，不能记为正常');
+  if (result === 'abnormal' && !findings && !ngItems.length && !qtyBad) return fail(res, '异常巡检请填写异常描述或勾选 NG 检查项');
+  let issue = null;
+  if (result === 'abnormal' && b.create_issue !== false) {
+    const level = ['minor', 'major', 'critical'].includes(b.level) ? b.level : 'major';
+    const summary = ngItems.map((c) => c.name + (c.qty ? '×' + c.qty : '')).concat(findings ? [findings] : []).join('；');
+    issue = createQualityIssue({
+      level, source: 'patrol', order_id: order.id, order_step_id: step ? step.id : null,
+      product_id: order.pid, product_name: order.product_name, process_name: step ? step.process_name : null,
+      qty_affected: qtyBad || qtyChecked || 0, bad_summary: summary || '现场巡检发现异常', created_by: u.id,
+    });
+  }
+  const id = insert(`INSERT INTO patrol_records(code,inspector_id,inspector_name,order_id,order_step_id,checklist_id,checklist_result,result,qty_checked,qty_bad,findings,issue_id,photos,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [genCode('XL'), u.id, u.name, order.id, step ? step.id : null, num(b.checklist_id) || null,
+      clResults.length ? JSON.stringify(clResults) : null, result, qtyChecked, qtyBad,
+      findings || (ngItems.length ? '检查项 NG：' + ngItems.map((c) => c.name).join('、') : ''),
+      issue ? issue.id : null, '[]', now()]);
+  writeLog(u, '现场巡检', (order.code || '') + ' ' + (result === 'normal' ? '正常' : '异常' + (issue ? '（开单 ' + issue.code + '）' : '')));
+  ok(res, { id, code: get('SELECT code FROM patrol_records WHERE id=?', [id]).code, issue: issue ? { id: issue.id, code: issue.code, assignee_name: issue.assignee_name } : null });
+});
+route('GET', '/api/patrols/(\\d+)', ['admin', 'technician', 'inspector'], (req, res, m) => {
+  const r = get(`SELECT p.*, o.code order_code, pr.name product_name, s.seq step_seq, os.name step_name
+    FROM patrol_records p LEFT JOIN orders o ON o.id=p.order_id LEFT JOIN products pr ON pr.id=o.product_id
+    LEFT JOIN order_steps s ON s.id=p.order_step_id LEFT JOIN processes os ON os.id=s.process_id WHERE p.id=?`, [m[1]]);
+  if (!r) return fail(res, '巡检记录不存在', 404);
+  ok(res, patrolOut(r));
+});
+// 巡检照片上传（JSON base64，≤8MB/张，最多 6 张，白名单 jpg/png/webp）
+route('POST', '/api/patrols/(\\d+)/photos', ['admin', 'technician', 'inspector'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM patrol_records WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '巡检记录不存在', 404);
+  if (r.inspector_id !== u.id && u.role !== 'admin') return fail(res, '仅巡检人或管理员可补充照片', 403);
+  let photos = [];
+  try { photos = JSON.parse(r.photos || '[]'); } catch (e) { /* 忽略 */ }
+  if (photos.length >= 6) return fail(res, '每条巡检最多 6 张照片');
+  if (!b.name) return fail(res, '请选择要上传的照片');
+  const buf = Buffer.from(String(b.data || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+  if (!buf.length) return fail(res, '照片内容为空');
+  if (buf.length > 8 * 1024 * 1024) return fail(res, '单张照片不能超过 8MB');
+  const safe = String(b.name).replace(/[\\/:*?"<>|]/g, '_').slice(-120);
+  if (!PATROL_PHOTO_EXT.includes(path.extname(safe).toLowerCase())) return fail(res, '仅支持拍照/相册的 ' + PATROL_PHOTO_EXT.join(' ') + ' 格式');
+  const dir = uploadDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const fname = 'patrol_' + r.id + '_' + Date.now() + '_' + safe;
+  fs.writeFileSync(path.join(dir, fname), buf);
+  photos.push({ file: fname, name: safe, at: now() });
+  run('UPDATE patrol_records SET photos=? WHERE id=?', [JSON.stringify(photos), r.id]);
+  writeLog(u, '上传巡检照片', '巡检#' + r.id + ' ' + safe);
+  ok(res, { photos });
+});
+/* 巡检统计：今日/近7天次数与异常检出，按人员、按日趋势 */
+route('GET', '/api/stats/patrol', ['admin', 'technician', 'inspector'], (req, res) => {
+  const todayStr = today();
+  const totalToday = get("SELECT COUNT(*) c FROM patrol_records WHERE date(created_at)=?", [todayStr]).c;
+  const abToday = get("SELECT COUNT(*) c FROM patrol_records WHERE date(created_at)=? AND result='abnormal'", [todayStr]).c;
+  const week = get(`SELECT COUNT(*) c, SUM(result='abnormal') ab FROM patrol_records WHERE date(created_at) >= date('now','-6 day')`);
+  const byUser = all(`SELECT u.id, u.name, COUNT(*) total, SUM(p.result='abnormal') abnormal
+    FROM patrol_records p JOIN users u ON u.id=p.inspector_id
+    WHERE date(p.created_at) >= date('now','-6 day') GROUP BY u.id ORDER BY total DESC`);
+  const trend = all(`SELECT date(created_at) d, COUNT(*) total, SUM(result='abnormal') abnormal
+    FROM patrol_records WHERE date(created_at) >= date('now','-6 day') GROUP BY date(created_at) ORDER BY d`);
+  ok(res, {
+    today: { total: totalToday, abnormal: abToday },
+    week: { total: week.c, abnormal: week.ab || 0, rate: week.c ? Math.round((week.ab || 0) * 1000 / week.c) / 10 : 0, inspectors: byUser.length },
+    by_user: byUser, trend,
+  });
+});
+
 /* ---- 消息中心（APP 通知）---- */
 route('GET', '/api/notifications', [], (req, res, _m, _b, u, query) => {
   if (!u) return ok(res, []);

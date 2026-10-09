@@ -27,6 +27,8 @@ Views.dashboard = {
       const openQc = (issues || []).filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
       const myQc = openQc.filter((x) => App.user && x.assignee_user_id === App.user.id);
       const pendingN = (pend || []).length;
+      const patrol = await API.get('/stats/patrol').catch(() => null);
+      const patrolToday = patrol ? patrol.today.total : null;
 
       const yieldCls = ov.yield >= 98 ? 'ok' : ov.yield >= 95 ? '' : 'danger';
       const d = new Date();
@@ -136,6 +138,7 @@ Views.dashboard = {
                 ], myQc.slice(0, 5))}`
                 : `<div class="small muted">${openQc.length ? `当前 ${openQc.length} 张异常单未闭环，暂无指派给我的待办。` : '暂无质量异常待办，质量稳定 👍'}</div>`}
               ${qc && qc.avg_claim_minutes != null ? `<div class="small muted" style="margin-top:10px">平均响应时长 <b>${qc.avg_claim_minutes}</b> 分钟 · 已闭环 <b>${qc.total_closed || 0}</b> 张</div>` : ''}
+              ${patrolToday != null ? `<div class="small muted" style="margin-top:6px">🧭 今日现场巡检 <b style="color:var(--primary)">${patrolToday}</b> 次${patrol && patrol.today.abnormal ? ` · 异常 <b style="color:var(--danger)">${patrol.today.abnormal}</b>` : ''}</div>` : ''}
             </div>
           </div>
           <div class="card">
