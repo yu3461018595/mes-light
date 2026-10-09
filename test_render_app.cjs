@@ -214,5 +214,18 @@ async function waitFor(fn, ms) {
     ok(appSrc.includes("addEventListener('online'"), '网络恢复自动同步监听已注册');
   } catch (e) { ok(false, '离线报工队列源码检查异常：' + e.message); }
 
+  /* 扫码识别 + 拍照留证：源码与本地解码库存在 */
+  try {
+    const appSrc = fs.readFileSync(path.join(ROOT, 'public/m/app/app.js'), 'utf8');
+    ok(appSrc.includes('function openScanner') && appSrc.includes('BarcodeDetector') && appSrc.includes('jsQR'), '摄像头扫码组件（BarcodeDetector+jsQR 兜底）已内置');
+    ok(appSrc.includes('function handleScan') && appSrc.includes('#hScanner'), '扫一扫入口与智能路由已接线');
+    ok(appSrc.includes("/api/reports/' + firstRid + '/photos") && appSrc.includes("/api/quality_issues/' + r.id + '/photos"), '报工/异常上报拍照上传已接线');
+    ok(fs.existsSync(path.join(ROOT, 'public/m/app/vendor/jsQR.min.js')), 'jsQR 本地解码库已就位');
+    const mHtml = fs.readFileSync(path.join(ROOT, 'public/m/index.html'), 'utf8');
+    ok(mHtml.includes('vendor/jsQR.min.js'), 'm/index.html 已引入 jsQR');
+    const cssSrc = fs.readFileSync(path.join(ROOT, 'public/m/app/app.css'), 'utf8');
+    ok(cssSrc.includes('.scan-mask') && cssSrc.includes('.scan-frame'), '扫码取景界面样式已内置');
+  } catch (e) { ok(false, '扫码/拍照源码检查异常：' + e.message); }
+
   if (fail) process.exitCode = 1;
 })().catch((e) => { console.error('渲染测试异常：', e); process.exitCode = 1; });

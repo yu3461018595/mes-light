@@ -481,6 +481,11 @@ Views.orders = {
             { t: '不良', f: (r) => `<span class="mono" style="color:var(--danger)">${UI.n2(r.qty_bad)}</span>` },
             { t: '不良原因', f: (r) => r.bad_reason ? `<span class="chip chip-danger">${UI.esc(r.bad_reason)}</span>` : '<span class="muted">—</span>' },
             { t: '工时', f: (r) => `<span class="small mono">${UI.f1(r.work_min / 60)} h</span>` },
+            { t: '照片', f: (r) => {
+              let ph = [];
+              try { ph = typeof r.photos === 'string' ? JSON.parse(r.photos || '[]') : (r.photos || []); } catch (e) { /* 忽略 */ }
+              return ph.length ? ph.map((p) => `<a class="link small" href="/uploads/${encodeURIComponent(p.file)}" target="_blank" title="${UI.esc(p.name || '')}">📷</a>`).join(' ') : '<span class="small muted">—</span>';
+            } },
             { t: '工资', align: 'right', f: (r) => {
               if (r.wage_type === 'time') return Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/时 × ${UI.f1(r.work_hours || 0)}h</div>` : '<span class="small muted">—</span>';
               return Number(r.amount) > 0 ? `<b class="mono" style="color:var(--primary)">¥${UI.f2(r.amount)}</b><div class="small muted">¥${UI.f2(r.unit_price)}/件</div>` : '<span class="small muted">—</span>';

@@ -229,7 +229,7 @@
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
         bad_reason: badEntries[0] ? badEntries[0].bad_reason : '', bad_reason_id: badEntries[0] ? badEntries[0].bad_reason_id : null, work_min: num(it.work_min),
         report_date: b.report_date || today(), remark: b.remark || '', created_at: nowISO(),
-        unit_price: snapRate, wage_type: isTime ? 'time' : 'piece', work_hours: workHours > 0 ? workHours : null,
+        unit_price: snapRate, wage_type: isTime ? 'time' : 'piece', work_hours: workHours > 0 ? workHours : null, photos: '[]',
       });
       for (const e of badEntries) {
         insert('report_bad_reasons', { id: nextId('report_bad_reasons'), report_id: rid, bad_reason_id: e.bad_reason_id, bad_reason: e.bad_reason, bad_reason_detail: e.bad_reason_detail, qty: e.qty });
@@ -2001,7 +2001,7 @@
       order_code: order ? order.code : null, process_name: opt.process_name || null,
       qty_affected: num(opt.qty_affected), bad_summary: opt.bad_summary || null,
       status: 'open', assignee_user_id: assignee.id, assignee_name: assignee.name,
-      claimed_at: null, due_at: ts.slice(0, 19), escalated: 0,
+      claimed_at: null, due_at: ts.slice(0, 19), escalated: 0, photos: '[]',
       cause: null, action: null, disposition: null, verifier: null, closed_at: null,
       created_by: opt.created_by || null, created_at: ts,
     });
@@ -2494,6 +2494,30 @@
     if (!r) return { ok: false, msg: '巡检记录不存在', status: 404 };
     const photos = r.photos ? (typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos) : [];
     if (photos.length >= 6) return { ok: false, msg: '每条巡检最多 6 张照片' };
+    photos.push({ file: 'static_' + Date.now(), name: String(b.name || 'photo.jpg').slice(-120), at: nowISO() });
+    r.photos = JSON.stringify(photos);
+    save();
+    return ok({ photos });
+  });
+  /* APP 拍照留证（静态镜像）：报工照片 / 异常单照片 */
+  R('POST', '/reports/(\\d+)/photos', (m, b) => {
+    const me = Store.currentUser || {};
+    const r = find('reports', m[1]);
+    if (!r) return { ok: false, msg: '报工记录不存在', status: 404 };
+    if (num(r.worker_id) !== num(me.id) && !['admin', 'technician'].includes(me.role)) return fail('仅报工人本人或管理员可补充照片', 403);
+    const photos = r.photos ? (typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos) : [];
+    if (photos.length >= 6) return { ok: false, msg: '每条报工最多 6 张照片' };
+    photos.push({ file: 'static_' + Date.now(), name: String(b.name || 'photo.jpg').slice(-120), at: nowISO() });
+    r.photos = JSON.stringify(photos);
+    save();
+    return ok({ photos });
+  });
+  R('POST', '/quality_issues/(\\d+)/photos', (m, b) => {
+    if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
+    const r = find('quality_issues', m[1]);
+    if (!r) return { ok: false, msg: '异常单不存在', status: 404 };
+    const photos = r.photos ? (typeof r.photos === 'string' ? JSON.parse(r.photos) : r.photos) : [];
+    if (photos.length >= 6) return { ok: false, msg: '每张异常单最多 6 张照片' };
     photos.push({ file: 'static_' + Date.now(), name: String(b.name || 'photo.jpg').slice(-120), at: nowISO() });
     r.photos = JSON.stringify(photos);
     save();

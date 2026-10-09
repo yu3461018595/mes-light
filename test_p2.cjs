@@ -204,6 +204,23 @@ async function api(method, url, body, token) {
     const pwSW = await api('GET', '/api/stats/piece_wage?days=30', null, wTok);
     chk('操作工视角汇总仅本人（计时=60）', Math.abs(((pwSW.data.summary || {}).time_wage) - 60) < 0.01, JSON.stringify(pwSW.data.summary));
 
+    // ---------- 4.8 APP 拍照留证：报工/异常单照片上传（扫码拍照功能后端） ----------
+    const PNG1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const rid1 = ((repW.data.steps || [])[0] || {}).report_id;
+    chk('报工响应带 report_id（供照片上传）', !!rid1, JSON.stringify(repW.data.steps));
+    const ph1 = await api('POST', '/api/reports/' + rid1 + '/photos', { name: 'site.png', data: PNG1 }, wTok);
+    chk('报工人本人可上传照片', ph1.ok && (ph1.data.photos || []).length === 1, JSON.stringify(ph1));
+    const odDet = await H('GET', '/api/orders/' + odId);
+    const rpPh = (odDet.data.reports || []).find((x) => x.id === rid1);
+    chk('订单详情报工记录含照片文件', !!rpPh && (() => { try { return JSON.parse(rpPh.photos || '[]').length === 1 && JSON.parse(rpPh.photos)[0].file.startsWith('report_'); } catch (e) { return false; } })(), JSON.stringify(rpPh && rpPh.photos));
+    const qi1 = await H('POST', '/api/quality_issues', { source: 'report', level: 'minor', qty_affected: 2, bad_summary: '拍照留证测试异常' });
+    const phQ = await H('POST', '/api/quality_issues/' + qi1.data.id + '/photos', { name: 'site.png', data: PNG1 });
+    chk('异常单可上传照片', phQ.ok && (phQ.data.photos || []).length === 1, JSON.stringify(phQ));
+    const phQw = await api('POST', '/api/quality_issues/' + qi1.data.id + '/photos', { name: 'x.png', data: PNG1 }, wTok);
+    chk('操作工上传异常单照片被拒 403', phQw.ok === false, JSON.stringify(phQw));
+    const phBad = await H('POST', '/api/reports/' + rid1 + '/photos', { name: 'x.txt', data: 'data:text/plain;base64,SGVsbG8=' });
+    chk('非图片格式被拒', phBad.ok === false, JSON.stringify(phBad));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

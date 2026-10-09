@@ -971,7 +971,7 @@ function doReport(b, actor) {
         autoIn = autoFinishIn(order, product, good, actor, step.id, rid);
       }
       const repWage = isTime ? Math.round(workHours * snapRate * 100) / 100 : Math.round(good * snapRate * 100) / 100;
-      results.push({ order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn, wage: repWage });
+      results.push({ report_id: rid, order_step_id: step.id, seq: step.seq, finished, needInspect, autoFinishIn: autoIn, wage: repWage });
     }
 
     // 全部工序完成 → 工单完工（检验点未放行的工序状态仍为 running，天然阻止误判完工）
@@ -2600,6 +2600,53 @@ route('POST', '/api/patrols/(\\d+)/photos', ['admin', 'technician', 'inspector']
   photos.push({ file: fname, name: safe, at: now() });
   run('UPDATE patrol_records SET photos=? WHERE id=?', [JSON.stringify(photos), r.id]);
   writeLog(u, '上传巡检照片', '巡检#' + r.id + ' ' + safe);
+  ok(res, { photos });
+});
+
+/* APP 拍照留证通用落盘：校验 base64/大小/扩展名 → data/uploads/ → 返回 {photos, fname}（写库由调用方做） */
+function storeScanPhoto(b, prefix, id, photos) {
+  if (!b || !b.name) throw Object.assign(new Error('请选择要上传的照片'), { status: 400 });
+  const buf = Buffer.from(String(b.data || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+  if (!buf.length) throw Object.assign(new Error('照片内容为空'), { status: 400 });
+  if (buf.length > 8 * 1024 * 1024) throw Object.assign(new Error('单张照片不能超过 8MB'), { status: 400 });
+  const safe = String(b.name).replace(/[\\/:*?"<>|]/g, '_').slice(-120);
+  if (!PATROL_PHOTO_EXT.includes(path.extname(safe).toLowerCase())) throw Object.assign(new Error('仅支持拍照/相册的 ' + PATROL_PHOTO_EXT.join(' ') + ' 格式'), { status: 400 });
+  const dir = uploadDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const fname = prefix + '_' + id + '_' + Date.now() + '_' + safe;
+  fs.writeFileSync(path.join(dir, fname), buf);
+  photos.push({ file: fname, name: safe, at: now() });
+  return photos;
+}
+
+// 报工拍照留证：报工人本人或管理员/技术员可补传（≤6 张）
+route('POST', '/api/reports/(\\d+)/photos', [], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM reports WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '报工记录不存在', 404);
+  if (r.worker_id !== u.id && !['admin', 'technician'].includes(u.role)) return fail(res, '仅报工人本人或管理员可补充照片', 403);
+  let photos = [];
+  try { photos = JSON.parse(r.photos || '[]'); } catch (e) { /* 忽略 */ }
+  if (photos.length >= 6) return fail(res, '每条报工最多 6 张照片');
+  try {
+    storeScanPhoto(b, 'report', r.id, photos);
+  } catch (e) { return fail(res, e.message, e.status || 400); }
+  run('UPDATE reports SET photos=? WHERE id=?', [JSON.stringify(photos), r.id]);
+  writeLog(u, '上传报工照片', '报工#' + r.id);
+  ok(res, { photos });
+});
+
+// 质量异常单照片上传（异常上报/巡检联动后补拍，≤6 张）
+route('POST', '/api/quality_issues/(\\d+)/photos', ['admin', 'technician', 'inspector'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM quality_issues WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '异常单不存在', 404);
+  let photos = [];
+  try { photos = JSON.parse(r.photos || '[]'); } catch (e) { /* 忽略 */ }
+  if (photos.length >= 6) return fail(res, '每张异常单最多 6 张照片');
+  try {
+    storeScanPhoto(b, 'issue', r.id, photos);
+  } catch (e) { return fail(res, e.message, e.status || 400); }
+  run('UPDATE quality_issues SET photos=? WHERE id=?', [JSON.stringify(photos), r.id]);
+  writeLog(u, '上传异常单照片', '异常单#' + r.id + ' ' + (r.code || ''));
   ok(res, { photos });
 });
 /* 巡检统计：今日/近7天次数与异常检出，按人员、按日趋势 */

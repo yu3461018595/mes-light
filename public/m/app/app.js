@@ -356,6 +356,9 @@
         <div class="tiny" style="margin-top:2px">${t.k}</div></div>`).join('')}
     </div></div>`);
 
+    // 扫一扫（全角色）：工单码→报工 · 物料码→盘点/查询 · 质检/站内链接→直达
+    blocks.push(`<button class="btn scan-entry" id="hScanner" style="width:100%;margin-bottom:12px">📷 扫一扫（扫码报工 / 盘点 / 查询）</button>`);
+
     // 待办异常（排最前，最需要处理）
     if (mineIssues.length) {
       blocks.push(`<div class="card"><div class="card-h"><h3>待处理质量异常 <span class="tiny">(${mineIssues.length})</span></h3>
@@ -472,6 +475,8 @@
     if (rf) rf.onclick = async () => { await refreshUnread(); toast('已刷新'); route(); };
     const sc = $view.querySelector('#hScan');
     if (sc) sc.onclick = () => openScanPicker();
+    const hsc = $view.querySelector('#hScanner');
+    if (hsc) hsc.onclick = () => openScanner('对准工单二维码 / 物料条码', handleScan);
   }
 
   // 首页统计块 / 内联链接 → 跳转
@@ -496,7 +501,7 @@
     const data = await get('/api/app/order/' + orderId);
     S.order = data.order; S.steps = data.steps || []; S.workers = data.workers || [];
     S.badReasons = data.badReasons || [];
-    S.sel = new Set(); S.vals = {};
+    S.sel = new Set(); S.vals = {}; S.rpPhotos = [];
     paintOrder();
   }
 
@@ -569,6 +574,12 @@
       </div>
       <div class="card"><div class="card-h"><h3>提交报工</h3></div><div class="card-b">
         <div class="field"><span>报工人</span><input class="ipt" value="${esc((S.me && S.me.name) || '')}" disabled></div>
+        <div class="field"><span>现场拍照留证（选填，最多 3 张）</span>
+          <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+            <input type="file" id="rpCam" accept="image/*" capture="environment" multiple hidden>
+            <button class="btn ghost sm" id="rpPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+            <div id="rpPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+          </div></div>
         <button class="btn" id="submit" ${selCount ? '' : 'disabled'}>提交报工（${selCount} 道）</button>
       </div></div>`}
       <div style="height:10px"></div>`;
@@ -596,6 +607,25 @@
     bindBadRows();
     const sb = $view.querySelector('#submit');
     if (sb) sb.onclick = submitReport;
+    /* 报工拍照留证（压缩后随报工单上传） */
+    const rpBtn = $view.querySelector('#rpPhoto');
+    if (rpBtn) {
+      const paintRp = () => {
+        const box = $view.querySelector('#rpPhotos'); if (!box) return;
+        box.innerHTML = S.rpPhotos.map((p, i) => `<div style="position:relative"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button data-i="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px">✕</button></div>`).join('');
+        box.querySelectorAll('button[data-i]').forEach((b) => b.onclick = () => { S.rpPhotos.splice(Number(b.dataset.i), 1); paintRp(); });
+      };
+      rpBtn.onclick = () => $view.querySelector('#rpCam').click();
+      $view.querySelector('#rpCam').onchange = async (e) => {
+        for (const f of Array.from(e.target.files || [])) {
+          if (S.rpPhotos.length >= 3) { toast('最多 3 张照片'); break; }
+          try { S.rpPhotos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (err) { toast('照片读取失败'); }
+        }
+        e.target.value = '';
+        paintRp();
+      };
+      paintRp();
+    }
   }
 
   /* 不良明细多行（一道工序多种不良，填一种自动出下一种） */
@@ -686,10 +716,23 @@
       const autoQty = auto.reduce((a, x) => a + num(x.autoFinishIn.qty), 0);
       const need = (r && r.steps || []).filter((x) => x.needInspect).length;
       const wage = Math.round((r.steps || []).reduce((a, x) => a + num(x.wage), 0) * 100) / 100;
+      /* 拍照留证：报工成功后上传到本次报工记录（单张失败不阻断） */
+      let photoN = 0;
+      const firstRid = (r.steps || [])[0] && (r.steps || [])[0].report_id;
+      if (firstRid && S.rpPhotos.length) {
+        for (const p of S.rpPhotos) {
+          try {
+            const b64 = await new Promise((res2, rej2) => { const rd = new FileReader(); rd.onload = () => res2(rd.result); rd.onerror = rej2; rd.readAsDataURL(p.blob); });
+            await post('/api/reports/' + firstRid + '/photos', { name: p.name, data: b64 });
+            photoN++;
+          } catch (err) { /* 单张失败忽略 */ }
+        }
+      }
       okMask('报工成功', [
         wage > 0 ? `本次工资 <b style="color:#1d4ed8">¥${wage.toFixed(2)}</b>${S.order.wage_type === 'time' ? '（计时）' : '（计件）'}` : '',
         autoQty ? `末道工序已自动成品入库 ${autoQty} 件` : '',
         need ? `${need} 道工序已转入待检，质检员已收到通知` : '',
+        photoN ? `已上传 ${photoN} 张现场照片` : '',
         '已通知对应技术员',
       ].filter(Boolean).join('<br>') || ' ', [
         { text: '继续报工本单', cls: 'ghost', onClick: () => renderOrder(S.order.id) },
@@ -714,13 +757,105 @@
     }
   }
 
+  /* ---------------- 摄像头扫码组件（BarcodeDetector 优先，jsQR 兜底；支持二维码/条形码） ---------------- */
+  let scanStream = null;
+  function openScanner(hint, onResult) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('当前环境不支持摄像头扫码'); return null; }
+    const mask = document.createElement('div');
+    mask.className = 'scan-mask';
+    mask.innerHTML = `
+      <video class="scan-video" playsinline muted autoplay></video>
+      <div class="scan-frame"><i></i><i></i><i></i><i></i></div>
+      <div class="scan-tip">${esc(hint || '对准二维码 / 条形码，自动识别')}</div>
+      <button class="scan-close">✕ 关闭</button>`;
+    document.body.appendChild(mask);
+    const video = mask.querySelector('.scan-video');
+    let stopped = false, rafId = 0, det = null, canvas = null;
+    const stop = () => {
+      if (stopped) return; stopped = true;
+      cancelAnimationFrame(rafId);
+      if (scanStream) { scanStream.getTracks().forEach((t) => t.stop()); scanStream = null; }
+      mask.remove();
+    };
+    mask.querySelector('.scan-close').onclick = stop;
+    const gotCode = (text) => { const v = String(text || '').trim(); if (!v) return; stop(); if (onResult) onResult(v); };
+    const tick = () => {
+      if (stopped) return;
+      try {
+        if (video.readyState >= 2 && video.videoWidth) {
+          if (det) {
+            det.detect(video).then((codes) => { if (codes && codes.length && codes[0].rawValue) gotCode(codes[0].rawValue); }).catch(() => {});
+          } else if (window.jsQR) {
+            if (!canvas) canvas = document.createElement('canvas');
+            const w = Math.min(640, video.videoWidth), h = Math.round(w * video.videoHeight / video.videoWidth);
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            ctx.drawImage(video, 0, 0, w, h);
+            const img = ctx.getImageData(0, 0, w, h);
+            const code = window.jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
+            if (code && code.data) gotCode(code.data);
+          }
+        }
+      } catch (e) { /* 单帧解码失败忽略 */ }
+      rafId = requestAnimationFrame(tick);
+    };
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      .then((stream) => {
+        if (stopped) { stream.getTracks().forEach((t) => t.stop()); return; }
+        scanStream = stream;
+        video.srcObject = stream;
+        video.play().catch(() => {});
+        if (window.BarcodeDetector) { try { det = new window.BarcodeDetector(); } catch (e) { det = null; } }
+        tick();
+      })
+      .catch(() => { mask.remove(); toast('无法打开相机，请检查 APP 相机权限'); });
+    return { stop };
+  }
+
+  /* 扫码结果智能路由：工单码→报工 · 物料码→盘点/查询 · 质检链接→质检台 · 其他 URL→打开 */
+  async function handleScan(raw) {
+    const code = String(raw || '').trim();
+    if (!code) return;
+    if (/^https?:/i.test(code) || code.startsWith('/m/')) {
+      const mO = code.match(/[?&]o=(\d+)/);
+      if (mO) {
+        try {
+          const list = await get('/api/app/my_orders');
+          const hit = (list.orders || []).find((o) => String(o.id) === mO[1]);
+          if (hit) return nav('#/order/' + hit.id);
+        } catch (e) { /* 继续其他分支 */ }
+      }
+      return void (location.href = code);
+    }
+    try {
+      const list = await get('/api/app/my_orders');
+      const hit = (list.orders || []).find((o) => o.code === code);
+      if (hit) return nav('#/order/' + hit.id);
+    } catch (e) { /* 继续其他分支 */ }
+    try {
+      const me = await ensureMe();
+      const mats = await get('/api/materials').catch(() => null);
+      const m = (mats || []).find((x) => x.code === code || (x.barcode || '') === code);
+      if (m) {
+        if (me.role === 'admin' || me.role === 'technician') { S.stkKw = code; return nav('#/stocktake'); }
+        return void okMask('扫码结果', `物料 <b>${esc(m.code)}</b> ${esc(m.name || '')}`, [{ text: '知道了' }]);
+      }
+    } catch (e) { /* 继续兜底 */ }
+    okMask('扫码结果', `<div style="word-break:break-all">${esc(code)}</div>`, [
+      { text: '复制内容', cls: 'ghost', onClick: () => { try { navigator.clipboard.writeText(code); toast('已复制'); } catch (e) { /* 忽略 */ } } },
+      { text: '关闭' },
+    ]);
+  }
+
   /* 扫码报工入口：解析二维码 URL 后跳转免登录页 */
   function openScanPicker() {
     const mask = sheet(`<h3>扫码报工</h3><div class="sub">用手机相机扫描工单二维码；也可手动输入工单号</div>
+      <button class="btn" id="scCam" style="margin-bottom:10px">📷 打开相机扫码</button>
       <div class="field"><span>工单号 / 二维码链接</span>
         <input class="ipt" id="scInput" placeholder="如 MO20260918001 或粘贴二维码链接"></div>
-      <button class="btn" id="scGo">打开报工页</button>
+      <button class="btn ghost" id="scGo">打开报工页</button>
       <div class="tiny center" style="margin-top:12px">也可用微信/系统相机直接扫工单二维码进入报工页</div>`);
+    mask.querySelector('#scCam').onclick = () => { mask.remove(); openScanner('对准工单二维码', handleScan); };
     mask.querySelector('#scGo').onclick = async () => {
       const raw = mask.querySelector('#scInput').value.trim();
       if (!raw) return toast('请输入工单号或链接');
@@ -1104,7 +1239,7 @@
     const me = await ensureMe();
     if (me.role === 'worker') return renderError('异常上报面向质检/管理人员；操作工请通过报工页登记不良，由检验判定后处理');
     const orders = await get('/api/orders?status=running,paused,released').catch(() => []);
-    S.riLevel = '';
+    S.riLevel = ''; S.riPhotos = [];
     $view.innerHTML = `
       <div class="card"><div class="card-b">
         <div class="ocode">异常上报</div>
@@ -1129,6 +1264,12 @@
           <input class="ipt ri-qty" type="number" inputmode="numeric" min="0" value="0"></div>
         <div class="field" style="margin-bottom:4px"><span>问题描述 <b style="color:var(--danger)">*</b></span>
           <input class="ipt ri-summary" placeholder="如：外观划伤集中出现，疑似模具磨损"></div>
+        <div class="field" style="margin-bottom:4px"><span>现场拍照（选填，最多 3 张）</span>
+          <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+            <input type="file" id="riCam" accept="image/*" capture="environment" multiple hidden>
+            <button class="btn ghost sm" id="riPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+            <div id="riPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+          </div></div>
         <button class="btn ok" id="riSubmit" style="width:100%;margin-top:12px">提交上报</button>
         <div class="mask-hint" style="margin-top:8px">提交后生成质量异常单：责任处理人收到待办，厂部管理层同步收到通知。</div>
       </div></div>
@@ -1146,6 +1287,24 @@
     };
     lvBtns.forEach((b) => b.onclick = () => { S.riLevel = b.dataset.lv; paintLv(); });
     paintLv();
+    /* 拍照留证（压缩后随异常单上传） */
+    (() => {
+      const paintRp = () => {
+        const box = $view.querySelector('#riPhotos'); if (!box) return;
+        box.innerHTML = S.riPhotos.map((p, i) => `<div style="position:relative"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button data-i="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px">✕</button></div>`).join('');
+        box.querySelectorAll('button[data-i]').forEach((b) => b.onclick = () => { S.riPhotos.splice(Number(b.dataset.i), 1); paintRp(); });
+      };
+      $view.querySelector('#riPhoto').onclick = () => $view.querySelector('#riCam').click();
+      $view.querySelector('#riCam').onchange = async (e) => {
+        for (const f of Array.from(e.target.files || [])) {
+          if (S.riPhotos.length >= 3) { toast('最多 3 张照片'); break; }
+          try { S.riPhotos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (err) { toast('照片读取失败'); }
+        }
+        e.target.value = '';
+        paintRp();
+      };
+      paintRp();
+    })();
     $view.querySelector('.ri-order').onchange = async (e) => {
       const wrap = $view.querySelector('.ri-step-wrap');
       const sel = $view.querySelector('.ri-step');
@@ -1175,8 +1334,20 @@
           order_step_id: stepId ? num(stepId) : null,
           qty_affected: qty, bad_summary: summary,
         });
+        /* 照片随异常单上传（单张失败不阻断） */
+        let photoN = 0;
+        if (r && r.id && S.riPhotos.length) {
+          for (const p of S.riPhotos) {
+            try {
+              const b64 = await new Promise((res2, rej2) => { const rd = new FileReader(); rd.onload = () => res2(rd.result); rd.onerror = rej2; rd.readAsDataURL(p.blob); });
+              await post('/api/quality_issues/' + r.id + '/photos', { name: p.name, data: b64 });
+              photoN++;
+            } catch (err) { /* 单张失败忽略 */ }
+          }
+        }
         okMask('已上报 ' + (r.code || ''), [
           '严重程度：<b>' + (LEVEL_LABEL[r.level] || r.level) + '</b>',
+          photoN ? `已上传 ${photoN} 张现场照片` : '',
           r.level === 'critical'
             ? '已通知责任处理人，并升级厂部管理层（站内+群通知）'
             : '已通知责任处理人与厂部管理层，请跟进处理进度',
@@ -1532,7 +1703,7 @@
     ]);
     const byMat = {};
     (inv || []).forEach((r) => { (byMat[r.material_id] = byMat[r.material_id] || []).push(r); });
-    let kw = '';
+    let kw = (S.stkKw || '').toLowerCase(); S.stkKw = '';
 
     const matList = () => (mats || [])
       .filter((m) => !kw || (m.code + ' ' + m.name).toLowerCase().includes(kw))
@@ -1540,8 +1711,11 @@
     const whName = (r) => (r.warehouse_name || (r.warehouse_id ? '仓库#' + r.warehouse_id : '默认仓库')) + (r.batch ? ' · 批次 ' + r.batch : '') + (!r.batch && !r.warehouse_id ? ' · 无批次' : '');
 
     $view.innerHTML = `<div class="card"><div class="card-b">
-      <div class="field"><span>物料编码 / 名称（可扫物料二维码后粘贴）</span>
-        <input class="ipt" id="skKw" placeholder="如 WL-001 或 铝板"></div>
+      <div class="field"><span>物料编码 / 名称</span>
+        <div style="display:flex;gap:8px">
+          <input class="ipt" id="skKw" placeholder="如 WL-001 或 铝板" value="${esc(kw)}" style="flex:1">
+          <button class="btn ghost" id="skScan" style="flex:0 0 auto">📷 扫码</button>
+        </div></div>
       <div id="skList"></div>
     </div></div>
     <div id="skDetail"></div>`;
@@ -1603,6 +1777,12 @@
       });
     };
     $view.querySelector('#skKw').oninput = (e) => { kw = e.target.value.trim().toLowerCase(); paintList(); };
+    $view.querySelector('#skScan').onclick = () => openScanner('对准物料二维码 / 条形码', (txt) => {
+      kw = String(txt || '').trim().toLowerCase();
+      $view.querySelector('#skKw').value = kw;
+      paintList();
+      toast('已识别：' + (kw || '空'));
+    });
     paintList();
   }
 

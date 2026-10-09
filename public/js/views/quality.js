@@ -865,6 +865,12 @@ Views.quality = {
             ${it.loss_amount != null && it.loss_amount !== '' ? `<dt>损失金额</dt><dd><b class="mono">¥ ${UI.n2(it.loss_amount)}</b></dd>` : ''}
             ${it.status === 'cancelled' ? `<dt>作废说明</dt><dd>${UI.esc(it.cause || '误报')}</dd>` : ''}
           </dl>
+          ${(() => {
+            let ph = [];
+            try { ph = typeof it.photos === 'string' ? JSON.parse(it.photos || '[]') : (it.photos || []); } catch (e) { /* 忽略 */ }
+            return ph.length ? `<div style="margin-top:12px"><div class="small muted" style="margin-bottom:6px">现场照片（${ph.length}）</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">${ph.map((p) => `<a href="/uploads/${encodeURIComponent(p.file)}" target="_blank"><img src="/uploads/${encodeURIComponent(p.file)}" alt="${UI.esc(p.name || '')}" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line,#e2e8f0)"></a>`).join('')}</div></div>` : '';
+          })()}
         </div>
       </div>
 
