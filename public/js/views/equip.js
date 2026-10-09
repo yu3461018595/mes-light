@@ -52,7 +52,8 @@ Views.equip = {
 
   /* ============ 页签：设备台账 + 点检 ============ */
   async renderEquip(panel) {
-    const [eqs, canEdit] = [await API.get('/equipments'), App.canEdit()];
+    const [eqsIn, canEdit] = [await API.get('/equipments').catch(() => []), App.canEdit()];
+    const eqs = Array.isArray(eqsIn) ? eqsIn : [];
     this.data = eqs;
     const today = new Date().toISOString().slice(0, 10);
     panel.innerHTML = `
@@ -155,13 +156,14 @@ Views.equip = {
 
   /* ============ 页签：模具管理 ============ */
   async renderMold(panel) {
-    const [data, wcs, orders] = await Promise.all([
-      API.get('/molds'),
+    const [dataIn, wcs, orders] = await Promise.all([
+      API.get('/molds').catch(() => null),
       API.get('/work_centers').catch(() => []),
       API.get('/orders?status=running,released').catch(() => []),
     ]);
-    this.moldData = data.rows || [];
-    this.wcs = wcs || [];
+    const data = dataIn || { rows: [], summary: {} };
+    this.moldData = Array.isArray(data.rows) ? data.rows : [];
+    this.wcs = Array.isArray(wcs) ? wcs : [];
     const s = data.summary || {};
     const canEdit = App.canEdit();
     const filters = [['', '全部'], ['idle', '在库'], ['producing', '在机'], ['repairing', '维修中'], ['scrapped', '已报废']];

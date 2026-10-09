@@ -74,16 +74,28 @@
         const res = await fetch(url, { cache: 'no-store' });
         if (res && res.ok) {
           const j = await res.json();
-          if (j && Array.isArray(j.users) && j.users.length) { DB = j; break; }
+          if (j && Array.isArray(j.users) && j.users.length) {
+            // seed.json 可能滞后于代码（新增表 equipments/molds/… 未写入），
+            // 必须补齐缺失键，否则 T('xxx') 为 undefined 会让相关页面整页报错
+            DB = j;
+            for (const k of Object.keys(EMPTY)) if (!Array.isArray(DB[k])) DB[k] = [];
+            break;
+          }
         }
       } catch (e) { /* 换下一个候选 */ }
     }
     if (!DB) DB = EMPTY;
+    for (const k of Object.keys(EMPTY)) if (!Array.isArray(DB[k])) DB[k] = [];
     anchorDates();
     save();
   };
   // 测试/服务端注入
-  Store.bootstrap = function (obj) { DB = JSON.parse(JSON.stringify(obj)); Store.currentUser = null; };
+  Store.bootstrap = function (obj) {
+    DB = JSON.parse(JSON.stringify(obj));
+    const base = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [], patrol_records: [], molds: [], mold_events: [] };
+    for (const k of Object.keys(base)) if (!Array.isArray(DB[k])) DB[k] = [];
+    Store.currentUser = null;
+  };
   Store.reset = function () { try { global.localStorage && global.localStorage.removeItem(LS_KEY); } catch (e) {} DB = null; };
 
   const actor = () => Store.currentUser || { id: 1, name: '系统' };

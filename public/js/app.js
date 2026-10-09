@@ -57,7 +57,8 @@ window.App = {
   async boot() {
     API.onUnauthorized(() => App.logout(true));
     const d = new Date();
-    document.getElementById('topDate').textContent =
+    const topDate = document.getElementById('topDate');
+    if (topDate) topDate.textContent =
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
     if (API.getToken()) {
@@ -66,7 +67,11 @@ window.App = {
         return App.enter();
       } catch (e) { API.setToken(''); }
     }
-    document.getElementById('login').classList.remove('hidden');
+    // DOM 防御：登录层节点缺失时直接返回，不抛错阻断整个应用（嵌入页/二次开发场景）
+    const loginBox = document.getElementById('login');
+    const loginForm = document.getElementById('loginForm');
+    if (!loginBox || !loginForm) return;
+    loginBox.classList.remove('hidden');
     document.getElementById('loginForm').onsubmit = async (ev) => {
       ev.preventDefault();
       const btn = ev.target.querySelector('button');

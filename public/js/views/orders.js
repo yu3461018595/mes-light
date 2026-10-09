@@ -207,6 +207,7 @@ Views.orders = {
 
   async loadList(el) {
     const s = this.state;
+    const canEdit = App.canEdit();
     const q = [];
     if (s.status) q.push('status=' + encodeURIComponent(s.status));
     if (s.keyword) q.push('keyword=' + encodeURIComponent(s.keyword));
@@ -230,6 +231,9 @@ Views.orders = {
     ], list, { emptyText: '没有符合条件的工单' });
     /* 多选 + 批量操作（对标黑湖批量开工/撤回/结案/取消/删除） */
     if (canEdit) {
+      // 表头插入勾选列（必须新增 th，不能覆盖原第一列，否则表头比数据少一列导致错位）
+      const headRow = box.querySelector('table thead tr');
+      if (headRow) headRow.insertAdjacentHTML('afterbegin', '<th style="width:36px"></th>');
       const cols = box.querySelectorAll('table thead th');
       if (cols.length) cols[0].innerHTML = `<input type="checkbox" id="ordAll" title="全选本页">`;
       box.querySelectorAll('table tbody tr').forEach((tr, i) => {
@@ -499,10 +503,13 @@ Views.orders = {
 
   /* 打印工单流转卡：在独立容器渲染后调 window.print（@media print 只输出该容器） */
   printCard(o) {
+    o = o || {};
     const prev = document.getElementById('printArea');
     if (prev) prev.remove();
     const area = document.createElement('div');
     area.id = 'printArea';
+    const STEPS = Array.isArray(o.steps) ? o.steps : [];
+    const REPORTS = Array.isArray(o.reports) ? o.reports : [];
     const STATUS = { created: '待下发', released: '已下发', running: '生产中', paused: '已暂停', done: '已完成', closed: '已关闭' };
     const INSPECT = { iqc: '首检 IQC', ipqc: '过程检 IPQC', fqc: '终检 FQC' };
     const teams = (o.teams || []).map((t) => (t && t.team) ? t.team : t).filter(Boolean);
@@ -519,10 +526,10 @@ Views.orders = {
         <tr><th>计划开工</th><td>${UI.esc(o.plan_start || '')}</td><th>计划完工</th><td>${UI.esc(o.plan_end || '')}</td><th>负责人</th><td>${UI.esc(o.owner_name || '未指定')}</td></tr>
         <tr><th>核算方式</th><td>${o.wage_type === 'time' ? `计时 ¥${UI.f2(o.hourly_rate || 0)}/小时` : '计件（按工序单价）'}</td><th>已完工</th><td>${UI.n2(o.qty_done || 0)} 件</td><th>不良合计</th><td>${UI.n2(o.qty_bad || 0)} 件</td></tr>
       </table>
-      <h3>工序清单（共 ${o.steps.length} 道）</h3>
+      <h3>工序清单（共 ${STEPS.length} 道）</h3>
       <table class="pc-tb">
         <thead><tr><th>序</th><th>工序</th><th>工作中心</th><th>检验</th><th>指派班组</th><th>计划数</th><th>合格</th><th>不良</th><th>工价</th><th>状态</th><th>签收</th></tr></thead>
-        <tbody>${o.steps.map((s) => `<tr>
+        <tbody>${STEPS.map((s) => `<tr>
           <td>${s.seq_no || s.seq}</td>
           <td><b>${UI.esc(s.process_name || '')}</b><br><span class="pc-muted">${UI.esc(s.process_code || '')}</span></td>
           <td>${UI.esc(s.wc_name || '—')}</td>
@@ -537,9 +544,9 @@ Views.orders = {
         </tr>`).join('')}</tbody>
       </table>
       <h3>报工记录（最近 12 条）</h3>
-      ${(o.reports || []).length ? `<table class="pc-tb">
+      ${(REPORTS).length ? `<table class="pc-tb">
         <thead><tr><th>时间</th><th>工序</th><th>报工人</th><th>合格</th><th>不良</th><th>工时</th><th>工资</th></tr></thead>
-        <tbody>${o.reports.slice(0, 12).map((r) => `<tr>
+        <tbody>${REPORTS.slice(0, 12).map((r) => `<tr>
           <td>${UI.esc(String(r.created_at).slice(5, 16))}</td><td>${UI.esc(r.process_name || '—')}</td>
           <td>${UI.esc(r.worker_name || '—')}</td><td>${UI.n2(r.qty_good)}</td><td>${UI.n2(r.qty_bad)}</td>
           <td>${UI.f1((r.work_min || 0) / 60)} h</td><td>${Number(r.amount) > 0 ? '¥' + UI.f2(r.amount) : '—'}</td>

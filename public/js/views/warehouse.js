@@ -545,7 +545,9 @@ Views.warehouse = {
   async renderTxSummary(el) {
     const d = new Date();
     const defStart = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
-    el.querySelector('#tb').innerHTML = `
+    const host = el.querySelector('#tb');
+    if (!host) return;   // DOM 防御：容器缺失时静默返回，避免整页报错
+    host.innerHTML = `
       <div class="row" style="gap:10px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
         <span class="small muted">期间</span>
         <input class="input" id="sumStart" type="date" value="${defStart}" style="width:150px">
@@ -957,6 +959,9 @@ Views.warehouse = {
     tb.querySelectorAll('[data-go]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.go);
     /* 销售订单批量转工单（对标黑湖批量开工/结案）：勾选后一次转多单 */
     if (canEdit) {
+      // 表头插入勾选列（必须新增 th，不能覆盖原第一列，否则表头与数据列错位）
+      const headRow = tb.querySelector('table thead tr');
+      if (headRow) headRow.insertAdjacentHTML('afterbegin', '<th style="width:36px"></th>');
       const cols = tb.querySelectorAll('table thead th');
       if (cols.length) cols[0].innerHTML = '<input type="checkbox" id="soAll" title="全选本页">';
       tb.querySelectorAll('table tbody tr').forEach((tr, i) => {
