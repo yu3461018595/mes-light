@@ -65,7 +65,7 @@
   Store.init = async function () {
     if (DB) return;
     if (load()) return;
-    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [], patrol_records: [] };
+    const EMPTY = { users: [], customers: [], processes: [], work_centers: [], products: [], routes: [], route_steps: [], bad_reasons: [], orders: [], order_steps: [], reports: [], report_bad_reasons: [], order_bad_reasons: [], logs: [], incoming_materials: [], finished_goods_in: [], material_issues: [], stock_shipments: [], product_boms: [], materials: [], warehouses: [], inventory: [], inventory_tx: [], inspections: [], inspection_defects: [], quality_issues: [], quality_checklists: [], issue_notifications: [], settings: [], stock_alerts: [], equipments: [], equipment_checks: [], sales_orders: [], patrol_records: [], molds: [], mold_events: [] };
     // 打包进原生 APK（Capacitor file:// / 相对根）时，绝对路径 /data/seed.json 会 404，
     // 因此依次尝试「绝对路径 → 相对路径 → 无扩展名同级」，任一成功即用。
     const CANDIDATES = ['/data/seed.json', './data/seed.json', 'data/seed.json'];
@@ -242,6 +242,12 @@
         inspect_status: needInspect ? 'waiting' : (step.inspect_status || null),
       });
       if (order.status === 'created' || order.status === 'released') update('orders', order.id, { status: 'running', start_time: order.start_time || nowISO() });
+      /* 模具联动：该机台「在机」模具自动累计生产数（合格+不良） */
+      const moldWc = b.work_center_id || step.work_center_id;
+      if (moldWc && Array.isArray(T('molds'))) {
+        const usingMold = T('molds').find((mm) => num(mm.work_center_id) === num(moldWc) && mm.status === 'producing');
+        if (usingMold) update('molds', usingMold.id, { total_shots: num(usingMold.total_shots) + good + bad });
+      }
       if (finished && !needInspect) {
         const nxt = T('order_steps').filter((s) => s.order_id === order.id && s.status === 'pending').sort((a, b) => a.seq - b.seq)[0];
         if (nxt) update('order_steps', nxt.id, { status: 'running' });
@@ -2523,6 +2529,115 @@
     save();
     return ok({ photos });
   });
+  /* 模具管理（静态镜像）：台账 + 上机/下机/送修/完修/保养/报废流转 + 保养/寿命预警 */
+  const moldOutSt = (r) => {
+    const maintainAt = r.maintain_every > 0 ? num(r.last_maintain_at) + r.maintain_every : null;
+    const lifePct = num(r.design_life) > 0 ? Math.min(100, Math.round(num(r.total_shots) * 100 / r.design_life)) : null;
+    return Object.assign({}, r, {
+      status_label: { idle: '在库', producing: '在机', repairing: '维修中', scrapped: '已报废' }[r.status] || r.status,
+      work_center_name: r.work_center_id ? (find('work_centers', r.work_center_id) || {}).name || null : null,
+      maintain_at: maintainAt,
+      need_maintain: r.maintain_every > 0 && num(r.total_shots) >= maintainAt,
+      life_pct: lifePct,
+      life_left: num(r.design_life) > 0 ? Math.max(0, num(r.design_life) - num(r.total_shots)) : null,
+      life_warn: num(r.design_life) > 0 && num(r.total_shots) >= num(r.design_life),
+      maintain_pct: maintainAt ? Math.min(100, Math.round((num(r.total_shots) - num(r.last_maintain_at)) * 100 / r.maintain_every)) : null,
+    });
+  };
+  const moldEventSt = (moldId, type, opt) => {
+    opt = opt || {};
+    insert('mold_events', { id: nextId('mold_events'), mold_id: moldId, type, work_center_id: opt.work_center_id || null, order_id: opt.order_id || null,
+      note: opt.note || null, cost: num(opt.cost) || 0, operator_id: (actor() || {}).id || null, operator_name: (actor() || {}).name || null, created_at: nowISO() });
+  };
+  R('GET', '/molds', () => {
+    const rows = T('molds').map(moldOutSt);
+    return ok({
+      summary: {
+        total: rows.filter((r) => r.status !== 'scrapped').length,
+        producing: rows.filter((r) => r.status === 'producing').length,
+        repairing: rows.filter((r) => r.status === 'repairing').length,
+        need_maintain: rows.filter((r) => r.status !== 'scrapped' && r.need_maintain).length,
+        life_warn: rows.filter((r) => r.status !== 'scrapped' && r.life_warn).length,
+      },
+      rows,
+    });
+  });
+  R('GET', '/molds/(\\d+)', (m) => {
+    const r = find('molds', m[1]);
+    if (!r) return { ok: false, msg: '模具不存在', status: 404 };
+    const out = moldOutSt(r);
+    out.events = T('mold_events').filter((e) => num(e.mold_id) === num(r.id))
+      .map((e) => Object.assign({}, e, { work_center_name: e.work_center_id ? (find('work_centers', e.work_center_id) || {}).name || null : null }))
+      .sort((a, b) => b.id - a.id).slice(0, 200);
+    return ok(out);
+  });
+  const moldPayloadSt = (b) => ({
+    code: String(b.code || '').trim(), name: String(b.name || '').trim(), category: b.category || null,
+    cavities: Math.max(1, num(b.cavities, 1)), product_name: b.product_name || null, location: b.location || null,
+    design_life: Math.max(0, num(b.design_life, 0)), maintain_every: Math.max(0, num(b.maintain_every, 0)), remark: b.remark || null,
+  });
+  R('POST', '/molds', (b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const p = moldPayloadSt(b);
+    if (!p.code || !p.name) return { ok: false, msg: '请填写模具编码与名称' };
+    if (T('molds').some((x) => x.code === p.code)) return { ok: false, msg: '模具编码已存在：' + p.code };
+    const id = insert('molds', Object.assign({ id: nextId('molds'), status: 'idle', total_shots: 0, last_maintain_at: 0, created_at: nowISO() }, p));
+    moldEventSt(id, 'create', { note: '建档：' + p.code + ' ' + p.name });
+    save();
+    return ok(moldOutSt(find('molds', id)));
+  });
+  R('PUT', '/molds/(\\d+)', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const r = find('molds', m[1]);
+    if (!r) return { ok: false, msg: '模具不存在', status: 404 };
+    const p = moldPayloadSt(b);
+    if (!p.code || !p.name) return { ok: false, msg: '请填写模具编码与名称' };
+    if (T('molds').some((x) => x.code === p.code && num(x.id) !== num(r.id))) return { ok: false, msg: '模具编码已存在：' + p.code };
+    update('molds', r.id, p);
+    moldEventSt(r.id, 'edit', { note: '修改档案' });
+    save();
+    return ok(moldOutSt(find('molds', r.id)));
+  });
+  R('DELETE', '/molds/(\\d+)', (m) => {
+    if ((Store.currentUser || {}).role !== 'admin') return fail('无权限', 403);
+    if (!find('molds', m[1])) return { ok: false, msg: '模具不存在', status: 404 };
+    remove('molds', m[1]);
+    DB.mold_events = T('mold_events').filter((e) => num(e.mold_id) !== num(m[1]));
+    save();
+    return ok(true);
+  });
+  for (const [act, roles] of [['issue', ['admin', 'technician']], ['return', ['admin', 'technician']], ['repair', ['admin', 'technician', 'worker', 'inspector']], ['repair_done', ['admin', 'technician']], ['maintain', ['admin', 'technician']], ['scrap', ['admin', 'technician']]]) {
+    R('POST', '/molds/(\\d+)/' + act, (m, b) => {
+      if (requireRole(...roles)) return fail('无权限', 403);
+      const r = find('molds', m[1]);
+      if (!r) return { ok: false, msg: '模具不存在', status: 404 };
+      if (r.status === 'scrapped' && act !== 'scrap') return { ok: false, msg: '模具已报废' };
+      const patch = {};
+      if (act === 'issue') {
+        if (r.status !== 'idle') return { ok: false, msg: '仅「在库」模具可上机（当前：' + r.status_label + '）' };
+        const wc = find('work_centers', b.work_center_id);
+        if (!wc) return { ok: false, msg: '请选择要上机的机台/工位' };
+        patch.status = 'producing'; patch.work_center_id = wc.id;
+      } else if (act === 'return') {
+        if (r.status !== 'producing') return { ok: false, msg: '仅「在机」模具可下机' };
+        patch.status = 'idle'; patch.work_center_id = null;
+      } else if (act === 'repair') {
+        if (r.status === 'repairing') return { ok: false, msg: '模具已在维修中' };
+        patch.status = 'repairing'; patch.work_center_id = null;
+      } else if (act === 'repair_done') {
+        if (r.status !== 'repairing') return { ok: false, msg: '仅「维修中」模具可完修' };
+        patch.status = 'idle';
+      } else if (act === 'maintain') {
+        patch.last_maintain_at = num(r.total_shots); patch.last_maintain_time = nowISO();
+      } else if (act === 'scrap') {
+        patch.status = 'scrapped'; patch.work_center_id = null;
+      }
+      update('molds', r.id, patch);
+      moldEventSt(r.id, act === 'repair_done' ? 'repair_done' : act, { work_center_id: act === 'issue' ? num(b.work_center_id) : r.work_center_id, note: b.note || null, cost: b.cost });
+      save();
+      return ok(moldOutSt(find('molds', r.id)));
+    });
+  }
   R('GET', '/stats/patrol', () => {
     if (requireRole('admin', 'technician', 'inspector')) return fail('无权限', 403);
     const t10 = today();

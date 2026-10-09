@@ -179,7 +179,7 @@
   const TITLES = {
     home: '工作台', messages: '消息', mine: '我的', order: '报工', inspect: '质检台',
     quality: '质量异常', issue: '异常详情', stocks: '库存预警', profile: '个人资料', password: '修改密码',
-    pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验', equip: '设备点检',
+    pick: '领料申请', stocktake: '扫码盘点', incoming: '来料检验', equip: '设备点检', mold: '模具管理',
     patrol: '现场巡检',
   };
   function nav(hash, replace) {
@@ -201,7 +201,7 @@
     $tabbar.hidden = !['home', 'messages', 'mine'].includes(name);
     $view.className = $tabbar.hidden ? '' : 'has-tab';
     $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
-    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip', 'patrol'].includes(name);
+    $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip', 'mold', 'patrol'].includes(name);
     $title.textContent = TITLES[name] || '智工';
     $view.innerHTML = '<div class="loading">加载中…</div>';
     if (token()) paintOfflineBanner();   // 每次切页刷新离线报工横幅
@@ -223,6 +223,7 @@
         case 'stocktake': return await renderStocktake();
       case 'incoming': return await renderIncoming();
         case 'equip': return await renderEquip(args[0]);
+        case 'mold': return await renderMold(args[0]);
         case 'profile': return await renderProfile();
         case 'password': return await renderPassword();
         default: return void okMask('页面不存在', '即将返回工作台', [{ text: '返回', onClick: () => nav('#/home', true) }]);
@@ -439,6 +440,7 @@
         <div class="card-b" style="display:flex;gap:8px;padding:10px 12px;flex-wrap:wrap">
           <button class="btn ghost sm" data-go="pick" style="flex:1">🧰 领料申请</button>
           <button class="btn ghost sm" data-go="equip" style="flex:1">⚙️ 设备点检</button>
+          <button class="btn ghost sm" data-go="mold" style="flex:1">🔧 模具</button>
           <button class="btn ghost sm" data-go="report_issue" style="flex:1">⚠️ 异常上报</button>
           ${isManager ? `<button class="btn ghost sm" data-go="stocktake" style="flex:1">📋 扫码盘点</button>` : ''}
         </div></div>`);
@@ -1904,6 +1906,102 @@
     $view.querySelector('#mPush').onchange = (e) => {
       localStorage.setItem(LS_PUSH, e.target.checked ? '1' : '0');
       toast(e.target.checked ? '已开启消息通知' : '已关闭消息提醒（角标仍显示）');
+    };
+  }
+
+  /* ---------------- 页面：模具管理（设备模块分支） ---------------- */
+  const MOLD_ST = { idle: ['在库', 'b-idle'], producing: ['在机', 'b-done'], repairing: ['维修中', 'b-released'], scrapped: ['已报废', 'b-closed'] };
+  async function renderMold(moldId) {
+    const me = await ensureMe();
+    const data = await get('/api/molds');
+    const s = data.summary || {};
+    const canManage = me.role === 'admin' || me.role === 'technician';
+    const rows = (data.rows || []).filter((r) => canManage || r.status !== 'scrapped');
+    if (moldId) {
+      const hit = (data.rows || []).find((x) => String(x.id) === String(moldId));
+      if (hit) return openMoldDetail(hit.id, canManage);
+    }
+    $view.innerHTML = `
+      <div class="kpis">
+        <div><div style="font-size:20px;font-weight:800">${s.total || 0}</div><div class="tiny">模具总数</div></div>
+        <div><div style="font-size:20px;font-weight:800;color:#1d4ed8">${s.producing || 0}</div><div class="tiny">在机生产</div></div>
+        <div><div style="font-size:20px;font-weight:800;color:#d9822f">${(s.repairing || 0) + (s.need_maintain || 0)}</div><div class="tiny">维修/待保养</div></div>
+      </div>
+      ${(s.need_maintain || s.life_warn) ? `<div class="card" style="border-left:3px solid #d93b3b"><div class="card-b tiny" style="color:#b34242">⚠️ ${s.need_maintain || 0} 套模具达到保养周期、${s.life_warn || 0} 套达到设计寿命，请安排处理。</div></div>` : ''}
+      <div id="moldList"></div>
+      <div style="height:10px"></div>`;
+    const paint = () => {
+      const box = $view.querySelector('#moldList');
+      box.innerHTML = rows.length ? rows.map((r) => {
+        const st = MOLD_ST[r.status] || [r.status_label, 'b-idle'];
+        return `<div class="card item" data-mold="${r.id}" style="margin-bottom:10px">
+          <div class="avatar" style="background:#eef2fb">🔧</div>
+          <div class="body">
+            <div class="t1">${esc(r.code)} ${esc(r.name)} <span class="badge ${st[1]}">${st[0]}</span>${r.need_maintain ? '<span class="badge b-paused">需保养</span>' : ''}${r.life_warn ? '<span class="badge b-closed">寿命到</span>' : ''}</div>
+            <div class="t2">${esc(r.category || '未分类')}${r.cavities ? ' · ' + r.cavities + ' 腔' : ''} · 累计 ${r.total_shots} 件${r.status === 'producing' ? ' · ' + esc(r.work_center_name || '机台') : (r.status === 'idle' && r.location ? ' · ' + esc(r.location) : '')}</div>
+            ${r.design_life > 0 ? `<div class="bar" style="margin-top:6px"><i style="width:${r.life_pct}%;background:${r.life_warn ? '#d93b3b' : '#0f9d58'}"></i></div><div class="tiny" style="margin-top:2px">寿命 ${r.life_pct}%（余 ${r.life_left} 件）</div>` : ''}
+          </div>
+          <div class="chev">›</div>
+        </div>`;
+      }).join('') : '<div class="empty" style="padding:30px 16px"><p>暂无模具档案</p></div>';
+      box.querySelectorAll('[data-mold]').forEach((el) => el.onclick = () => openMoldDetail(Number(el.dataset.mold), canManage));
+    };
+    paint();
+  }
+
+  /* 模具详情 + 操作（上机/下机/送修/完修/保养/报废）+ 履历 */
+  async function openMoldDetail(id, canManage) {
+    let r;
+    try { r = await get('/api/molds/' + id); } catch (e) { return toast(e.message); }
+    const evName = { create: '建档', issue: '上机', return: '下机', repair: '送修', repair_done: '完修', maintain: '保养', scrap: '报废', edit: '编辑' };
+    const ops = [];
+    if (canManage && r.status === 'idle') ops.push(['issue', '📤 上机']);
+    if (canManage && r.status === 'producing') ops.push(['return', '📥 下机']);
+    if (r.status !== 'scrapped' && r.status !== 'repairing') ops.push(['repair', '🔧 报修/送修']);
+    if (canManage && r.status === 'repairing') ops.push(['repair_done', '✅ 完修']);
+    if (canManage && r.status !== 'scrapped') ops.push(['maintain', '🛠 保养']);
+    const mask = sheet(`<h3>${esc(r.code)} ${esc(r.name)}</h3>
+      <div class="sub">${esc(r.status_label)} · ${esc(r.category || '未分类')}${r.cavities ? ' · ' + r.cavities + ' 腔' : ''}${r.product_name ? ' · 适用 ' + esc(r.product_name) : ''}</div>
+      <div class="st-sub" style="margin:8px 0 12px">所在：${esc(r.work_center_name || (r.status === 'idle' ? (r.location || '在库') : '—'))} · 累计生产 <b>${r.total_shots}</b> 件${r.design_life > 0 ? `（寿命 ${r.life_pct}%，余 ${r.life_left}）` : ''}${r.maintain_every > 0 ? `<br>保养：${r.total_shots - r.last_maintain_at}/${r.maintain_every} 件${r.last_maintain_time ? ' · 上次 ' + esc(String(r.last_maintain_time).slice(0, 10)) : ''}` : '<br>保养：不按周期'}</div>
+      <div class="btn-row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        ${ops.map(([t, l]) => `<button class="btn ghost sm" data-mop="${t}" style="flex:1">${l}</button>`).join('')}
+      </div>
+      <div class="tiny" style="font-weight:700;margin-bottom:6px">最近履历</div>
+      ${(r.events || []).length ? r.events.slice(0, 12).map((e) => `<div class="st-sub" style="padding:6px 0;border-bottom:1px dashed #eee">
+        <b>${evName[e.type] || esc(e.type)}</b> · ${esc(e.work_center_name || '')} ${esc(e.note || '')}${e.cost > 0 ? ' · ¥' + Number(e.cost).toFixed(2) : ''}
+        <span style="float:right">${esc(String(e.created_at).slice(5, 16))} ${esc(e.operator_name || '')}</span></div>`).join('') : '<div class="tiny muted">暂无记录</div>'}
+      <button class="btn ghost sm" id="mdClose" style="margin-top:12px;width:100%">关闭</button>`);
+    mask.querySelector('#mdClose').onclick = () => mask.remove();
+    mask.querySelectorAll('[data-mop]').forEach((b) => b.onclick = () => { mask.remove(); moldAction(r.id, b.dataset.mop); });
+  }
+
+  /* 模具动作（note/cost 简易输入） */
+  async function moldAction(id, type) {
+    const labels = { issue: '上机', return: '下机归还', repair: '报修/送修', repair_done: '完修', maintain: '保养', scrap: '报废' };
+    let wcOptions = '';
+    if (type === 'issue') {
+      const wcs = await get('/api/work_centers').catch(() => []);
+      wcOptions = `<div class="field" style="margin-bottom:10px"><span>选择机台 / 工位</span>
+        <select id="maWc" class="ipt">${(wcs || []).map((w) => `<option value="${w.id}">${esc((w.code || '') + ' ' + (w.name || ''))}</option>`).join('')}</select></div>`;
+      if (!(wcs || []).length) return toast('请先在 PC 端维护机台/工位');
+    }
+    const mask = sheet(`<h3>模具${labels[type] || type}</h3>
+      ${wcOptions}
+      <div class="field" style="margin-bottom:10px"><span>说明${type === 'repair' || type === 'scrap' ? '' : '（选填）'}</span>
+        <input id="maNote" class="ipt" placeholder="${type === 'repair' ? '如：顶针磨损、滑块卡滞' : type === 'maintain' ? '如：清洁、防锈、顶针润滑' : type === 'scrap' ? '报废原因' : '选填'}"></div>
+      ${['repair', 'repair_done', 'maintain'].includes(type) ? `<div class="field" style="margin-bottom:10px"><span>费用（元，选填）</span><input id="maCost" class="ipt" type="number" inputmode="decimal" min="0" value="0"></div>` : ''}
+      <button class="btn" id="maGo" style="width:100%">确认${labels[type] || type}</button>`);
+    mask.querySelector('#maGo').onclick = async () => {
+      const body = { note: (mask.querySelector('#maNote').value || '').trim() };
+      if (type === 'issue') body.work_center_id = num(mask.querySelector('#maWc').value);
+      const costEl = mask.querySelector('#maCost');
+      if (costEl) body.cost = num(costEl.value) || 0;
+      try {
+        await post('/api/molds/' + id + '/' + type, body);
+        mask.remove();
+        toast(labels[type] + '已记录');
+        route();
+      } catch (e) { toast(e.message); }
     };
   }
 

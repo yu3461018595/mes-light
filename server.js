@@ -962,6 +962,12 @@ function doReport(b, actor) {
       if (order.status === 'created' || order.status === 'released') {
         run("UPDATE orders SET status='running', start_time=IFNULL(start_time,?) WHERE id=?", [now(), order_id]);
       }
+      // 模具联动：该机台「在机」模具自动累计生产数（合格+不良，件）→ 保养周期/寿命预警口径
+      const moldWc = it.work_center_id || step.work_center_id;
+      if (moldWc) {
+        const usingMold = get("SELECT id FROM molds WHERE work_center_id=? AND status='producing' LIMIT 1", [moldWc]);
+        if (usingMold) run('UPDATE molds SET total_shots=total_shots+? WHERE id=?', [good + bad, usingMold.id]);
+      }
       if (finished && !needInspect) {
         run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [order_id]);
       }
@@ -1621,6 +1627,193 @@ route('POST', '/api/equipments/(\\d+)/check', ['admin', 'technician', 'worker', 
 route('GET', '/api/equipments/(\\d+)/checks', [], (req, res, m) => {
   ok(res, all('SELECT c.*, q.code issue_code, q.level issue_level FROM equipment_checks c LEFT JOIN quality_issues q ON q.id=c.issue_id WHERE c.equipment_id=? ORDER BY c.id DESC LIMIT 100', [m[1]]));
 });
+
+/* ------------------------------ 模具管理（设备模块分支） ------------------------------
+ * 参考市面模具管理工具（Moldbase/EasyMold/MES 模具模块）核心能力轻量化：
+ * 台账（编码/类型/腔数/适用产品/库位）· 上机/下机流转 · 维修 · 按生产件数周期保养 ·
+ * 设计寿命预警 · 报工经机台自动累计生产数 · 全程履历。 */
+const MOLD_STATUS = { idle: '在库', producing: '在机', repairing: '维修中', scrapped: '已报废' };
+const MOLD_EVENT = { create: '建档', issue: '上机', return: '下机', repair: '送修', repair_done: '完修', maintain: '保养', scrap: '报废', edit: '编辑' };
+function moldOut(r) {
+  const maintainAt = r.maintain_every > 0 ? r.last_maintain_at + r.maintain_every : null;
+  const lifePct = r.design_life > 0 ? Math.min(100, Math.round(r.total_shots * 100 / r.design_life)) : null;
+  const lifeLeft = r.design_life > 0 ? Math.max(0, r.design_life - r.total_shots) : null;
+  return Object.assign({}, r, {
+    status_label: MOLD_STATUS[r.status] || r.status,
+    work_center_name: r.work_center_id ? (get('SELECT name FROM work_centers WHERE id=?', [r.work_center_id]) || {}).name || null : null,
+    maintain_at: maintainAt,
+    need_maintain: !!needMaintain(r),
+    life_pct: lifePct,
+    life_left: lifeLeft,
+    life_warn: r.design_life > 0 && r.total_shots >= r.design_life,
+    maintain_pct: maintainAt ? Math.min(100, Math.round((r.total_shots - r.last_maintain_at) * 100 / r.maintain_every)) : null,
+  });
+}
+function needMaintain(r) { return r.maintain_every > 0 && r.total_shots >= r.last_maintain_at + r.maintain_every; }
+function moldEvent(moldId, type, u, opt) {
+  opt = opt || {};
+  insert('INSERT INTO mold_events(mold_id,type,work_center_id,order_id,note,cost,operator_id,operator_name,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+    [moldId, type, opt.work_center_id || null, opt.order_id || null, opt.note || null, num(opt.cost) || 0, u.id, u.name, now()]);
+}
+
+// 模具列表（含保养/寿命预警标记与汇总）
+route('GET', '/api/molds', [], (req, res) => {
+  const rows = all('SELECT * FROM molds ORDER BY id DESC').map(moldOut);
+  ok(res, {
+    summary: {
+      total: rows.filter((r) => r.status !== 'scrapped').length,
+      producing: rows.filter((r) => r.status === 'producing').length,
+      repairing: rows.filter((r) => r.status === 'repairing').length,
+      need_maintain: rows.filter((r) => r.status !== 'scrapped' && r.need_maintain).length,
+      life_warn: rows.filter((r) => r.status !== 'scrapped' && r.life_warn).length,
+    },
+    rows,
+  });
+});
+
+// 模具详情（含履历）
+route('GET', '/api/molds/(\\d+)', [], (req, res, m) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  ok(res, Object.assign(moldOut(r), {
+    events: all(`SELECT e.*, w.name work_center_name FROM mold_events e LEFT JOIN work_centers w ON w.id=e.work_center_id WHERE e.mold_id=? ORDER BY e.id DESC LIMIT 200`, [m[1]]),
+  }));
+});
+
+// 新建/编辑模具（admin/technician）
+function moldPayload(b) {
+  return {
+    code: String(b.code || '').trim(),
+    name: String(b.name || '').trim(),
+    category: b.category || null,
+    cavities: Math.max(1, num(b.cavities, 1)),
+    product_name: b.product_name || null,
+    location: b.location || null,
+    design_life: Math.max(0, num(b.design_life, 0)),
+    maintain_every: Math.max(0, num(b.maintain_every, 0)),
+    remark: b.remark || null,
+  };
+}
+route('POST', '/api/molds', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const p = moldPayload(b);
+  if (!p.code || !p.name) return fail(res, '请填写模具编码与名称');
+  if (get('SELECT id FROM molds WHERE code=?', [p.code])) return fail(res, '模具编码已存在：' + p.code);
+  const id = tx(() => {
+    const mid = insert('INSERT INTO molds(code,name,category,cavities,product_name,location,status,design_life,total_shots,maintain_every,last_maintain_at,remark,created_at) VALUES(?,?,?,?,?,?,\'idle\',?,?,?,0,?,?)',
+      [p.code, p.name, p.category, p.cavities, p.product_name, p.location, p.design_life, 0, p.maintain_every, p.remark, now()]);
+    moldEvent(mid, 'create', u, { note: '建档：' + p.code + ' ' + p.name });
+    return mid;
+  });
+  writeLog(u, '新建模具', p.code + ' ' + p.name);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [id])));
+});
+route('PUT', '/api/molds/(\\d+)', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  const p = moldPayload(b);
+  if (!p.code || !p.name) return fail(res, '请填写模具编码与名称');
+  if (get('SELECT id FROM molds WHERE code=? AND id<>?', [p.code, r.id])) return fail(res, '模具编码已存在：' + p.code);
+  tx(() => {
+    run(`UPDATE molds SET code=?,name=?,category=?,cavities=?,product_name=?,location=?,design_life=?,maintain_every=?,remark=? WHERE id=?`,
+      [p.code, p.name, p.category, p.cavities, p.product_name, p.location, p.design_life, p.maintain_every, p.remark, r.id]);
+    moldEvent(r.id, 'edit', u, { note: '修改档案' });
+  });
+  writeLog(u, '编辑模具', p.code);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
+// 删除（仅 admin；已有履历也一并删，通常建议走「报废」留痕）
+route('DELETE', '/api/molds/(\\d+)', ['admin'], (req, res, m, _b, u) => {
+  const r = get('SELECT code,name FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  run('DELETE FROM molds WHERE id=?', [m[1]]);
+  writeLog(u, '删除模具', r.code + ' ' + r.name);
+  ok(res, true);
+});
+
+// 上机（在库 → 在机，绑机台，可带工单）
+route('POST', '/api/molds/(\\d+)/issue', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status === 'scrapped') return fail(res, '模具已报废，不可上机');
+  if (r.status === 'producing') return fail(res, '模具当前在机（' + MOLD_STATUS[r.status] + '），请先下机');
+  if (r.status === 'repairing') return fail(res, '模具维修中，完修后方可上机');
+  const wc = get('SELECT id,name FROM work_centers WHERE id=?', [num(b.work_center_id)]);
+  if (!wc) return fail(res, '请选择要上机的机台/工位');
+  const orderId = num(b.order_id) || null;
+  if (orderId && !get('SELECT id FROM orders WHERE id=?', [orderId])) return fail(res, '关联工单不存在');
+  tx(() => {
+    run("UPDATE molds SET status='producing', work_center_id=? WHERE id=?", [wc.id, r.id]);
+    moldEvent(r.id, 'issue', u, { work_center_id: wc.id, order_id: orderId, note: b.note || ('上机：' + wc.name) });
+  });
+  writeLog(u, '模具上机', r.code + ' → ' + wc.name);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
+// 下机归还（在机 → 在库）
+route('POST', '/api/molds/(\\d+)/return', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status !== 'producing') return fail(res, '仅「在机」模具可下机');
+  tx(() => {
+    run("UPDATE molds SET status='idle', work_center_id=NULL WHERE id=?", [r.id]);
+    moldEvent(r.id, 'return', u, { work_center_id: r.work_center_id, note: b.note || '下机归还' });
+  });
+  writeLog(u, '模具下机', r.code);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
+// 送修（非报废 → 维修中；现场工人也可报修）与完修（维修中 → 在库）
+route('POST', '/api/molds/(\\d+)/repair', ['admin', 'technician', 'worker', 'inspector'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status === 'scrapped') return fail(res, '模具已报废');
+  if (r.status === 'repairing') return fail(res, '模具已在维修中');
+  tx(() => {
+    run("UPDATE molds SET status='repairing', work_center_id=NULL WHERE id=?", [r.id]);
+    moldEvent(r.id, 'repair', u, { work_center_id: r.work_center_id, note: b.note || '送修', cost: b.cost });
+  });
+  writeLog(u, '模具送修', r.code + (b.note ? '：' + b.note : ''));
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+route('POST', '/api/molds/(\\d+)/repair_done', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status !== 'repairing') return fail(res, '仅「维修中」模具可完修');
+  tx(() => {
+    run("UPDATE molds SET status='idle' WHERE id=?", [r.id]);
+    moldEvent(r.id, 'repair_done', u, { note: b.note || '维修完成', cost: b.cost });
+  });
+  writeLog(u, '模具完修', r.code);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
+// 保养（非报废均可，重置保养周期基准；支持在机保养）
+route('POST', '/api/molds/(\\d+)/maintain', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status === 'scrapped') return fail(res, '模具已报废');
+  tx(() => {
+    run('UPDATE molds SET last_maintain_at=total_shots, last_maintain_time=? WHERE id=?', [now(), r.id]);
+    moldEvent(r.id, 'maintain', u, { work_center_id: r.work_center_id, note: b.note || '例行保养', cost: b.cost });
+  });
+  writeLog(u, '模具保养', r.code);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
+// 报废（终态，清机台）
+route('POST', '/api/molds/(\\d+)/scrap', ['admin', 'technician'], (req, res, m, b, u) => {
+  const r = get('SELECT * FROM molds WHERE id=?', [m[1]]);
+  if (!r) return fail(res, '模具不存在', 404);
+  if (r.status === 'scrapped') return fail(res, '模具已报废');
+  tx(() => {
+    run("UPDATE molds SET status='scrapped', work_center_id=NULL WHERE id=?", [r.id]);
+    moldEvent(r.id, 'scrap', u, { note: b.note || '报废' });
+  });
+  writeLog(u, '模具报废', r.code);
+  ok(res, moldOut(get('SELECT * FROM molds WHERE id=?', [r.id])));
+});
+
 
 // ------------------------------ 工序 SOP / 图纸附件（P1） ------------------------------
 const SOP_EXT = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.txt'];
