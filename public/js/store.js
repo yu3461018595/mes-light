@@ -474,6 +474,47 @@
     return ok({ updated: n });
   });
 
+  /* 工单批量操作（静态镜像）：逐单校验，返回成功清单与失败明细 */
+  R('POST', '/orders/batch', (_p, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(num).filter((x) => x > 0).slice(0, 200);
+    const action = String(b.action || '');
+    const LABEL = { release: '批量下发', pause: '批量暂停', resume: '批量恢复', done: '批量完工', close: '批量关闭', cancel: '批量取消', del: '批量删除' };
+    if (!ids.length) return fail('请先勾选要操作的工单');
+    if (!LABEL[action]) return fail('不支持的批量操作：' + action);
+    const to = { release: 'released', pause: 'paused', resume: 'running', done: 'done', close: 'closed', cancel: 'cancelled' }[action];
+    const okList = [], failed = [];
+    ids.forEach((id) => {
+      const o = find('orders', id);
+      if (!o) { failed.push({ id, code: '#' + id, msg: '工单不存在' }); return; }
+      if (action === 'del') {
+        if (o.status === 'closed') { failed.push({ id, code: o.code, msg: '已关闭工单不可删除' }); return; }
+        if (T('reports').some((r) => num(r.order_id) === num(id))) { failed.push({ id, code: o.code, msg: '已有报工记录，不可删除' }); return; }
+        remove('orders', id);
+        DB.order_steps = T('order_steps').filter((s) => num(s.order_id) !== num(id));
+        writeLog(actor(), '批量删除工单', o.code);
+        okList.push(o.code);
+        return;
+      }
+      if (action === 'release' && !T('order_steps').some((s) => num(s.order_id) === num(id))) { failed.push({ id, code: o.code, msg: '无工序，无法下发' }); return; }
+      if (action === 'resume' && o.status !== 'paused') { failed.push({ id, code: o.code, msg: '仅暂停中的工单可恢复' }); return; }
+      if (action === 'pause' && ['closed', 'cancelled', 'done'].includes(o.status)) { failed.push({ id, code: o.code, msg: '已完成/关闭工单不可暂停' }); return; }
+      const patch = { status: to };
+      if (to === 'running') patch.start_time = o.start_time || nowISO();
+      if (to === 'done') patch.finish_time = nowISO();
+      if (to === 'closed') { patch.close_reason = b.close_reason || '批量关闭'; patch.finish_time = o.finish_time || nowISO(); }
+      update('orders', id, patch);
+      if (to === 'running') {
+        const pend = T('order_steps').filter((s) => num(s.order_id) === num(id) && s.status === 'pending').sort((a, x) => a.seq - x.seq)[0];
+        if (pend) update('order_steps', pend.id, { status: 'running' });
+      }
+      writeLog(actor(), LABEL[action], o.code);
+      okList.push(o.code);
+    });
+    save();
+    return ok({ action, ok_count: okList.length, ok_list: okList, failed });
+  });
+
   /* 工单列表 */
   R('GET', '/orders', (_p, _b, q) => {
     let list = T('orders').map(orderRow);
@@ -1659,7 +1700,10 @@
     if (!eq) return fail('设备不存在', 404);
     const result = b.result === 'abnormal' ? 'abnormal' : 'ok';
     const act = actor();
-    insert('equipment_checks', { id: nextId('equipment_checks'), equipment_id: eq.id, result, note: b.note || null, issue_id: null, checked_by: act.id, checked_name: act.name, created_at: nowISO() });
+    insert('equipment_checks', { id: nextId('equipment_checks'), equipment_id: eq.id, result, note: b.note || null, issue_id: null, checked_by: act.id, checked_name: act.name,
+      // 点检拍照（静态版无文件系统，仅记录文件名占位）
+      photos: JSON.stringify((Array.isArray(b.photos) ? b.photos : []).slice(0, 3).map((p) => ({ file: 'static_' + Date.now() + '_' + String(p.name || 'photo.jpg').replace(/[^\w.\-]/g, '_'), name: String(p.name || 'photo.jpg'), at: nowISO() }))),
+      created_at: nowISO() });
     update('equipments', eq.id, { last_check_at: nowISO() });
     if (result === 'abnormal' && b.fault) update('equipments', eq.id, { status: 'fault' });
     let issue = null;
@@ -2463,6 +2507,7 @@
       remind_minutes: num(getSetting('remind_minutes', 30), 30),
       critical_ratio: num(getSetting('critical_ratio', 20), 20),
       minor_ratio: num(getSetting('minor_ratio', 5), 5),
+      inspect_timeout_minutes: num(getSetting('inspect_timeout_minutes', 120), 120),
     });
   });
   R('POST', '/quality/settings', (_p, b) => {
@@ -2471,6 +2516,7 @@
     if (b.escalate_minutes !== undefined) setSetting('escalate_minutes', num(b.escalate_minutes, 240));
     if (b.remind_minutes !== undefined) setSetting('remind_minutes', num(b.remind_minutes, 30));
     if (b.critical_ratio !== undefined) setSetting('critical_ratio', Math.min(100, Math.max(1, num(b.critical_ratio, 20))));
+    if (b.inspect_timeout_minutes !== undefined) setSetting('inspect_timeout_minutes', Math.min(10080, Math.max(0, num(b.inspect_timeout_minutes, 120))));
     if (b.minor_ratio !== undefined) setSetting('minor_ratio', Math.min(50, Math.max(0, num(b.minor_ratio, 5))));
     writeLog(actor(), '修改质量设置', JSON.stringify(b));
     save();

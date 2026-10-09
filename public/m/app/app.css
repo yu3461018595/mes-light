@@ -267,3 +267,24 @@ select.ipt { background-image: linear-gradient(45deg, transparent 50%, #98a3b0 5
 .quick-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
 .quick-row .qk{flex:1 1 auto;min-width:72px;padding:7px 6px;font-size:12px;line-height:1.2;border:1px solid #d7dde5;background:#f6f8fa;border-radius:8px;color:#33415c}
 .quick-row .qk:active{background:#e8efff;border-color:#1d4ed8;color:#1d4ed8}
+
+/* ---------------- 大字模式（适老化：放大字号与点击区） ---------------- */
+body.big-font{font-size:17px}
+body.big-font .t1{font-size:17px}
+body.big-font .t2,body.big-font .t3,body.big-font .tiny{font-size:14px}
+body.big-font .ipt,body.big-font .btn{font-size:17px}
+body.big-font .btn{padding:13px 14px;min-height:50px}
+body.big-font .btn.sm{padding:11px 13px;min-height:46px}
+body.big-font .btn.ok,body.big-font .btn.warn,body.big-font .btn.danger{min-height:54px}
+body.big-font .stepper input{font-size:20px;height:52px}
+body.big-font .stepper button{width:52px;height:52px;font-size:22px}
+body.big-font .qbtn,body.big-font .seg button{font-size:15px;min-height:44px}
+body.big-font .item{padding:14px 12px}
+body.big-font .field>span{font-size:15px}
+body.big-font .switch{transform:scale(1.15)}
+.switch{position:relative;display:inline-block;width:50px;height:28px;flex:0 0 auto}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;background:#cfd6e0;border-radius:28px;transition:.2s}
+.switch span::before{content:"";position:absolute;left:3px;top:3px;width:22px;height:22px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.switch input:checked + span{background:#1d4ed8}
+.switch input:checked + span::before{transform:translateX(22px)}

@@ -238,8 +238,38 @@ async function api(method, url, body, token) {
     chk('清零后回退工序档案价', Math.abs(after0.std_price - after0.proc_std_price) < 0.001, JSON.stringify(after0));
     const spBad = await H('PUT', '/api/orders/' + odId + '/step_prices', { prices: [] });
     chk('空价格列表被拒', spBad.ok === false, JSON.stringify(spBad));
-    const spW = await api('PUT', '/api/orders/' + odId + '/step_prices', { prices: [{ order_step_id: odSteps2[0].id, std_price: 9 }] }, wTok);
+    const spW = await api('PUT', '/api/orders/' + odId + '/step_prices', { prices: [{ order_step_id: spSteps[0].id, std_price: 9 }] }, wTok);
     chk('操作工改工价被拒 403', spW.ok === false, JSON.stringify(spW));
+
+    // ---------- 4.10 深度体验优化：工单批量操作 + 点检拍照 + 待检超时阈值 ----------
+    const meta2 = (await H('GET', '/api/meta')).data;
+    const rt2 = meta2.routes[0];
+    const b1 = (await H('POST', '/api/orders', { product_id: rt2.product_id, route_id: rt2.id, qty_plan: 10 })).data;
+    const b2 = (await H('POST', '/api/orders', { product_id: rt2.product_id, route_id: rt2.id, qty_plan: 10 })).data;
+    const bat1 = await H('POST', '/api/orders/batch', { ids: [b1.id, b2.id], action: 'release' });
+    chk('批量下发 2 单成功', bat1.ok && bat1.data.ok_count === 2 && bat1.data.failed.length === 0, JSON.stringify(bat1.data));
+    const bat2 = await H('POST', '/api/orders/batch', { ids: [b1.id], action: 'resume' });
+    chk('非暂停工单批量恢复被拒并回传失败明细', bat2.ok && bat2.data.ok_count === 0 && bat2.data.failed[0] && /暂停/.test(bat2.data.failed[0].msg), JSON.stringify(bat2.data));
+    const bat3 = await H('POST', '/api/orders/batch', { ids: [b1.id], action: 'del' });
+    chk('无报工工单批量删除成功', bat3.ok && bat3.data.ok_count === 1, JSON.stringify(bat3.data));
+    const bat4 = await H('POST', '/api/orders/batch', { ids: [odId], action: 'del' });
+    chk('已有报工工单批量删除被拒', bat4.ok && bat4.data.ok_count === 0 && /报工/.test(bat4.data.failed[0].msg), JSON.stringify(bat4.data));
+    const batW = await api('POST', '/api/orders/batch', { ids: [b2.id], action: 'release' }, wTok);
+    chk('操作工批量操作被拒 403', batW.ok === false, JSON.stringify(batW));
+    const batBad = await H('POST', '/api/orders/batch', { ids: [b2.id], action: 'xxx' });
+    chk('不支持的批量动作被拒', batBad.ok === false, JSON.stringify(batBad));
+    const PNG2 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const eqNew = await H('POST', '/api/equipments', { code: 'EQ-PH1', name: '拍照点检测试设备' });
+    const eqCheck = await H('POST', '/api/equipments/' + eqNew.data.id + '/check', { result: 'abnormal', note: '异响', photos: [{ name: 'chk.png', data: PNG2 }] });
+    chk('点检可带照片提交', eqCheck.ok, JSON.stringify(eqCheck));
+    const eqChecks = await H('GET', '/api/equipments/' + eqNew.data.id + '/checks');
+    const eqPh = (eqChecks.data[0] || {}).photos;
+    chk('点检记录已存照片', (() => { try { return JSON.parse(eqPh || '[]').length === 1; } catch (e) { return false; } })(), String(eqPh));
+    await H('DELETE', '/api/equipments/' + eqNew.data.id).catch(() => {});
+    await H('POST', '/api/quality/settings', { inspect_timeout_minutes: 90 });
+    const qget = await H('GET', '/api/quality/settings');
+    chk('待检超时阈值可配置（90 分钟）', qget.ok && qget.data.inspect_timeout_minutes === 90, JSON.stringify(qget.data));
+    await H('POST', '/api/quality/settings', { inspect_timeout_minutes: 120 });
 
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});

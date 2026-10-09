@@ -185,6 +185,10 @@
   function nav(hash, replace) {
     if (replace) location.replace(hash); else location.hash = hash;
   }
+  /* 大字模式全局同步（每次导航生效，避免刷新后失效） */
+  function syncBigFont() {
+    document.body.classList.toggle('big-font', localStorage.getItem('mes_big_font') === '1');
+  }
   function parseHash() {
     const h = (location.hash || '#/home').replace(/^#\/?/, '');
     const seg = h.split('/').filter(Boolean);
@@ -200,6 +204,7 @@
 
     $tabbar.hidden = !['home', 'messages', 'mine'].includes(name);
     $view.className = $tabbar.hidden ? '' : 'has-tab';
+    syncBigFont();
     $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
     $back.hidden = !['order', 'inspect', 'quality', 'issue', 'stocks', 'profile', 'password', 'pick', 'stocktake', 'equip', 'mold', 'patrol'].includes(name);
     $title.textContent = TITLES[name] || '智工';
@@ -2114,6 +2119,12 @@
         <select class="ipt" id="eqFault"><option value="">不更改</option><option value="1">转为「故障」</option><option value="running">转为「运转」</option></select></div>
       <div class="field"><span>点检说明 / 异常描述</span>
         <input class="ipt" id="eqNote" placeholder="如：主轴异响、漏油、导轨磨损"></div>
+      <div class="field"><span>现场拍照（选填，最多 3 张）</span>
+        <input id="eqCam" type="file" accept="image/*" capture="environment" multiple hidden>
+        <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+          <button class="btn ghost sm" id="eqPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+          <div id="eqPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        </div></div>
       <div id="eqAb" style="display:none">
         <label class="remember"><input type="checkbox" id="eqReport" checked> 同时生成质量异常单（统一异常口径）</label>
         <div class="field"><span>异常等级（申报重大将通知质检员及时定级）</span>
@@ -2125,6 +2136,24 @@
     const ab = $view.querySelector('#eqAb');
     $view.querySelector('#eqResult').onchange = (e) => { ab.style.display = e.target.value === 'abnormal' ? '' : 'none'; };
     $view.querySelector('#eqBack2').onclick = () => nav('#/equip', true);
+    /* 点检拍照（压缩后随点检上传，防「点检走过场」） */
+    const eqPhotos = [];
+    const paintEqPhotos = () => {
+      const box = $view.querySelector('#eqPhotos');
+      if (!box) return;
+      box.innerHTML = eqPhotos.map((p, i) => `<span style="position:relative;display:inline-block"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button type="button" data-eqpi="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;line-height:1">✕</button></span>`).join('');
+      box.querySelectorAll('[data-eqpi]').forEach((b) => b.onclick = () => { eqPhotos.splice(Number(b.dataset.eqpi), 1); paintEqPhotos(); });
+    };
+    $view.querySelector('#eqPhoto').onclick = () => $view.querySelector('#eqCam').click();
+    $view.querySelector('#eqCam').onchange = async (e) => {
+      for (const f of Array.from(e.target.files || [])) {
+        if (eqPhotos.length >= 3) { toast('最多 3 张照片'); break; }
+        try { eqPhotos.push({ name: (f.name || 'photo.jpg').replace(/\.[^.]+$/, '') + '.jpg', thumb: await compressImage(f) }); }
+        catch (err) { toast('照片处理失败'); }
+      }
+      e.target.value = '';
+      paintEqPhotos();
+    };
     $view.querySelector('#eqGo').onclick = async () => {
       const result = $view.querySelector('#eqResult').value;
       const note = $view.querySelector('#eqNote').value.trim();
@@ -2133,17 +2162,27 @@
       if (fv) payload.fault = fv === '1';
       if (result === 'abnormal' && $view.querySelector('#eqReport').checked) payload.report = 1;
       if (result === 'abnormal' && payload.report) payload.level = $view.querySelector('#eqLevel').value;
+      if (eqPhotos.length) {
+        payload.photos = [];
+        for (const p of eqPhotos) {
+          try {
+            const b64 = await new Promise((res2, rej2) => { const fr = new FileReader(); fr.onload = () => res2(fr.result); fr.onerror = rej2; fr.readAsDataURL(p.thumb); });
+            payload.photos.push({ name: p.name, data: b64 });
+          } catch (e) { /* 单张失败跳过 */ }
+        }
+      }
       const btn = $view.querySelector('#eqGo');
       btn.disabled = true; btn.textContent = '提交中…';
       try {
         const r = await post('/api/equipments/' + eq.id + '/check', payload);
+        const photoN = (payload.photos || []).length;
         if (r && r.issue) {
-          okMask('点检已记录', `已生成异常单 ${r.issue.code}（${r.issue.level === 'pending' ? '待质检员定级' : '等级：' + r.issue.level}）`, [
+          okMask('点检已记录', `已生成异常单 ${r.issue.code}（${r.issue.level === 'pending' ? '待质检员定级' : '等级：' + r.issue.level}）${photoN ? `<br>已上传 ${photoN} 张现场照片` : ''}`, [
             { text: '查看异常单', onClick: () => nav('#/issue/' + r.issue.id, true) },
             { text: '返回设备列表', onClick: () => nav('#/equip', true) },
           ]);
         } else {
-          okMask('点检已记录', `${esc(eq.code)} · 正常`, [{ text: '返回设备列表', onClick: () => nav('#/equip', true) }]);
+          okMask('点检已记录', `${esc(eq.code)} · 正常${photoN ? `<br>已上传 ${photoN} 张现场照片` : ''}`, [{ text: '返回设备列表', onClick: () => nav('#/equip', true) }]);
         }
       } catch (e) {
         toast(e.message || '提交失败');
@@ -2161,7 +2200,24 @@
         <div class="field"><span>账号 / 工号</span><input class="ipt" value="${esc(me.username || '')}" disabled></div>
         <div class="field"><span>班组</span><input class="ipt" value="${esc(me.team || '未分组')}" disabled></div>
         <button class="btn" id="pSave">保存</button>
+      </div></div>
+      <div class="card"><div class="card-h"><h3>显示与操作</h3></div><div class="card-b">
+        <div class="row" style="align-items:center;gap:10px">
+          <div style="flex:1"><div class="t1">大字模式</div><div class="tiny muted">放大字号与点击区域，适合戴老花镜或光线强的车间</div></div>
+          <label class="switch"><input type="checkbox" id="bigFont" ${localStorage.getItem('mes_big_font') === '1' ? 'checked' : ''}><span></span></label>
+        </div>
       </div></div><div style="height:10px"></div>`;
+    /* 大字模式：整站放大（对标移动端适老化设计） */
+    (() => {
+      const apply = () => document.body.classList.toggle('big-font', localStorage.getItem('mes_big_font') === '1');
+      apply();
+      const sw = $view.querySelector('#bigFont');
+      if (sw) sw.onchange = () => {
+        localStorage.setItem('mes_big_font', sw.checked ? '1' : '0');
+        apply();
+        toast(sw.checked ? '已开启大字模式' : '已恢复标准字号');
+      };
+    })();
     /* 我的计件工资：本月 + 近30天（服务端对普通员工强制只返回本人数据） */
     (async () => {
       const box = $view.querySelector('#pWage'); if (!box) return;

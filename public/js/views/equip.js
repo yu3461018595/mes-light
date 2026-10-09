@@ -1,5 +1,34 @@
 /* 设备管理：设备台账 + 点检 + 稼动分析 + 模具管理（设备模块分支） */
 window.Views = window.Views || {};
+/* 点检照片压缩（上传前压到 1280px JPEG，避免手机大图占流量） */
+function compressPhoto(file, max) {
+  max = max || 1280;
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = reject;
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', 0.82));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+/* 点检记录照片解析（兼容字符串/数组） */
+function photoList(c) {
+  try { return typeof c.photos === 'string' ? JSON.parse(c.photos || '[]') : (c.photos || []); }
+  catch (e) { return []; }
+}
+
 Views.equip = {
   title: '设备管理',
   icon: 'dash',
@@ -369,6 +398,13 @@ Views.equip = {
         <label class="field"><span>设备状态（可选同步）</span><select class="input" data-k="fault"><option value="">不更改</option><option value="1">转为「故障」</option><option value="running">转为「运转」</option></select></label>
       </div>
       <label class="field"><span>点检说明 / 异常描述</span><input class="input" data-k="note" placeholder="如：主轴异响、漏油、导轨磨损"></label>
+      <label class="field"><span>现场拍照（选填，最多 3 张）</span>
+        <input type="file" data-k="photos" accept="image/*" capture="environment" multiple hidden>
+        <div class="row" style="gap:8px;align-items:flex-start;flex-wrap:wrap">
+          <button class="btn btn-sm btn-ghost" type="button" id="eqPhoto">📷 拍照 / 上传</button>
+          <div id="eqPhotos" class="row" style="gap:6px;flex-wrap:wrap"></div>
+        </div>
+        <span class="small muted">异常点检建议附照片，便于后续维修判断与责任认定。</span></label>
       <div id="abArea" style="display:none;margin-top:4px">
         <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="eqReport" checked style="width:auto"> 同时生成质量异常单（走统一异常上报口径）</label>
         <label class="field"><span>异常等级（${isInsp ? '检验员可直接定级' : '申报等级，重大异常将通知检验员及时定级'}）</span>
@@ -378,10 +414,12 @@ Views.equip = {
         const g = (k) => { const e2 = mask.querySelector(`[data-k="${k}"]`); return e2 ? e2.value : ''; };
         const payload = { result: g('result'), note: g('note').trim() };
         if (g('fault')) payload.fault = g('fault') === '1';
+        if (this.eqPhotos && this.eqPhotos.length) payload.photos = this.eqPhotos.slice(0, 3);
         if (g('result') === 'abnormal' && mask.querySelector('#eqReport').checked) {
           payload.report = 1; payload.level = g('level');
         }
         const res = await API.post('/equipments/' + id + '/check', payload);
+        this.eqPhotos = [];
         if (res && res.issue) UI.toast(`已记录异常，并生成异常单 ${res.issue.code}（${res.issue.level === 'pending' ? '待检验员定级' : '等级：' + res.issue.level}）`, 'ok');
         else UI.toast('点检已记录', 'ok');
         this.render(document.getElementById('view'));
@@ -390,6 +428,28 @@ Views.equip = {
     // 切换结果时显示/隐藏异常联动区
     const sel = m.el.querySelector('select[data-k="result"]');
     sel.onchange = () => { m.el.querySelector('#abArea').style.display = sel.value === 'abnormal' ? '' : 'none'; };
+    /* 照片选择与缩略图 */
+    this.eqPhotos = this.eqPhotos || [];
+    const paintEqPhotos = () => {
+      const box = m.el.querySelector('#eqPhotos');
+      if (!box) return;
+      box.innerHTML = this.eqPhotos.map((p, i) => `<span style="position:relative;display:inline-block"><img src="${p.thumb}" style="width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid var(--line,#e2e8f0)"><button type="button" data-eqpi="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;line-height:1">✕</button></span>`).join('');
+      box.querySelectorAll('[data-eqpi]').forEach((b) => b.onclick = () => { this.eqPhotos.splice(Number(b.dataset.eqpi), 1); paintEqPhotos(); });
+    };
+    const fileInput = m.el.querySelector('input[data-k="photos"]');
+    m.el.querySelector('#eqPhoto').onclick = () => fileInput.click();
+    fileInput.onchange = async (e) => {
+      for (const f of Array.from(e.target.files || [])) {
+        if (this.eqPhotos.length >= 3) { UI.toast('最多 3 张照片', 'err'); break; }
+        try {
+          const data = await compressPhoto(f);
+          this.eqPhotos.push({ name: (f.name || 'photo.jpg').replace(/\.[^.]+$/, '') + '.jpg', data, thumb: data });
+        } catch (err) { UI.toast('照片处理失败', 'err'); }
+      }
+      e.target.value = '';
+      paintEqPhotos();
+    };
+    paintEqPhotos();
   },
 
   /* 点检历史 */
@@ -404,7 +464,7 @@ Views.equip = {
         { t: '时间', f: (c) => `<span class="mono">${UI.esc(String(c.created_at).slice(0, 16))}</span>` },
         { t: '结果', f: (c) => c.result === 'ok' ? '<span class="chip chip-ok">正常</span>' : '<span class="chip chip-danger">异常</span>' },
         { t: '点检人', k: 'checked_name' },
-        { t: '说明', f: (c) => UI.esc(c.note || '—') },
+        { t: '说明', f: (c) => `${UI.esc(c.note || '—')}${(photoList(c) || []).length ? `<div class="row" style="gap:4px;margin-top:4px;flex-wrap:wrap">${photoList(c).map((p) => `<a href="/uploads/${encodeURIComponent(p.file)}" target="_blank" title="${UI.esc(p.name || '')}"><img src="/uploads/${encodeURIComponent(p.file)}" style="width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid var(--line,#e2e8f0)"></a>`).join('')}</div>` : ''}` },
         { t: '关联异常单', f: (c) => c.issue_code
             ? `<span class="chip ${lvChip[c.issue_level] ? lvChip[c.issue_level][1] : 'chip-gray'}">${UI.esc(c.issue_code)}</span>`
             : '—' },

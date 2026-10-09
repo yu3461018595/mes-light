@@ -585,6 +585,45 @@ route('PUT', '/api/orders/(\\d+)/step_prices', ['admin', 'technician'], (req, re
   ok(res, { updated: n });
 });
 
+/* 工单批量操作（对标黑湖「批量开工/撤回/结案/取消/删除」）：逐单校验，返回成功清单与失败明细 */
+route('POST', '/api/orders/batch', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const ids = (Array.isArray(b.ids) ? b.ids : []).map((x) => num(x)).filter((x) => x > 0).slice(0, 200);
+  const action = String(b.action || '');
+  const LABEL = { release: '批量下发', pause: '批量暂停', resume: '批量恢复', done: '批量完工', close: '批量关闭', cancel: '批量取消', del: '批量删除' };
+  if (!ids.length) return fail(res, '请先勾选要操作的工单');
+  if (!LABEL[action]) return fail(res, '不支持的批量操作：' + action);
+  const to = { release: 'released', pause: 'paused', resume: 'running', done: 'done', close: 'closed', cancel: 'cancelled' }[action];
+  const okList = [], failed = [];
+  const st = now();
+  for (const id of ids) {
+    const o = get('SELECT * FROM orders WHERE id=?', [id]);
+    if (!o) { failed.push({ id, code: '#' + id, msg: '工单不存在' }); continue; }
+    try {
+      if (action === 'del') {
+        if (o.status === 'closed') { failed.push({ id, code: o.code, msg: '已关闭工单不可删除' }); continue; }
+        if (get('SELECT 1 FROM reports WHERE order_id=? LIMIT 1', [id])) { failed.push({ id, code: o.code, msg: '已有报工记录，不可删除' }); continue; }
+        run('DELETE FROM orders WHERE id=?', [id]);
+        writeLog(u, '批量删除工单', o.code);
+        okList.push(o.code);
+        continue;
+      }
+      if (action === 'release' && !get('SELECT 1 FROM order_steps WHERE order_id=? LIMIT 1', [id])) { failed.push({ id, code: o.code, msg: '无工序，无法下发' }); continue; }
+      if (action === 'resume' && o.status !== 'paused') { failed.push({ id, code: o.code, msg: '仅暂停中的工单可恢复' }); continue; }
+      if (action === 'pause' && ['closed', 'cancelled', 'done'].includes(o.status)) { failed.push({ id, code: o.code, msg: '已完成/关闭工单不可暂停' }); continue; }
+      if (action === 'close' && o.status === 'created') { failed.push({ id, code: o.code, msg: '未下发工单请先取消而非关闭' }); continue; }
+      if (to === 'running') run('UPDATE orders SET status=?, start_time=IFNULL(start_time,?) WHERE id=?', [to, st, id]);
+      else if (to === 'done') run('UPDATE orders SET status=?, finish_time=? WHERE id=?', [to, st, id]);
+      else if (to === 'closed') run('UPDATE orders SET status=?, finish_time=IFNULL(finish_time,?), close_reason=? WHERE id=?', [to, st, b.close_reason || '批量关闭', id]);
+      else run('UPDATE orders SET status=? WHERE id=?', [to, id]);
+      if (to === 'running') run(`UPDATE order_steps SET status='running' WHERE id=(SELECT MIN(id) FROM order_steps WHERE order_id=? AND status='pending')`, [id]);
+      if (to === 'released') { try { notifyAssign(o, id); } catch (e) { /* 通知失败不影响下发 */ } }
+      writeLog(u, LABEL[action], o.code);
+      okList.push(o.code);
+    } catch (e) { failed.push({ id, code: o.code, msg: e.message || '操作失败' }); }
+  }
+  ok(res, { action, ok_count: okList.length, ok_list: okList, failed });
+});
+
 route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
   const qty = Math.max(1, Math.floor(num(b.qty_plan, 1)));
   const code = b.code && b.code.trim() ? b.code.trim()
@@ -1652,9 +1691,16 @@ route('POST', '/api/equipments/(\\d+)/check', ['admin', 'technician', 'worker', 
   if (!eq) return fail(res, '设备不存在', 404);
   const result = b.result === 'abnormal' ? 'abnormal' : 'ok';
   let issue = null;
+  let photos = [];
   tx(() => {
     const cid = insert('INSERT INTO equipment_checks(equipment_id,result,note,issue_id,checked_by,checked_name,created_at) VALUES(?,?,?,NULL,?,?,?)',
       [eq.id, result, b.note || null, u.id, u.name, now()]);
+    // 点检拍照留证（防走过场）：JSON base64，最多 3 张
+    try {
+      const list = (Array.isArray(b.photos) ? b.photos : []).slice(0, 3);
+      for (const ph of list) storeScanPhoto(ph, 'eqcheck', cid, photos);
+      if (photos.length) run('UPDATE equipment_checks SET photos=? WHERE id=?', [JSON.stringify(photos), cid]);
+    } catch (e) { /* 照片异常不阻断点检 */ }
     run('UPDATE equipments SET last_check_at=? WHERE id=?', [now(), eq.id]);
     if (result === 'abnormal' && b.fault) run("UPDATE equipments SET status='fault' WHERE id=?", [eq.id]);
     if (result === 'abnormal' && b.report) {
@@ -2979,6 +3025,7 @@ route('GET', '/api/quality/settings', ['admin', 'technician'], (req, res) => {
     remind_minutes: num(getSetting('remind_minutes', 30)),
     critical_ratio: num(getSetting('critical_ratio', 20)),
     minor_ratio: num(getSetting('minor_ratio', 5)),
+    inspect_timeout_minutes: num(getSetting('inspect_timeout_minutes', 120)),
   });
 });
 route('POST', '/api/quality/settings', ['admin'], (req, res, _m, b, u) => {
@@ -2992,6 +3039,7 @@ route('POST', '/api/quality/settings', ['admin'], (req, res, _m, b, u) => {
   if (b.remind_minutes !== undefined) setKV('remind_minutes', num(b.remind_minutes, 30));
   if (b.critical_ratio !== undefined) setKV('critical_ratio', Math.min(100, Math.max(1, num(b.critical_ratio, 20))));
   if (b.minor_ratio !== undefined) setKV('minor_ratio', Math.min(50, Math.max(0, num(b.minor_ratio, 5))));
+  if (b.inspect_timeout_minutes !== undefined) setKV('inspect_timeout_minutes', Math.min(10080, Math.max(0, num(b.inspect_timeout_minutes, 120))));
   writeLog(u, '修改质量设置', JSON.stringify(b));
   ok(res, true);
 });
@@ -3114,6 +3162,34 @@ function scanOverdueIssues() {
         }
         run('UPDATE quality_issues SET escalated=1 WHERE id=?', [it.id]);
       }
+    }
+  } catch (e) { /* 扫描失败不影响服务 */ }
+}
+
+/* 待检超时提醒（对标「批次必须在 N 小时内完成检验，超时自动推送」）：
+ * 报工后工序落 inspect_status='waiting'，超过 settings.inspect_timeout_minutes 未判定 → 通知全体质检员（每天每工序只提醒一次）。 */
+function scanInspectOverdue() {
+  try {
+    const lim = num(getSetting('inspect_timeout_minutes', 120), 120);
+    if (lim <= 0) return;
+    const inspectors = all("SELECT id,name FROM users WHERE role='inspector' AND active=1");
+    if (!inspectors.length) return;
+    const rows = all(`SELECT s.id sid, s.seq, s.inspect_type, o.code order_code, pr.name process_name
+      FROM order_steps s JOIN orders o ON o.id=s.order_id JOIN processes pr ON pr.id=s.process_id
+      WHERE s.inspect_status='waiting' AND o.status NOT IN ('closed','cancelled')`);
+    for (const r of rows) {
+      const last = get('SELECT MAX(created_at) t FROM reports WHERE order_step_id=?', [r.sid]);
+      if (!last || !last.t) continue;
+      const mins = (Date.now() - new Date(String(last.t).replace(' ', 'T')).getTime()) / 60000;
+      if (mins < lim) continue;
+      const dup = get("SELECT id FROM issue_notifications WHERE source='inspect_overdue' AND ref_id=? AND sent_at >= datetime('now','-1 day')", [r.sid]);
+      if (dup) continue;
+      pushMessage({
+        source: 'inspect_overdue', toUsers: inspectors, kind: 'remind', ref_type: 'inspect_step', ref_id: r.sid,
+        link: '#/inspect',
+        title: `待检工序已等待 ${Math.round(mins)} 分钟未检验`,
+        body: `${r.order_code} · 第 ${r.seq} 道 ${r.process_name}${r.inspect_type ? '（' + r.inspect_type.toUpperCase() + '）' : ''}，请尽快判定以免阻塞流转`,
+      });
     }
   } catch (e) { /* 扫描失败不影响服务 */ }
 }
@@ -4132,6 +4208,9 @@ process.on('unhandledRejection', (e) => console.error('[未处理 Promise 拒绝
 // unref()：不作为进程存活的理由——被测试/脚本 require 时可正常退出
 setInterval(scanOverdueIssues, 60 * 1000).unref();
 setTimeout(scanOverdueIssues, 5 * 1000).unref();
+// 待检超时提醒：每 5 分钟扫一次，启动 10 秒后首扫
+setInterval(scanInspectOverdue, 5 * 60 * 1000).unref();
+setTimeout(scanInspectOverdue, 10 * 1000).unref();
 // 库存预警：启动 15 秒后首扫，之后每 10 分钟一次
 setInterval(scanStockAlertsTick, 10 * 60 * 1000).unref();
 setTimeout(scanStockAlertsTick, 15 * 1000).unref();

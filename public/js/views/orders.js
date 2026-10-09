@@ -226,6 +226,67 @@ Views.orders = {
       { t: '交期', f: (r) => `<span class="${r.plan_end < UI.today() && !['done', 'closed'].includes(r.status) ? 'chip chip-danger' : 'small muted'}">${UI.esc(r.plan_end)}</span>` },
       { t: '状态', f: (r) => UI.badge(r.status), align: 'right' },
     ], list, { emptyText: '没有符合条件的工单' });
+    /* 多选 + 批量操作（对标黑湖批量开工/撤回/结案/取消/删除） */
+    if (canEdit) {
+      const cols = box.querySelectorAll('table thead th');
+      if (cols.length) cols[0].innerHTML = `<input type="checkbox" id="ordAll" title="全选本页">`;
+      box.querySelectorAll('table tbody tr').forEach((tr, i) => {
+        const oid = list[i] && list[i].id;
+        if (!oid) return;
+        tr.insertAdjacentHTML('afterbegin', `<td style="width:36px"><input type="checkbox" data-oid="${oid}"></td>`);
+      });
+      const bar = document.createElement('div');
+      bar.className = 'row';
+      bar.id = 'ordBatch';
+      bar.style.cssText = 'gap:8px;margin:0 0 10px;flex-wrap:wrap;display:none';
+      bar.innerHTML = `<span class="small muted">已选 <b id="ordSelN">0</b> 单</span>
+        <button class="btn btn-sm" data-ba="release">批量下发</button>
+        <button class="btn btn-sm" data-ba="pause">批量暂停</button>
+        <button class="btn btn-sm" data-ba="resume">批量恢复</button>
+        <button class="btn btn-sm" data-ba="done">批量完工</button>
+        <button class="btn btn-sm" data-ba="close">批量关闭</button>
+        <button class="btn btn-sm btn-danger" data-ba="del">批量删除</button>
+        <button class="btn btn-sm btn-ghost" data-ba="clear">清空选择</button>`;
+      box.parentNode.insertBefore(bar, box);
+      const allBox = box.querySelector('#ordAll');
+      const boxes = () => Array.from(box.querySelectorAll('[data-oid]'));
+      const paintBar = () => {
+        const n = boxes().filter((c) => c.checked).length;
+        bar.style.display = n ? 'flex' : 'none';
+        const lbl = bar.querySelector('#ordSelN');
+        if (lbl) lbl.textContent = String(n);
+      };
+      boxes().forEach((c) => c.onchange = () => {
+        if (allBox) allBox.checked = boxes().every((x) => x.checked);
+        paintBar();
+      });
+      if (allBox) allBox.onchange = () => { boxes().forEach((c) => { c.checked = allBox.checked; }); paintBar(); };
+      bar.querySelectorAll('[data-ba]').forEach((bt) => bt.onclick = async () => {
+        const action = bt.dataset.ba;
+        const ids = boxes().filter((c) => c.checked).map((c) => Number(c.dataset.oid));
+        if (!ids.length) return;
+        if (action === 'clear') { boxes().forEach((c) => { c.checked = false; }); if (allBox) allBox.checked = false; return paintBar(); }
+        const LABEL = { release: '下发', pause: '暂停', resume: '恢复', done: '完工', close: '关闭', del: '删除' };
+        if (!(await UI.confirm(`确认对 ${ids.length} 张工单执行「批量${LABEL[action]}」？有报工记录的工单不能删除。`))) return;
+        try {
+          const r = await API.post('/orders/batch', { ids, action });
+          const okN = (r && r.ok_count) || 0;
+          const failed = (r && r.failed) || [];
+          if (failed.length) {
+            UI.modal({
+              title: `批量${LABEL[action]}完成：成功 ${okN} 单，失败 ${failed.length} 单`,
+              size: 'lg',
+              body: `<div class="small muted" style="margin-bottom:8px">失败明细如下（其余 ${okN} 单已成功）：</div>` + UI.table([
+                { t: '工单', f: (x) => `<b>${UI.esc(x.code)}</b>` },
+                { t: '原因', f: (x) => `<span style="color:var(--danger)">${UI.esc(x.msg)}</span>` },
+              ], failed),
+              footer: '<button class="btn" data-close>知道了</button>',
+            });
+          } else UI.toast(`已批量${LABEL[action]} ${okN} 单`, 'ok');
+          this.render(document.getElementById('view'));
+        } catch (e) { UI.toast(e.message, 'err'); }
+      });
+    }
     box.querySelectorAll('[data-id]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.id);
   },
 

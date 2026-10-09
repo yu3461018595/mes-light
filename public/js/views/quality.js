@@ -644,6 +644,9 @@ Views.quality = {
             <label class="field"><span>轻微异常上限占比（%）</span>
               <input class="input" type="number" min="0" max="50" id="minorRatio" value="${cfg.minor_ratio != null ? cfg.minor_ratio : 5}" ${isAdmin ? '' : 'disabled'}>
               <span class="small muted">不合格占比 ≤ 该值 → 轻微异常（不惊动管理层，返工闭环）</span></label>
+            <label class="field"><span>待检超时提醒（分钟）</span>
+              <input class="input" type="number" min="0" id="inspTmo" value="${cfg.inspect_timeout_minutes != null ? cfg.inspect_timeout_minutes : 120}" ${isAdmin ? '' : 'disabled'}>
+              <span class="small muted">报工后超该时长仍未判定 → 提醒全体质检员（0=关闭；每工序每天提醒一次）</span></label>
           </div>
           ${isAdmin ? '<button class="btn btn-primary" id="save">保存设置</button>'
             : '<div class="small muted">仅管理员可修改，可查看当前配置。</div>'}
@@ -689,6 +692,7 @@ Views.quality = {
           escalate_minutes: Number(el.querySelector('#esc').value) || 240,
           critical_ratio: Number(el.querySelector('#critRatio').value) || 20,
           minor_ratio: Number(el.querySelector('#minorRatio').value) || 5,
+          inspect_timeout_minutes: Number(el.querySelector('#inspTmo').value) || 0,
           webhook_url: el.querySelector('#wh').value.trim(),
         });
         UI.toast('设置已保存', 'ok');
