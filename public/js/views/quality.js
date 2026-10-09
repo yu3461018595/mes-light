@@ -108,6 +108,22 @@ Views.quality = {
       const q = sel.closest('.cl-item').querySelector('[data-cqty]');
       if (q) q.hidden = sel.value !== 'ng';
     });
+    // 减负：检查表一键全合格 / 清空重选（避免逐项下拉点击）
+    el.querySelectorAll('#clAllOk').forEach((btn) => btn.onclick = () => {
+      const card = btn.closest('.insp-step') || el;
+      card.querySelectorAll('.cl-item').forEach((ci) => {
+        const sel = ci.querySelector('select[data-cres]');
+        if (sel) { sel.value = 'ok'; const q = ci.querySelector('[data-cqty]'); if (q) { q.hidden = true; q.value = ''; } }
+      });
+      UI.toast('已全部标记合格，如有个别不合格项请单独改为 NG', 'ok');
+    });
+    el.querySelectorAll('#clReset').forEach((btn) => btn.onclick = () => {
+      const card = btn.closest('.insp-step') || el;
+      card.querySelectorAll('.cl-item').forEach((ci) => {
+        const sel = ci.querySelector('select[data-cres]');
+        if (sel) { sel.value = 'skip'; const q = ci.querySelector('[data-cqty]'); if (q) { q.hidden = true; q.value = ''; } }
+      });
+    });
   },
 
   pendingCard(r, badReasons) {
@@ -144,6 +160,11 @@ Views.quality = {
           </select></label>
       </div>
       ${cl.length ? `<div class="field" style="margin:0 0 10px"><span>检验项目（模板：${UI.esc(r.checklist_name || '默认')} · NG 项自动计入不良）</span>
+        <div class="row" style="gap:6px;margin-bottom:6px">
+          <button class="btn btn-sm btn-ghost" id="clAllOk" type="button">✅ 全部合格（一键）</button>
+          <button class="btn btn-sm btn-ghost" id="clReset" type="button">清空重选</button>
+          <span class="small muted">常规检验可一键全合格后再抽查个别项</span>
+        </div>
         <div class="cl-rows">${cl.map((it, i) => `<div class="row cl-item" data-ci="${i}" data-cname="${UI.esc(it.name)}" data-cstd="${UI.esc(it.standard || '')}" style="gap:8px;align-items:center;flex-wrap:nowrap;margin:4px 0">
           <span style="flex:1;min-width:120px">${UI.esc(it.name)}${it.standard ? `<span class="small muted" style="margin-left:6px">${UI.esc(it.standard)}</span>` : ''}</span>
           <select class="input" data-cres style="width:88px;margin:0">

@@ -473,7 +473,8 @@ route('GET', '/api/orders', [], (req, res, _m, _b, _u, query) => {
 route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   const o = get(ORDER_SQL + ' WHERE o.id=?', [m[1]]);
   if (!o) return fail(res, '工单不存在', 404);
-  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name, pr.std_price, w.name wc_name, s.assignee_team,
+  o.steps = all(`SELECT s.*, pr.code process_code, pr.name process_name,
+      COALESCE(NULLIF(s.std_price,0), pr.std_price, 0) std_price, pr.std_price proc_std_price, w.name wc_name, s.assignee_team,
       (SELECT COUNT(*) FROM order_steps x WHERE x.order_id=s.order_id AND x.seq<s.seq)+1 AS seq_no
     FROM order_steps s
     JOIN processes pr ON pr.id=s.process_id
@@ -487,9 +488,9 @@ route('GET', '/api/orders/(\\d+)', [], (req, res, m) => {
   // 班组下拉数据源
   o.teams = all("SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND team<>'' ORDER BY team").map((r) => r.team);
   o.reports = all(`SELECT rp.*, u.name worker_name, pr.name process_name,
-      COALESCE(rp.unit_price, pr.std_price, 0) unit_price,
+      COALESCE(rp.unit_price, NULLIF(s.std_price,0), pr.std_price, 0) unit_price,
       CASE WHEN rp.wage_type='time' THEN ROUND(COALESCE(rp.work_hours,0) * COALESCE(rp.unit_price, 0), 2)
-           ELSE ROUND(rp.qty_good * COALESCE(rp.unit_price, pr.std_price, 0), 2) END amount
+           ELSE ROUND(rp.qty_good * COALESCE(rp.unit_price, NULLIF(s.std_price,0), pr.std_price, 0), 2) END amount
     FROM reports rp LEFT JOIN users u ON u.id=rp.worker_id LEFT JOIN order_steps s ON s.id=rp.order_step_id
     LEFT JOIN processes pr ON pr.id=s.process_id
     WHERE rp.order_id=? ORDER BY rp.id DESC LIMIT 100`, [m[1]]);
@@ -529,6 +530,59 @@ route('PUT', '/api/orders/(\\d+)/bad-reasons', ['admin', 'technician'], (req, re
   });
   writeLog(u || null, '配置不良原因', '工单#' + oid + ' 可用不良原因 ' + clean.length + ' 项');
   ok(res, { count: clean.length });
+});
+
+/* 工单智能建议（减少建单人工操作）：按产品带出默认工艺路线 / 历史常用客户 / 最近负责人与优先级 /
+ * 历史平均工期推算计划完工日；无历史则回退产品默认路线。 */
+route('GET', '/api/orders/suggest', [], (req, res, _m, _b, _u, q) => {
+  const pid = num(q.product_id);
+  if (!pid) return ok(res, { route_id: null, customer_id: null, owner_user_id: null, priority: 2, duration_days: 0, plan_end: '', from_history: false });
+  const last = get(`SELECT o.route_id, o.customer_id, o.owner_user_id, o.priority, o.qty_plan, o.code, o.plan_start, o.plan_end, o.created_at
+    FROM orders o WHERE o.product_id=? AND o.route_id IS NOT NULL ORDER BY o.id DESC LIMIT 1`, [pid]);
+  const routes = all('SELECT id FROM routes WHERE product_id=? ORDER BY id', [pid]);
+  const routeId = (last && last.route_id) || (routes[0] || {}).id || null;
+  // 历史平均工期：优先实际开工→完工，其次计划天数
+  const dur = get(`SELECT AVG(MAX(1, julianday(COALESCE(finish_time, plan_end)) - julianday(COALESCE(start_time, plan_start)))) d
+    FROM orders WHERE product_id=? AND route_id IS NOT NULL AND created_at >= date('now','-180 day')`, [pid]);
+  const durationDays = Math.max(1, Math.round(num(dur && dur.d) || (last ? Math.max(1, daysBetween(last.plan_start, last.plan_end)) : 1)));
+  const planEnd = new Date(Date.now() + durationDays * 86400000).toISOString().slice(0, 10);
+  ok(res, {
+    route_id: routeId,
+    customer_id: last ? last.customer_id : null,
+    owner_user_id: last ? last.owner_user_id : null,
+    priority: last ? num(last.priority, 2) : 2,
+    qty_hint: last ? num(last.qty_plan) : null,
+    duration_days: durationDays,
+    plan_end: planEnd,
+    from_history: !!last,
+    last_code: last ? last.code : '',
+  });
+});
+function daysBetween(a, b) {
+  if (!a || !b) return 1;
+  const d = Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+  return Number.isFinite(d) && d > 0 ? d : 1;
+}
+
+/* 工单级计件工价批量设置（免去逐个改工序档案）：prices=[{order_step_id, std_price}]，0=跟随工序档案 */
+route('PUT', '/api/orders/(\\d+)/step_prices', ['admin', 'technician'], (req, res, m, b, u) => {
+  const o = get('SELECT id,code,wage_type FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  if (o.wage_type === 'time') return fail(res, '计时核算工单不计件工价，无需设置');
+  const list = Array.isArray(b.prices) ? b.prices : [];
+  if (!list.length) return fail(res, '未提交任何工序价格');
+  let n = 0;
+  tx(() => {
+    for (const p of list) {
+      const sid = num(p.order_step_id);
+      const step = get('SELECT id FROM order_steps WHERE id=? AND order_id=?', [sid, o.id]);
+      if (!step) continue;
+      run('UPDATE order_steps SET std_price=? WHERE id=?', [Math.max(0, num(p.std_price)), sid]);
+      n++;
+    }
+    writeLog(u, '批量设置工价', o.code + ' 共 ' + n + ' 道工序');
+  });
+  ok(res, { updated: n });
 });
 
 route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
@@ -933,9 +987,10 @@ function doReport(b, actor) {
       const isTime = String(order.wage_type) === 'time';
       const workHours = Math.max(0, num(it.work_min)) / 60;
       if (isTime && workHours <= 0) throw new Error('计时核算工单报工需填写实动工时（小时）');
-      const snapRate = isTime
-        ? (num(order.hourly_rate) || 0)
-        : (num(get('SELECT std_price FROM processes WHERE id=?', [step.process_id]).std_price) || 0);
+      // 单价优先级：工单级工序工价（std_price>0）> 工序档案单价
+      const stepPrice = num(step.std_price) || 0;
+      const procPrice = num(get('SELECT std_price FROM processes WHERE id=?', [step.process_id]).std_price) || 0;
+      const snapRate = isTime ? (num(order.hourly_rate) || 0) : (stepPrice || procPrice);
       const rid = insert(`INSERT INTO reports(order_id,order_step_id,worker_id,work_center_id,qty_good,qty_bad,bad_reason,bad_reason_id,work_min,report_date,remark,created_at,unit_price,wage_type,work_hours)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, step.id, workerId, it.work_center_id || step.work_center_id,

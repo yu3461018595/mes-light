@@ -129,6 +129,8 @@
     return Object.assign({}, s, {
       process_code: pr.code, process_name: pr.name, wc_name: w ? w.name : '', assignee_name: u ? u.name : '',
       assignee_team: s.assignee_team || '', reporter_names: repNames,
+      // 单价口径与后端一致：工单级工序工价（>0）优先于工序档案单价
+      std_price: num(s.std_price) || num(pr.std_price) || 0, proc_std_price: num(pr.std_price) || 0,
     });
   }
   function reportView(rp) {
@@ -140,7 +142,9 @@
     const badReasons = T('report_bad_reasons').filter((x) => x.report_id === rp.id)
       .map((x) => ({ bad_reason: x.bad_reason, bad_reason_id: x.bad_reason_id, bad_reason_detail: x.bad_reason_detail, qty: x.qty }));
     const isTime = String(rp.wage_type) === 'time';
-    const rate = rp.unit_price !== undefined && rp.unit_price !== null ? num(rp.unit_price) : (isTime ? num(o.hourly_rate) : num(pr && pr.std_price));
+    const stepPrice = s ? (num(s.std_price) || 0) : 0;
+    const rate = rp.unit_price !== undefined && rp.unit_price !== null ? num(rp.unit_price)
+      : (isTime ? num(o.hourly_rate) : (stepPrice || num(pr && pr.std_price)));
     const amount = Math.round((isTime ? num(rp.work_hours) * rate : num(rp.qty_good) * rate) * 100) / 100;
     return Object.assign({}, rp, { worker_name: u.name, order_code: o.code, process_name: pr ? pr.name : '', wc_name: w ? w.name : '', bad_reasons: badReasons,
       wage_type: rp.wage_type || 'piece', work_hours: num(rp.work_hours), unit_price: rate, amount });
@@ -223,7 +227,9 @@
       const isTime = String(order.wage_type) === 'time';
       const workHours = Math.max(0, num(it.work_min)) / 60;
       if (isTime && workHours <= 0) throw new Error('计时核算工单报工需填写实动工时（小时）');
-      const snapRate = isTime ? (num(order.hourly_rate) || 0) : (num((find('processes', step.process_id) || {}).std_price) || 0);
+      // 单价优先级：工单级工序工价（std_price>0）> 工序档案单价（与后端一致）
+      const snapRate = isTime ? (num(order.hourly_rate) || 0)
+        : ((num(step.std_price) || 0) || (num((find('processes', step.process_id) || {}).std_price) || 0));
       const rid = insert('reports', {
         id: nextId('reports'), order_id: Number(b.order_id), order_step_id: step.id, worker_id: workerId,
         work_center_id: b.work_center_id || step.work_center_id, qty_good: good, qty_bad: bad,
@@ -419,6 +425,54 @@
     routes: T('routes').map((r) => Object.assign({}, r, { product_name: (find('products', r.product_id) || {}).name || '' })),
     statuses: [['created', '待下发'], ['released', '已下发'], ['running', '生产中'], ['paused', '已暂停'], ['done', '已完成'], ['closed', '已关闭']],
   }));
+
+  /* 工单智能建议（静态镜像）：按产品带出路线/客户/负责人/优先级/历史平均工期 */
+  R('GET', '/orders/suggest', (_p, _b, q) => {
+    const pid = num(q.product_id);
+    if (!pid) return ok({ route_id: null, customer_id: null, owner_user_id: null, priority: 2, duration_days: 0, plan_end: '', from_history: false });
+    const hist = T('orders').filter((o) => num(o.product_id) === pid && o.route_id).sort((a, b) => b.id - a.id);
+    const last = hist[0];
+    const routes = T('routes').filter((r) => num(r.product_id) === pid).sort((a, b) => a.id - b.id);
+    const routeId = (last && last.route_id) || (routes[0] || {}).id || null;
+    const ds = hist.map((o) => {
+      const a = o.start_time || o.plan_start, b2 = o.finish_time || o.plan_end;
+      if (!a || !b2) return 1;
+      const d = Math.round((new Date(String(b2).slice(0, 10) + 'T00:00:00Z') - new Date(String(a).slice(0, 10) + 'T00:00:00Z')) / 86400000);
+      return Number.isFinite(d) && d > 0 ? d : 1;
+    });
+    const durationDays = ds.length ? Math.max(1, Math.round(ds.reduce((a, x) => a + x, 0) / ds.length)) : 1;
+    const planEnd = dayOffset(durationDays);
+    return ok({
+      route_id: routeId,
+      customer_id: last ? last.customer_id : null,
+      owner_user_id: last ? last.owner_user_id : null,
+      priority: last ? num(last.priority, 2) : 2,
+      qty_hint: last ? num(last.qty_plan) : null,
+      duration_days: durationDays,
+      plan_end: planEnd,
+      from_history: !!last,
+      last_code: last ? last.code : '',
+    });
+  });
+  /* 工单级计件工价批量设置（静态镜像） */
+  R('PUT', '/orders/(\\d+)/step_prices', (m, b) => {
+    if (requireRole('admin', 'technician')) return fail('无权限', 403);
+    const o = find('orders', m[0]);
+    if (!o) return fail('工单不存在', 404);
+    if (o.wage_type === 'time') return fail('计时核算工单不计件工价，无需设置');
+    const list = Array.isArray(b.prices) ? b.prices : [];
+    if (!list.length) return fail('未提交任何工序价格');
+    let n = 0;
+    list.forEach((p) => {
+      const st = find('order_steps', p.order_step_id);
+      if (!st || st.order_id !== o.id) return;
+      update('order_steps', st.id, { std_price: Math.max(0, num(p.std_price)) });
+      n++;
+    });
+    writeLog(actor(), '批量设置工价', o.code + ' 共 ' + n + ' 道工序');
+    save();
+    return ok({ updated: n });
+  });
 
   /* 工单列表 */
   R('GET', '/orders', (_p, _b, q) => {

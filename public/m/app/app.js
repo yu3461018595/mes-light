@@ -503,18 +503,35 @@
     const data = await get('/api/app/order/' + orderId);
     S.order = data.order; S.steps = data.steps || []; S.workers = data.workers || [];
     S.badReasons = data.badReasons || [];
-    S.sel = new Set(); S.vals = {}; S.rpPhotos = [];
+    S.sel = new Set(); S.vals = {}; S.rpPhotos = []; S.rpInit = false;
     paintOrder();
   }
 
   function badge(st) { const m = BADGE[st] || [st, 'b-released']; return `<span class="badge ${m[1]}">${esc(m[0])}</span>`; }
   const canReport = (s) => Number(s.allow_report) !== 0 && s.status !== 'done';
 
+  /* 报工减负：按工序记忆上次报工的合格数/工时（本机 localStorage），用于「沿用上次」 */
+  const LAST_RPT_KEY = 'mes_last_report';
+  function lastOf(stepId) {
+    try { const m = JSON.parse(localStorage.getItem(LAST_RPT_KEY) || '{}'); return m[stepId] || null; } catch (e) { return null; }
+  }
+  function saveLast(map) {
+    try { localStorage.setItem(LAST_RPT_KEY, JSON.stringify(map)); } catch (e) { /* 忽略 */ }
+  }
+
   function paintOrder() {
     const o = S.order;
     const closed = ['done', 'closed'].includes(o.status);
     const pct = o.qty_plan > 0 ? Math.round((o.qty_done / o.qty_plan) * 100) : 0;
     const selCount = S.steps.filter((s) => S.sel.has(s.id) && canReport(s)).length;
+    /* 首次进入：按本机记忆预填各工序上次报工的合格数/工时（减少重复输入） */
+    if (!S.rpInit) {
+      S.rpInit = true;
+      S.steps.forEach((s) => {
+        const last = lastOf(s.id);
+        if (last && !S.vals[s.id]) S.vals[s.id] = { good: last.good || '', min: last.min || '', badRows: [{ reason: '', qty: '', detail: '' }] };
+      });
+    }
 
     const stepCards = S.steps.map((s) => {
       const lock = Number(s.allow_report) === 0;
@@ -537,6 +554,12 @@
               <button type="button" class="dec" data-dec="${s.id}" aria-label="减少"></button>
               <input id="g${s.id}" type="number" inputmode="numeric" min="0" value="${esc(v.good)}">
               <button type="button" class="inc" data-inc="${s.id}" aria-label="增加"></button>
+            </div>
+            <div class="quick-row">
+              <button type="button" class="qk" data-fill="${s.id}">填满剩余 ${Math.max(0, num(s.qty_plan) - num(s.qty_good))}</button>
+              <button type="button" class="qk" data-l10="${s.id}">沿用上次${(lastOf(s.id) || {}).good ? '（' + (lastOf(s.id) || {}).good + '）' : ''}</button>
+              <button type="button" class="qk" data-p10="${s.id}">+10</button>
+              <button type="button" class="qk" data-p50="${s.id}">+50</button>
             </div></div>
           <div class="field" style="margin-bottom:12px"><span>工时（小时${o.wage_type === 'time' ? '，计时核算必填' : '，选填'}）</span>
             <input id="w${s.id}" class="ipt" type="number" inputmode="decimal" min="0" step="0.5" placeholder="如 2" value="${esc(v.min)}"></div>
@@ -604,6 +627,19 @@
       const clamp = (v) => Math.max(0, Math.floor(num(v)));
       $view.querySelector('[data-dec="' + s.id + '"]').onclick = () => { g.value = Math.max(0, clamp(g.value) - 10); S.vals[s.id] = Object.assign(readOne(s), { good: g.value }); };
       $view.querySelector('[data-inc="' + s.id + '"]').onclick = () => { g.value = clamp(g.value) + 10; S.vals[s.id] = Object.assign(readOne(s), { good: g.value }); };
+      /* 快捷数量：填满剩余 / 沿用上次 / +10 / +50（大幅减少现场输入） */
+      const setG = (val) => { g.value = Math.max(0, Math.floor(num(val))); S.vals[s.id] = Object.assign(readOne(s), { good: g.value }); };
+      const qb = (sel, fn) => { const b = $view.querySelector(sel); if (b) b.onclick = fn; };
+      qb('[data-fill="' + s.id + '"]', () => setG(num(s.qty_plan) - num(s.qty_good)));
+      qb('[data-l10="' + s.id + '"]', () => {
+        const last = lastOf(s.id);
+        if (!last || !last.good) return toast('本工序还没有历史报工记录');
+        setG(last.good);
+        if (last.min) { const w = $view.querySelector('#w' + s.id); if (w) { w.value = last.min; S.vals[s.id] = Object.assign(readOne(s), { good: g.value }); } }
+        toast('已沿用上次：' + last.good + (last.min ? ' 件 / ' + last.min + ' 小时' : ' 件'));
+      });
+      qb('[data-p10="' + s.id + '"]', () => setG(clamp(g.value) + 10));
+      qb('[data-p50="' + s.id + '"]', () => setG(clamp(g.value) + 50));
       renderBadRows(s.id);
     });
     bindBadRows();
@@ -714,6 +750,17 @@
     btn.disabled = true; btn.textContent = '提交中…';
     try {
       const r = await post('/api/app/reports', { order_id: S.order.id, steps, report_date: today(), remark: '' });
+      /* 记忆本次各工序数量/工时，下次进入该工单可「沿用上次」 */
+      try {
+        const mem = {};
+        try { Object.assign(mem, JSON.parse(localStorage.getItem(LAST_RPT_KEY) || '{}')); } catch (e) { /* 忽略 */ }
+        steps.forEach((x) => {
+          const st = S.steps.find((y) => y.id === x.order_step_id);
+          if (!st) return;
+          mem[st.id] = { good: num(x.qty_good), min: num(x.work_min) / 60, at: today() };
+        });
+        saveLast(mem);
+      } catch (e) { /* 忽略 */ }
       const auto = (r && r.steps || []).filter((x) => x.autoFinishIn);
       const autoQty = auto.reduce((a, x) => a + num(x.autoFinishIn.qty), 0);
       const need = (r && r.steps || []).filter((x) => x.needInspect).length;
@@ -920,6 +967,10 @@
             <div class="field" style="margin-bottom:10px"><span>不合格数</span>
               <input class="ipt qi-fail" type="number" inputmode="numeric" min="0" value="0"></div>
             ${cl.length ? `<div class="field" style="margin-bottom:10px"><span>检验项目${s.checklist_name ? '（' + esc(s.checklist_name) + '）' : ''}</span>
+              <div class="quick-row" style="margin-bottom:6px">
+                <button type="button" class="qk" data-cl-ok="${s.order_step_id}">✅ 全部合格（一键）</button>
+                <button type="button" class="qk" data-cl-clear="${s.order_step_id}">清空重选</button>
+              </div>
               ${cl.map((it, i) => `<div class="cl-item" data-ci="${i}" data-cname="${esc(it.name)}" style="display:flex;gap:8px;align-items:center;margin:4px 0">
                 <span style="flex:1">${esc(it.name)}${it.standard ? `<span class="t3" style="margin-left:4px">${esc(it.standard)}</span>` : ''}</span>
                 <select class="ipt qi-cres" style="width:84px"><option value="skip">未检</option><option value="ok">OK</option><option value="ng">NG</option></select>
@@ -961,6 +1012,24 @@
     $view.querySelectorAll('.qi-cres').forEach((sel) => sel.onchange = () => {
       const q = sel.closest('.cl-item').querySelector('.qi-cqty');
       if (q) q.hidden = sel.value !== 'ng';
+    });
+    /* 减负：检查表一键全合格 / 清空重选 */
+    $view.querySelectorAll('[data-cl-ok]').forEach((b) => b.onclick = () => {
+      const card = $view.querySelector('.insp[data-s="' + b.dataset.clOk + '"]');
+      if (!card) return;
+      card.querySelectorAll('.cl-item').forEach((ci) => {
+        const sel = ci.querySelector('.qi-cres');
+        if (sel) { sel.value = 'ok'; const q = ci.querySelector('.qi-cqty'); if (q) { q.hidden = true; q.value = ''; } }
+      });
+      toast('已全部标记合格，个别不合格项请单独改为 NG');
+    });
+    $view.querySelectorAll('[data-cl-clear]').forEach((b) => b.onclick = () => {
+      const card = $view.querySelector('.insp[data-s="' + b.dataset.clClear + '"]');
+      if (!card) return;
+      card.querySelectorAll('.cl-item').forEach((ci) => {
+        const sel = ci.querySelector('.qi-cres');
+        if (sel) { sel.value = 'skip'; const q = ci.querySelector('.qi-cqty'); if (q) { q.hidden = true; q.value = ''; } }
+      });
     });
     $view.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => submitInspect(b.dataset.judge, b.dataset.cc));
   }

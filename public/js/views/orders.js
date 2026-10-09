@@ -267,7 +267,8 @@ Views.orders = {
         <label class="field" style="grid-column:1/-1"><span>责任人<span class="muted" style="font-weight:normal">（质量异常时首推此人处理；可选技术员/质检员/管理员，不含操作工）</span></span>
           <select class="input" id="fOwner">${ownerOpts}</select></label>
       </div>
-      ${o ? '' : `<div class="small muted">工单号自动生成；保存后按工艺路线展开工序，可再派工到人和设备。</div>`}`;
+      ${o ? '' : `<div class="small muted" id="fSuggest" style="margin-top:8px;padding:8px 10px;border-radius:8px;background:#f6f8fa;line-height:1.6">正在按产品历史工单智能带出…</div>
+      <div class="small muted" style="margin-top:6px">工单号自动生成；保存后按工艺路线展开工序，可再派工到人和设备。</div>`}`;
 
     const m = UI.modal({
       title: id ? '编辑工单 ' + o.code : '新建工单',
@@ -281,8 +282,29 @@ Views.orders = {
             : '<option value="">该产品暂无工艺路线</option>';
           if (o && rs.some((r) => r.id == o.route_id)) mask.querySelector('#fRoute').value = o.route_id;
         };
-        mask.querySelector('#fProduct').onchange = syncRoutes;
+        // 选产品后智能带出：默认路线 / 历史常用客户 / 最近负责人与优先级 / 历史平均工期推算完工日（减少人工填写）
+        const hint = mask.querySelector('#fSuggest');
+        const applySuggest = async () => {
+          if (o) return; // 编辑态不动已有数据
+          const pid = mask.querySelector('#fProduct').value;
+          if (!pid) return;
+          try {
+            const s = await API.get('/orders/suggest?product_id=' + pid);
+            if (!s) return;
+            if (s.route_id && meta.routes.some((r) => String(r.id) === String(s.route_id))) mask.querySelector('#fRoute').value = String(s.route_id);
+            if (s.customer_id) mask.querySelector('#fCustomer').value = String(s.customer_id);
+            if (s.owner_user_id) mask.querySelector('#fOwner').value = String(s.owner_user_id);
+            if (s.priority) mask.querySelector('#fPrio').value = String(s.priority);
+            if (s.qty_hint) mask.querySelector('#fQty').value = String(s.qty_hint);
+            if (s.plan_end) { mask.querySelector('#fStart').value = UI.today(); mask.querySelector('#fEnd').value = s.plan_end; }
+            if (hint) hint.textContent = s.from_history
+              ? `已按上次同产品工单（${s.last_code}）带出路线/客户/负责人，计划完工日按历史平均 ${s.duration_days} 天推算 —— 如需调整可直接改。`
+              : '该产品暂无历史工单，已按默认路线与 1 天工期预填。';
+          } catch (e) { if (hint) hint.textContent = ''; }
+        };
+        mask.querySelector('#fProduct').onchange = () => { syncRoutes(); applySuggest(); };
         syncRoutes();
+        applySuggest();
         // 核算方式切换：计时才显示时薪输入
         const wtSel = mask.querySelector('#fWageType');
         const syncWage = () => { mask.querySelector('#fRateWrap').style.display = wtSel.value === 'time' ? '' : 'none'; };
@@ -324,6 +346,35 @@ Views.orders = {
   },
 
   /* ---------- 详情 ---------- */
+  /* 批量设置本工单各工序计件单价（0 = 跟随工序档案）——免去逐个去工序档案改价 */
+  stepPriceForm(o) {
+    const rows = o.steps.map((s) => `
+      <label class="field" style="margin-bottom:8px">
+        <span>第 ${s.seq_no || s.seq} 道 · ${UI.esc(s.process_name)} <span class="muted" style="font-weight:normal">（档案价 ${Number(s.proc_std_price) > 0 ? '¥' + UI.f2(s.proc_std_price) : '未维护'}）</span></span>
+        <input class="input sp-in" data-sid="${s.id}" type="number" min="0" step="0.01" value="${Number(s.std_price) || 0}">
+      </label>`).join('');
+    const m = UI.modal({
+      title: '批量设置计件工价 · ' + o.code,
+      body: `<div class="small muted" style="margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#f6f8fa;line-height:1.6">
+          一次性为本单每道工序定价：<b>填 0</b> 表示跟随工序档案单价，<b>填大于 0</b> 表示本工单专用（不改档案、不影响其他工单）。<br>
+          报工时按当时价格快照入账，之后调价不影响已产生的历史工资。</div>
+        ${rows}
+        <div class="row" style="gap:8px;margin-top:4px">
+          <button class="btn btn-sm btn-ghost" id="spFill" type="button">全部填为档案价</button>
+          <button class="btn btn-sm btn-ghost" id="spClear" type="button">全部清零（跟随档案）</button>
+        </div>`,
+      onOk: async (mask) => {
+        const prices = Array.from(mask.querySelectorAll('.sp-in')).map((e) => ({ order_step_id: Number(e.dataset.sid), std_price: Math.max(0, Number(e.value) || 0) }));
+        const r = await API.put('/orders/' + o.id + '/step_prices', { prices });
+        UI.toast(`已更新 ${r.updated || prices.length} 道工序工价`, 'ok');
+        this.render(document.getElementById('view'));
+      },
+    });
+    const fill = (v) => m.el.querySelectorAll('.sp-in').forEach((e, i) => { e.value = v === 'proc' ? (Number(o.steps[i].proc_std_price) || 0) : 0; });
+    m.el.querySelector('#spFill').onclick = () => fill('proc');
+    m.el.querySelector('#spClear').onclick = () => fill('zero');
+  },
+
   async detail(el, id) {
     const [o, meta, issues, matIssues, shipments] = await Promise.all([
       API.get('/orders/' + id),
@@ -396,6 +447,7 @@ Views.orders = {
       <div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序 · ${o.steps.filter((s) => String(s.inspect_type || '').trim()).length} 个检验点</span>
           <div class="spacer"></div>
+          ${canEdit && o.wage_type !== 'time' ? `<button class="btn btn-sm" id="batchPrice" title="一次性设置本工单各工序计件单价，免去逐个改工序档案">${UI.icon('edit')}批量设置工价</button>` : ''}
           ${canEdit && stepEditable ? `<button class="btn btn-sm btn-primary" id="addStep">${UI.icon('plus')}增加工序</button>` : ''}</div>
         <div class="card-b tight">
           ${UI.table([
@@ -417,6 +469,12 @@ Views.orders = {
                 ${UI.progress(UI.pct(r.qty_good, r.qty_plan), r.status === 'done' ? 'ok' : '')}
                 <span class="small mono">${UI.f1(UI.pct(r.qty_good, r.qty_plan))}%</span></div>` },
             { t: '状态', f: (r) => UI.badge(r.status) },
+            { t: '计件工价', align: 'right', f: (r) => {
+                if (o.wage_type === 'time') return '<span class="small muted">计时工单</span>';
+                const p = Number(r.std_price) || 0, proc = Number(r.proc_std_price) || 0;
+                if (p > 0) return `<b class="mono" style="color:var(--primary)">¥${UI.f2(p)}</b><div class="small muted">${proc > 0 && proc !== p ? '档案 ¥' + UI.f2(proc) : '本单专用'}</div>`;
+                return proc > 0 ? `<span class="mono">¥${UI.f2(proc)}</span><div class="small muted">档案价</div>` : '<span class="small muted">未维护</span>';
+              } },
             { t: '操作', align: 'right', f: (r) => `
                 <button class="btn btn-sm btn-ok" data-report="${r.id}" ${r.status === 'done' ? 'disabled' : ''}>报工</button>
                 ${canEdit ? `<button class="btn btn-sm" data-assign="${r.id}">指派班组</button>` : ''}
@@ -605,6 +663,8 @@ Views.orders = {
       });
     });
     const addStepBtn = el.querySelector('#addStep');
+    const batchPriceBtn = el.querySelector('#batchPrice');
+    if (batchPriceBtn) batchPriceBtn.onclick = () => this.stepPriceForm(o);
     if (addStepBtn) addStepBtn.onclick = () => {
       const teams = ((meta.teams && meta.teams.length ? meta.teams : (o.teams || [])).map((t) => (t && t.team) ? t.team : t));
       const posOpts = o.steps.map((s, i) => `<option value="${i + 1}">第 ${i + 1} 道 · ${UI.esc(s.process_name)}</option>`).join('')

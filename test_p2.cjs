@@ -221,6 +221,26 @@ async function api(method, url, body, token) {
     const phBad = await H('POST', '/api/reports/' + rid1 + '/photos', { name: 'x.txt', data: 'data:text/plain;base64,SGVsbG8=' });
     chk('非图片格式被拒', phBad.ok === false, JSON.stringify(phBad));
 
+    // ---------- 4.9 减少人工操作：工单智能建议 + 工单级工价批量设置 ----------
+    const sug = await H('GET', '/api/orders/suggest?product_id=' + route0.product_id);
+    chk('智能建议：带出路线+工期推算完工日', sug.ok && sug.data.route_id && /^\d{4}-\d{2}-\d{2}$/.test(sug.data.plan_end) && sug.data.duration_days >= 1, JSON.stringify(sug.data));
+    const spSteps = (await H('GET', '/api/orders/' + odId)).data.steps;
+    const sp = await H('PUT', '/api/orders/' + odId + '/step_prices', { prices: spSteps.map((s) => ({ order_step_id: s.id, std_price: 1.5 })) });
+    chk('批量设置工价成功（全部工序）', sp.ok && sp.data.updated === spSteps.length, JSON.stringify(sp));
+    const sp0 = (await H('GET', '/api/orders/' + odId)).data.steps[0];
+    chk('工序显示工单级工价并保留档案价', Math.abs(sp0.std_price - 1.5) < 0.001 && typeof sp0.proc_std_price === 'number', JSON.stringify({ p: sp0.std_price, proc: sp0.proc_std_price }));
+    const repSP = await H('POST', '/api/reports', { order_id: odId, order_step_id: spSteps[0].id, qty_good: 10, qty_bad: 0, work_min: 10 });
+    const repRid = ((repSP.data || {}).steps || [])[0];
+    const repRow = (await H('GET', '/api/orders/' + odId)).data.reports.find((x) => x.id === (repRid || {}).report_id);
+    chk('报工按工单级工价快照 1.5（10件=15元）', repRow && Math.abs(repRow.unit_price - 1.5) < 0.001 && Math.abs(repRow.amount - 15) < 0.01, JSON.stringify(repRow && { up: repRow.unit_price, amt: repRow.amount }));
+    await H('PUT', '/api/orders/' + odId + '/step_prices', { prices: spSteps.map((s) => ({ order_step_id: s.id, std_price: 0 })) });
+    const after0 = (await H('GET', '/api/orders/' + odId)).data.steps[0];
+    chk('清零后回退工序档案价', Math.abs(after0.std_price - after0.proc_std_price) < 0.001, JSON.stringify(after0));
+    const spBad = await H('PUT', '/api/orders/' + odId + '/step_prices', { prices: [] });
+    chk('空价格列表被拒', spBad.ok === false, JSON.stringify(spBad));
+    const spW = await api('PUT', '/api/orders/' + odId + '/step_prices', { prices: [{ order_step_id: odSteps2[0].id, std_price: 9 }] }, wTok);
+    chk('操作工改工价被拒 403', spW.ok === false, JSON.stringify(spW));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

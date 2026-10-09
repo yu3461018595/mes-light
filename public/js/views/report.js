@@ -109,7 +109,12 @@ Views.report = {
       </div>
 
       <div class="card">
-        <div class="card-h"><h3>报工录入</h3><span class="small muted">${UI.esc(pick.process_name)}</span></div>
+        <div class="card-h"><h3>报工录入</h3><span class="small muted">${UI.esc(pick.process_name)}</span>
+          <div class="spacer"></div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm btn-ghost" id="reuseLast" title="把本工序上一次报工的合格数与工时自动填入">沿用上次</button>
+            <button class="btn btn-sm btn-ghost" id="fillLeft" title="合格数直接填满剩余待产数量">填满剩余</button>
+          </div></div>
         <div class="card-b">
           <div class="grid g2">
             <div class="field">
@@ -191,6 +196,28 @@ Views.report = {
     g.addEventListener('input', paintWage);
     minInput.addEventListener('input', paintWage);
     bindQty();
+
+    /* 减负：沿用上次（同一工序最近一次报工的合格数/工时）、填满剩余（一次报完工） */
+    const lastRep = (o.reports || [])[0];
+    const reuseBtn = el.querySelector('#reuseLast');
+    if (reuseBtn) {
+      if (!lastRep) reuseBtn.disabled = true;
+      reuseBtn.onclick = () => {
+        const left = Math.max(0, pick.qty_plan - pick.qty_good);
+        const gq = Math.min(Number(lastRep.qty_good) || 0, left || Number(lastRep.qty_good));
+        g.value = gq;
+        const hrs = (Number(lastRep.work_min) || 0) / 60;
+        if (hrs > 0) minInput.value = Math.round(hrs * 100) / 100;
+        paintWage();
+        UI.toast(`已沿用上次（合格 ${UI.n2(gq)}${hrs > 0 ? '、工时 ' + UI.f1(hrs) + 'h' : ''}）`, 'ok');
+      };
+    }
+    const fillBtn = el.querySelector('#fillLeft');
+    if (fillBtn) {
+      const left0 = Math.max(0, pick.qty_plan - pick.qty_good);
+      if (!left0) fillBtn.disabled = true;
+      fillBtn.onclick = () => { g.value = left0; paintWage(); UI.toast(`已填满剩余 ${UI.n2(left0)} 件`, 'ok'); };
+    }
 
     // 不良明细：支持一道工序多种不良，填一种自动出现下一种
     const reasons = (o.badReasons && o.badReasons.length ? o.badReasons : this.meta.badReasons) || [];
