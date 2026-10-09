@@ -37,6 +37,7 @@ Views.orders = {
         <div class="row" style="gap:8px">
           <input class="input" id="kw" placeholder="搜索工单号 / 产品 / 客户" value="${UI.esc(s.keyword)}" style="width:210px">
           <button class="btn" id="schedBtn">🗓 排产看板</button>
+          ${App.canEdit() ? `<button class="btn" id="importBtn" title="用 CSV 一次性导入多张工单（可从 Excel 另存为 CSV）">📥 批量导入</button>` : ''}
           ${App.canEdit() ? `<button class="btn btn-primary" id="newOrder">${UI.icon('plus')}新建工单</button>` : ''}
         </div>
       </div>
@@ -50,6 +51,7 @@ Views.orders = {
       timer = setTimeout(() => this.loadList(el), 260);
     };
     if (el.querySelector('#newOrder')) el.querySelector('#newOrder').onclick = () => this.form();
+    if (el.querySelector('#importBtn')) el.querySelector('#importBtn').onclick = () => this.importForm();
     el.querySelector('#schedBtn').onclick = () => location.hash = '#/orders/schedule';
     await this.loadList(el);
   },
@@ -407,6 +409,162 @@ Views.orders = {
   },
 
   /* ---------- 详情 ---------- */
+  /* CSV 批量导入建单：粘贴或选择 CSV 文件（Excel 可另存为 CSV），逐行匹配产品/路线/客户后建单 */
+  importForm() {
+    const TEMPLATE = '产品编码,产品名称,数量,工艺路线编码,客户,优先级,计划开工,计划完工,备注\n'
+      + '（示例行，请删除后填写；产品编码或名称二选一必填，数量必填，客户须已存在）';
+    UI.modal({
+      title: '批量导入工单（CSV）',
+      size: 'lg',
+      body: `<div class="small muted" style="margin-bottom:8px;line-height:1.7">
+          列顺序（表头可省略）：<b>产品编码, 产品名称, 数量, 工艺路线编码, 客户, 优先级(1高/2中/3低), 计划开工, 计划完工, 备注</b><br>
+          · 从 Excel 另存为「CSV UTF-8」，或直接粘贴表格内容（支持逗号 / 制表符 / 空格分隔）。<br>
+          · 产品按<b>编码优先、名称兜底</b>匹配；路线留空取该产品第一条；客户留空则不关联（填了必须已存在）。<br>
+          · 建单后为「待下发」状态，按工艺路线自动展开工序 —— 导入后再统一下发即可。
+        </div>
+        <div class="row" style="gap:8px;margin-bottom:8px">
+          <button class="btn btn-sm" id="imTpl" type="button">⬇ 下载模板 CSV</button>
+          <button class="btn btn-sm" id="imFile" type="button">📂 选择 CSV 文件</button>
+          <input type="file" id="imFileInput" accept=".csv,text/csv,text/plain" hidden>
+          <span class="small muted" id="imCount">尚未读取内容</span>
+        </div>
+        <label class="field"><span>CSV 内容</span>
+          <textarea class="input" id="imText" rows="8" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px" placeholder="粘贴 CSV 文本，或点上方按钮选择文件"></textarea></label>`,
+      footer: '<button class="btn btn-ghost" data-close>取消</button>',
+      onOk: async (mask) => {
+        const raw = (mask.querySelector('#imText').value || '').trim();
+        if (!raw) throw new Error('请先粘贴 CSV 内容或选择文件');
+        const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        // 跳过表头（含"产品编码"或英文列名）
+        const start = /产品编码|product_code|产品名称/i.test(lines[0] || '') ? 1 : 0;
+        const rows = [];
+        for (let i = start; i < lines.length; i++) {
+          const cells = lines[i].split(/\t|,|;|\s{2,}/).map((c) => c.trim().replace(/^"|"$/g, ''));
+          if (!cells[0] && !cells[1]) continue;
+          rows.push({
+            product_code: cells[0] || '', product_name: cells[1] || '', qty: cells[2] || '',
+            route_code: cells[3] || '', customer: cells[4] || '', priority: cells[5] || '',
+            plan_start: cells[6] || '', plan_end: cells[7] || '', remark: cells.slice(8).join(' '),
+          });
+        }
+        if (!rows.length) throw new Error('未解析到有效数据行');
+        if (!(await UI.confirm(`即将导入 ${rows.length} 行、创建 ${rows.length} 张工单（待下发）。确认继续？`))) return;
+        const r = await API.post('/orders/import', { rows });
+        const okN = (r && r.ok_count) || 0;
+        const created = (r && r.created) || [];
+        const failed = (r && r.failed) || [];
+        UI.modal({
+          title: `导入完成：成功 ${okN} 单${failed.length ? '，失败 ' + failed.length + ' 行' : ''}`,
+          size: 'lg',
+          body: (created.length ? `<div class="small muted" style="margin-bottom:6px">成功清单：</div>${UI.table([
+            { t: '行', f: (x) => `<span class="mono">${x.line}</span>` },
+            { t: '工单号', f: (x) => `<b>${UI.esc(x.code)}</b>` },
+            { t: '产品', f: (x) => UI.esc(x.product || '') },
+            { t: '数量', align: 'right', f: (x) => `<span class="mono">${UI.n2(x.qty)}</span>` },
+          ], created)}` : '') + (failed.length ? `<div class="small muted" style="margin:${created.length ? '14px' : '0'} 0 6px">失败明细：</div>${UI.table([
+            { t: '行', f: (x) => `<span class="mono">${x.line}</span>` },
+            { t: '原因', f: (x) => `<span style="color:var(--danger)">${UI.esc(x.msg)}</span>` },
+          ], failed)}` : ''),
+          footer: '<button class="btn" data-close>知道了</button>',
+        });
+        this.render(document.getElementById('view'));
+      },
+      onMount: (mask) => {
+        const ta = mask.querySelector('#imText');
+        const cnt = mask.querySelector('#imCount');
+        const upd = () => {
+          const n = ta.value.split(/\r?\n/).filter((l) => l.trim()).length;
+          cnt.textContent = n ? `已读入 ${n} 行` : '尚未读取内容';
+        };
+        ta.addEventListener('input', upd);
+        mask.querySelector('#imTpl').onclick = () => {
+          const blob = new Blob(['\ufeff' + TEMPLATE], { type: 'text/csv;charset=utf-8' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = '工单导入模板.csv';
+          a.click();
+        };
+        const fi = mask.querySelector('#imFileInput');
+        mask.querySelector('#imFile').onclick = () => fi.click();
+        fi.onchange = (e) => {
+          const f = e.target.files && e.target.files[0];
+          if (!f) return;
+          const fr = new FileReader();
+          fr.onload = () => { ta.value = String(fr.result || '').replace(/^\ufeff/, ''); upd(); };
+          fr.readAsText(f, 'utf-8');
+        };
+      },
+    });
+  },
+
+  /* 打印工单流转卡：在独立容器渲染后调 window.print（@media print 只输出该容器） */
+  printCard(o) {
+    const prev = document.getElementById('printArea');
+    if (prev) prev.remove();
+    const area = document.createElement('div');
+    area.id = 'printArea';
+    const STATUS = { created: '待下发', released: '已下发', running: '生产中', paused: '已暂停', done: '已完成', closed: '已关闭' };
+    const INSPECT = { iqc: '首检 IQC', ipqc: '过程检 IPQC', fqc: '终检 FQC' };
+    const teams = (o.teams || []).map((t) => (t && t.team) ? t.team : t).filter(Boolean);
+    area.innerHTML = `
+      <div class="pc-head">
+        <div>
+          <h1>${UI.esc(o.code)} · 工单流转卡</h1>
+          <div class="pc-sub">${UI.esc(o.product_name || '')}${o.spec ? ' · ' + UI.esc(o.spec) : ''} · 计划 ${UI.n2(o.qty_plan)} ${UI.esc(o.unit || '件')}</div>
+        </div>
+        <div class="pc-qr" id="pcQr"></div>
+      </div>
+      <table class="pc-meta">
+        <tr><th>客户</th><td>${UI.esc(o.customer_name || '—')}</td><th>优先级</th><td>${({ 1: '高', 2: '中', 3: '低' })[o.priority] || o.priority}</td><th>状态</th><td>${STATUS[o.status] || o.status}</td></tr>
+        <tr><th>计划开工</th><td>${UI.esc(o.plan_start || '')}</td><th>计划完工</th><td>${UI.esc(o.plan_end || '')}</td><th>负责人</th><td>${UI.esc(o.owner_name || '未指定')}</td></tr>
+        <tr><th>核算方式</th><td>${o.wage_type === 'time' ? `计时 ¥${UI.f2(o.hourly_rate || 0)}/小时` : '计件（按工序单价）'}</td><th>已完工</th><td>${UI.n2(o.qty_done || 0)} 件</td><th>不良合计</th><td>${UI.n2(o.qty_bad || 0)} 件</td></tr>
+      </table>
+      <h3>工序清单（共 ${o.steps.length} 道）</h3>
+      <table class="pc-tb">
+        <thead><tr><th>序</th><th>工序</th><th>工作中心</th><th>检验</th><th>指派班组</th><th>计划数</th><th>合格</th><th>不良</th><th>工价</th><th>状态</th><th>签收</th></tr></thead>
+        <tbody>${o.steps.map((s) => `<tr>
+          <td>${s.seq_no || s.seq}</td>
+          <td><b>${UI.esc(s.process_name || '')}</b><br><span class="pc-muted">${UI.esc(s.process_code || '')}</span></td>
+          <td>${UI.esc(s.wc_name || '—')}</td>
+          <td>${s.inspect_type ? (INSPECT[s.inspect_type] || s.inspect_type) : '—'}</td>
+          <td>${UI.esc(s.assignee_team || '—')}</td>
+          <td>${UI.n2(s.qty_plan)}</td>
+          <td>${UI.n2(s.qty_good)}</td>
+          <td>${s.qty_bad ? UI.n2(s.qty_bad) : '0'}</td>
+          <td>${Number(s.std_price) > 0 ? '¥' + UI.f2(s.std_price) : '—'}</td>
+          <td>${{ pending: '待生产', running: '生产中', done: '已完成' }[s.status] || s.status}</td>
+          <td class="pc-sign"></td>
+        </tr>`).join('')}</tbody>
+      </table>
+      <h3>报工记录（最近 12 条）</h3>
+      ${(o.reports || []).length ? `<table class="pc-tb">
+        <thead><tr><th>时间</th><th>工序</th><th>报工人</th><th>合格</th><th>不良</th><th>工时</th><th>工资</th></tr></thead>
+        <tbody>${o.reports.slice(0, 12).map((r) => `<tr>
+          <td>${UI.esc(String(r.created_at).slice(5, 16))}</td><td>${UI.esc(r.process_name || '—')}</td>
+          <td>${UI.esc(r.worker_name || '—')}</td><td>${UI.n2(r.qty_good)}</td><td>${UI.n2(r.qty_bad)}</td>
+          <td>${UI.f1((r.work_min || 0) / 60)} h</td><td>${Number(r.amount) > 0 ? '¥' + UI.f2(r.amount) : '—'}</td>
+        </tr>`).join('')}</tbody></table>` : '<div class="pc-muted">暂无报工记录</div>'}
+      <div class="pc-foot">
+        <div>打印时间：${new Date().toLocaleString('zh-CN')} · 扫码可打开报工页 · 本卡随工单流转，工序签收请签字</div>
+        ${teams.length ? '<div>可用班组：' + UI.esc(teams.join(' / ')) + '</div>' : ''}
+      </div>`;
+    document.body.appendChild(area);
+    // 二维码（复用 /lib/qrcode.js）
+    const qrBox = area.querySelector('#pcQr');
+    if (qrBox && window.QRCode) {
+      API.get('/qr/order/' + o.id).then((d) => {
+        if (!d || !d.url) return;
+        try {
+          qrBox.innerHTML = '<div class="pc-qr-label">扫码报工</div>';
+          new window.QRCode(qrBox, { text: d.url, width: 84, height: 84 });
+        } catch (e) { /* 二维码失败不影响打印 */ }
+      }).catch(() => {});
+    }
+    setTimeout(() => { try { window.print(); } catch (e) { /* 忽略 */ } }, 320);
+    const cleanup = () => { area.remove(); window.removeEventListener('afterprint', cleanup); };
+    window.addEventListener('afterprint', cleanup);
+  },
+
   /* 批量设置本工单各工序计件单价（0 = 跟随工序档案）——免去逐个去工序档案改价 */
   stepPriceForm(o) {
     const rows = o.steps.map((s) => `
@@ -466,6 +624,7 @@ Views.orders = {
       <div class="row" style="margin-bottom:12px">
         <button class="btn btn-sm" id="back">${UI.icon('back')}返回列表</button>
         <button class="btn btn-sm" id="kitBtn">📦 齐套检查</button>
+        <button class="btn btn-sm" id="printBtn" title="打印工单流转卡（含工序清单与报工记录，可贴在车间）">🖨 流转卡</button>
         <div class="spacer"></div>
         ${canEdit ? actions.map((a) => `<button class="btn ${a[2]}" data-status="${a[0]}">${a[1]}</button>`).join('') : ''}
         ${canEdit ? `<button class="btn btn-sm" id="qrOrder">${UI.icon('scan')}报工二维码</button>` : ''}
@@ -615,6 +774,8 @@ Views.orders = {
       </div>`;
 
     el.querySelector('#back').onclick = () => location.hash = '#/orders';
+    const printBtn = el.querySelector('#printBtn');
+    if (printBtn) printBtn.onclick = () => this.printCard(o);
     el.querySelectorAll('[data-qi]').forEach((b) => b.onclick = () => location.hash = '#/quality/issue/' + b.dataset.qi);
     const nqi = el.querySelector('#newQI');
     if (nqi) nqi.onclick = () => Views.quality.newIssueForm();

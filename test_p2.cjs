@@ -271,6 +271,35 @@ async function api(method, url, body, token) {
     chk('待检超时阈值可配置（90 分钟）', qget.ok && qget.data.inspect_timeout_minutes === 90, JSON.stringify(qget.data));
     await H('POST', '/api/quality/settings', { inspect_timeout_minutes: 120 });
 
+    // ---------- 4.11 对标补齐：CSV 批量导入工单 + 销售订单批量转工单 ----------
+    const prod0 = (await H('GET', '/api/products')).data[0];
+    const cust0 = (await H('GET', '/api/customers')).data[0];
+    const imp = await H('POST', '/api/orders/import', { rows: [
+      { product_code: prod0.code, product_name: prod0.name, qty: 66, customer: cust0 ? cust0.name : '', priority: 1, remark: 'CSV导入A' },
+      { product_code: 'NOPE-XXX', qty: 10 },
+      { product_code: prod0.code, qty: 0 },
+    ] });
+    chk('CSV 批量导入：1 成 2 败并回传行号原因', imp.ok && imp.data.ok_count === 1 && imp.data.failed.length === 2
+      && imp.data.failed[0].line === 2 && /产品档案不存在/.test(imp.data.failed[0].msg) && /数量/.test(imp.data.failed[1].msg), JSON.stringify(imp.data));
+    const impOrder = imp.data.created[0];
+    const impFull = await H('GET', '/api/orders/' + impOrder.order_id);
+    chk('导入工单按工艺路线展开工序', impFull.ok && impFull.data.steps.length > 0 && /CSV导入A/.test(impFull.data.remark), JSON.stringify(impFull.data && impFull.data.code));
+    const impW = await api('POST', '/api/orders/import', { rows: [{ product_code: prod0.code, qty: 1 }] }, wTok);
+    chk('操作工批量导入被拒 403', impW.ok === false, JSON.stringify(impW));
+    const impEmpty = await H('POST', '/api/orders/import', { rows: [] });
+    chk('空数据导入被拒', impEmpty.ok === false, JSON.stringify(impEmpty));
+    const so1b = await H('POST', '/api/sales_orders', { product_id: prod0.id, qty: 5, customer_name: '批量转单客户' });
+    const so2b = await H('POST', '/api/sales_orders', { product_id: prod0.id, qty: 6, customer_name: '批量转单客户' });
+    const cbatch = await H('POST', '/api/sales_orders/convert_batch', { ids: [so1b.data.id, so2b.data.id] });
+    chk('销售订单批量转工单 2 单成功', cbatch.ok && cbatch.data.ok_count === 2 && cbatch.data.failed.length === 0
+      && cbatch.data.done.every((x) => /^WO/.test(x.order_code)), JSON.stringify(cbatch.data));
+    const cbatch2 = await H('POST', '/api/sales_orders/convert_batch', { ids: [so1b.data.id] });
+    chk('重复批量转为幂等（返回已有工单）', cbatch2.ok && cbatch2.data.ok_count === 1 && cbatch2.data.done[0].existed === true, JSON.stringify(cbatch2.data));
+    const cbatchBad = await H('POST', '/api/sales_orders/convert_batch', { ids: [] });
+    chk('空勾选批量转单被拒', cbatchBad.ok === false, JSON.stringify(cbatchBad));
+    const cbatchW = await api('POST', '/api/sales_orders/convert_batch', { ids: [so2b.data.id] }, wTok);
+    chk('操作工批量转单被拒 403', cbatchW.ok === false, JSON.stringify(cbatchW));
+
     // ---------- 5. 出货核销（sale_ref 联动） ----------
     await H('POST', '/api/materials/import_products', {});
     const mats = (await H('GET', '/api/materials')).data;

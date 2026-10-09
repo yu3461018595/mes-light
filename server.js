@@ -3607,6 +3607,90 @@ route('DELETE', '/api/sales_orders/(\\d+)', ['admin'], (req, res, m, _b, u) => {
   ok(res, true);
 });
 
+// 批量转工单：一次把多张销售订单转成生产工单，逐单返回成功/失败明细
+// （与单张 convert 同一套规则：数量取销售数量、客户/交期带入、已转过则幂等返回）
+route('POST', '/api/sales_orders/convert_batch', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const ids = (Array.isArray(b.ids) ? b.ids : []).map((x) => num(x)).filter((x) => x > 0).slice(0, 100);
+  if (!ids.length) return fail(res, '请先勾选要转工单的销售订单');
+  const done = [], failed = [];
+  for (const id of ids) {
+    const s = get('SELECT * FROM sales_orders WHERE id=?', [id]);
+    if (!s) { failed.push({ id, code: '#' + id, msg: '订单不存在' }); continue; }
+    if (s.status === 'cancelled') { failed.push({ id, code: s.code, msg: '已取消的订单不能转工单' }); continue; }
+    if (s.produced_order_id) {
+      const ex = get('SELECT id, code FROM orders WHERE id=?', [s.produced_order_id]);
+      if (ex) { done.push({ id, code: s.code, order_code: ex.code, existed: true }); continue; }
+    }
+    if (!s.product_id) { failed.push({ id, code: s.code, msg: '未关联产品档案，无法转工单' }); continue; }
+    const route0 = get('SELECT id FROM routes WHERE product_id=? ORDER BY id LIMIT 1', [s.product_id]);
+    if (!route0) { failed.push({ id, code: s.code, msg: '该产品还没有工艺路线' }); continue; }
+    try {
+      const qty = Math.max(1, Math.floor(num(s.qty, 1)));
+      const code = 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
+      const oid = tx(() => {
+        const oid2 = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [code, s.product_id, route0.id, s.customer_id, qty, num(b.priority, 2),
+            b.plan_start || today(), b.plan_end || s.delivery_date || today(), 'created',
+            '销售订单 ' + s.code + (s.customer_name ? '（' + s.customer_name + '）' : ''), u.id, now()]);
+        all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [route0.id]).forEach((st) => {
+          insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
+            [oid2, st.seq, st.process_id, st.work_center_id, qty, 'pending', String(st.inspect_type || '')]);
+        });
+        run('UPDATE sales_orders SET produced_order_id=? WHERE id=?', [oid2, s.id]);
+        return oid2;
+      });
+      writeLog(u, '批量转工单', s.code + ' → ' + code);
+      done.push({ id, code: s.code, order_code: code, order_id: oid, existed: false });
+    } catch (e) { failed.push({ id, code: s.code, msg: e.message || '转换失败' }); }
+  }
+  writeLog(u, '批量转工单汇总', `成功 ${done.length} 单，失败 ${failed.length} 单`);
+  ok(res, { ok_count: done.length, done, failed });
+});
+
+/* CSV 批量导入建单（对标黑湖「Excel 批量导入」）：逐行匹配产品/路线/客户后建单，返回成功与失败明细
+ * 列（表头可省略，按顺序）：产品编码 产品名称 数量 工艺路线编码 客户 优先级 计划开工 计划完工 备注 */
+route('POST', '/api/orders/import', ['admin', 'technician'], (req, res, _m, b, u) => {
+  const rows = Array.isArray(b.rows) ? b.rows.slice(0, 300) : [];
+  if (!rows.length) return fail(res, '没有可导入的数据行');
+  const created = [], failed = [];
+  rows.forEach((r, i) => {
+    const line = i + 1;
+    try {
+      const pCode = String(r.product_code || '').trim();
+      const pName = String(r.product_name || '').trim();
+      const prod = (pCode ? get('SELECT * FROM products WHERE code=?', [pCode]) : null)
+        || (pName ? get('SELECT * FROM products WHERE name=? ORDER BY id LIMIT 1', [pName]) : null);
+      if (!prod) { failed.push({ line, msg: (pCode || pName || '?') + '：产品档案不存在' }); return; }
+      const rCode = String(r.route_code || '').trim();
+      const route0 = (rCode ? get('SELECT * FROM routes WHERE code=? AND product_id=?', [rCode, prod.id]) : null)
+        || get('SELECT id FROM routes WHERE product_id=? ORDER BY id LIMIT 1', [prod.id]);
+      if (!route0) { failed.push({ line, msg: prod.name + '：没有工艺路线，请先在基础数据建立' }); return; }
+      const qty = Math.floor(num(r.qty, 0));
+      if (!(qty > 0)) { failed.push({ line, msg: prod.name + '：数量必须大于 0' }); return; }
+      const cName = String(r.customer || '').trim();
+      const cust = cName ? get('SELECT id FROM customers WHERE name=? ORDER BY id LIMIT 1', [cName]) : null;
+      if (cName && !cust) { failed.push({ line, msg: cName + '：客户档案不存在（可先在基础数据建立，或留空该列）' }); return; }
+      const code = 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
+      const oid = tx(() => {
+        const oid2 = insert(`INSERT INTO orders(code,product_id,route_id,customer_id,qty_plan,priority,plan_start,plan_end,status,remark,created_by,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [code, prod.id, route0.id, cust ? cust.id : null, qty, Math.min(3, Math.max(1, num(r.priority, 2))),
+            String(r.plan_start || '').trim() || today(), String(r.plan_end || '').trim() || today(), 'created',
+            String(r.remark || '').trim() + (String(r.remark || '').trim() ? ' · ' : '') + '批量导入', u.id, now()]);
+        all('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', [route0.id]).forEach((st) => {
+          insert('INSERT INTO order_steps(order_id,seq,process_id,work_center_id,qty_plan,status,inspect_type) VALUES(?,?,?,?,?,?,?)',
+            [oid2, st.seq, st.process_id, st.work_center_id, qty, 'pending', String(st.inspect_type || '')]);
+        });
+        return oid2;
+      });
+      created.push({ line, code, order_id: oid, product: prod.name, qty });
+    } catch (e) { failed.push({ line, msg: e.message || '导入失败' }); }
+  });
+  if (created.length) writeLog(u, '批量导入工单', `成功 ${created.length} 单，失败 ${failed.length} 单`);
+  ok(res, { ok_count: created.length, created, failed });
+});
+
 // 一键转生产工单：数量默认取销售数量（可改），客户/交期带入；重复点击幂等返回已生成的工单
 route('POST', '/api/sales_orders/(\\d+)/convert', ['admin', 'technician'], (req, res, m, b, u) => {
   const s = get('SELECT * FROM sales_orders WHERE id=?', [m[1]]);

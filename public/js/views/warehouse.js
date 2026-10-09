@@ -955,6 +955,59 @@ Views.warehouse = {
         } } : null,
     ].filter(Boolean), list, { emptyText: '暂无销售订单，点击右上角「新增订单」开始接单' });
     tb.querySelectorAll('[data-go]').forEach((a) => a.onclick = () => location.hash = '#/orders/' + a.dataset.go);
+    /* 销售订单批量转工单（对标黑湖批量开工/结案）：勾选后一次转多单 */
+    if (canEdit) {
+      const cols = tb.querySelectorAll('table thead th');
+      if (cols.length) cols[0].innerHTML = '<input type="checkbox" id="soAll" title="全选本页">';
+      tb.querySelectorAll('table tbody tr').forEach((tr, i) => {
+        const sid = list[i] && list[i].id;
+        if (!sid) return;
+        tr.insertAdjacentHTML('afterbegin', `<td style="width:36px"><input type="checkbox" data-so="${sid}"></td>`);
+      });
+      const bar = document.createElement('div');
+      bar.id = 'soBatch';
+      bar.style.cssText = 'display:none;gap:8px;margin:0 0 10px;flex-wrap:wrap;align-items:center';
+      bar.innerHTML = `<span class="small muted">已选 <b id="soSelN">0</b> 张订单</span>
+        <button class="btn btn-sm btn-primary" data-sov="batch">批量转工单</button>
+        <button class="btn btn-sm btn-ghost" data-sov="clear">清空选择</button>`;
+      tb.parentNode.insertBefore(bar, tb);
+      const boxes = () => Array.from(tb.querySelectorAll('[data-so]'));
+      const paintBar = () => {
+        const n = boxes().filter((c) => c.checked).length;
+        bar.style.display = n ? 'flex' : 'none';
+        const lbl = bar.querySelector('#soSelN');
+        if (lbl) lbl.textContent = String(n);
+      };
+      boxes().forEach((c) => c.onchange = () => {
+        const allBox = tb.querySelector('#soAll');
+        if (allBox) allBox.checked = boxes().every((x) => x.checked);
+        paintBar();
+      });
+      const allBox = tb.querySelector('#soAll');
+      if (allBox) allBox.onchange = () => { boxes().forEach((c) => { c.checked = allBox.checked; }); paintBar(); };
+      bar.querySelectorAll('[data-sov]').forEach((bt) => bt.onclick = async () => {
+        const ids = boxes().filter((c) => c.checked).map((c) => Number(c.dataset.so));
+        if (!ids.length) return;
+        if (bt.dataset.sov === 'clear') { boxes().forEach((c) => { c.checked = false; }); if (allBox) allBox.checked = false; return paintBar(); }
+        if (!(await UI.confirm(`确认把 ${ids.length} 张销售订单转成生产工单？（客户与交期自动带入，可稍后在工单中调整）`))) return;
+        try {
+          const r = await API.post('/sales_orders/convert_batch', { ids });
+          const okN = (r && r.ok_count) || 0;
+          const failed = (r && r.failed) || [];
+          if (failed.length) {
+            UI.modal({
+              title: `批量转工单完成：成功 ${okN} 单，失败 ${failed.length} 单`, size: 'lg',
+              body: UI.table([
+                { t: '销售单', f: (x) => `<b>${UI.esc(x.code)}</b>` },
+                { t: '原因', f: (x) => `<span style="color:var(--danger)">${UI.esc(x.msg)}</span>` },
+              ], failed) + `<div class="small muted" style="margin-top:10px">已成功生成 ${okN} 张工单，可在「生产管理 → 工单管理」查看并下发。</div>`,
+              footer: '<button class="btn" data-close>知道了</button>',
+            });
+          } else UI.toast(`已生成 ${okN} 张生产工单`, 'ok');
+          this.render(el);
+        } catch (e) { UI.toast(e.message, 'err'); }
+      });
+    }
     tb.querySelectorAll('[data-conv]').forEach((b) => b.onclick = async () => {
       try {
         const r = await API.post('/sales_orders/' + b.dataset.conv + '/convert', {});
