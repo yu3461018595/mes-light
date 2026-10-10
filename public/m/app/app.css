@@ -288,3 +288,12 @@ body.big-font .switch{transform:scale(1.15)}
 .switch span::before{content:"";position:absolute;left:3px;top:3px;width:22px;height:22px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .switch input:checked + span{background:#1d4ed8}
 .switch input:checked + span::before{transform:translateX(22px)}
+
+/* ---------------- APP 自更新（2026-10-10） ---------------- */
+/* 下载进度条：现场网络差，需要一眼看出还剩多少、是不是卡住了 */
+.pbar{height:8px;background:var(--line);border-radius:8px;overflow:hidden;margin-top:6px}
+.pbar i{display:block;height:100%;background:var(--blue);border-radius:8px;transition:width .25s}
+/* 更新说明：多行文本，左侧竖线区分于正文 */
+.clog{font-size:13px;line-height:1.7;color:var(--ink-2);background:var(--bg);border-left:3px solid var(--blue-2);border-radius:0 8px 8px 0;padding:10px 12px}
+body.big-font .pbar{height:11px}
+body.big-font .clog{font-size:15px}

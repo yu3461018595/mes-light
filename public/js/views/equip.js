@@ -401,9 +401,12 @@ Views.equip = {
       </div>
       <label class="field"><span>点检说明 / 异常描述</span><input class="input" data-k="note" placeholder="如：主轴异响、漏油、导轨磨损"></label>
       <label class="field"><span>现场拍照（选填，最多 3 张）</span>
-        <input type="file" data-k="photos" accept="image/*" capture="environment" multiple hidden>
+        <!-- 拍照与上传拆开（2026-10-10）：合并时移动端只会拉起图库，无法直接调用摄像头 -->
+        <input type="file" data-k="shot" accept="image/*" capture="environment" hidden>
+        <input type="file" data-k="photos" accept="image/*" multiple hidden>
         <div class="row" style="gap:8px;align-items:flex-start;flex-wrap:wrap">
-          <button class="btn btn-sm btn-ghost" type="button" id="eqPhoto">📷 拍照 / 上传</button>
+          <button class="btn btn-sm btn-ghost" type="button" id="eqShot">📷 拍照</button>
+          <button class="btn btn-sm btn-ghost" type="button" id="eqPhoto">🖼 从相册选</button>
           <div id="eqPhotos" class="row" style="gap:6px;flex-wrap:wrap"></div>
         </div>
         <span class="small muted">异常点检建议附照片，便于后续维修判断与责任认定。</span></label>
@@ -439,8 +442,11 @@ Views.equip = {
       box.querySelectorAll('[data-eqpi]').forEach((b) => b.onclick = () => { this.eqPhotos.splice(Number(b.dataset.eqpi), 1); paintEqPhotos(); });
     };
     const fileInput = m.el.querySelector('input[data-k="photos"]');
+    const shotInput = m.el.querySelector('input[data-k="shot"]');
+    m.el.querySelector('#eqShot').onclick = () => shotInput.click();
     m.el.querySelector('#eqPhoto').onclick = () => fileInput.click();
-    fileInput.onchange = async (e) => {
+    // 拍照与相册共用处理逻辑
+    const onEqFiles = async (e) => {
       for (const f of Array.from(e.target.files || [])) {
         if (this.eqPhotos.length >= 3) { UI.toast('最多 3 张照片', 'err'); break; }
         try {
@@ -451,6 +457,8 @@ Views.equip = {
       e.target.value = '';
       paintEqPhotos();
     };
+    shotInput.onchange = onEqFiles;
+    fileInput.onchange = onEqFiles;
     paintEqPhotos();
   },
 

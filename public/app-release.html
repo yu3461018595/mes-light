@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智工MES · APP 版本发布</title>
+<style>
+  :root{--brand:#2f6fed;--brand-d:#1f56c4;--bg:#f5f7fb;--card:#fff;--text:#1f2430;--muted:#6b7280;--line:#e6e9f0;--red:#d93b3b;--green:#0f9d58}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+  .wrap{max-width:880px;margin:0 auto;padding:24px 18px 50px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 4px 16px rgba(20,30,60,.04)}
+  h2{font-size:15px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  label{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
+  input,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;font-family:inherit;color:var(--text)}
+  input:focus,textarea:focus{outline:2px solid rgba(47,111,237,.25);border-color:var(--brand)}
+  textarea{min-height:90px;resize:vertical}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:14px;color:var(--text)}
+  .chk input{width:18px;height:18px;accent-color:var(--brand)}
+  .btn{display:inline-block;background:var(--brand);color:#fff;border:none;font-size:15px;font-weight:600;padding:11px 22px;border-radius:10px;cursor:pointer;box-shadow:0 4px 12px rgba(47,111,237,.28)}
+  .btn:active{background:var(--brand-d)}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+  .btn.ghost{background:#fff;color:var(--brand);border:1px solid var(--line);box-shadow:none;font-weight:500}
+  .btn.sm{padding:6px 12px;font-size:13px;font-weight:500}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:10px 8px;text-align:left;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  .tag{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .tag.on{background:rgba(15,157,88,.12);color:var(--green)}
+  .tag.force{background:rgba(217,59,59,.12);color:var(--red)}
+  .tag.old{background:#f1f3f7;color:var(--muted)}
+  .hint{background:#fff8e6;border:1px solid #ffe2a8;color:#8a6d1f;border-radius:10px;padding:12px;font-size:13px;margin:12px 0 0}
+  .msg{position:fixed;left:50%;transform:translateX(-50%);top:18px;padding:11px 22px;border-radius:10px;font-size:14px;z-index:99;display:none;box-shadow:0 6px 20px rgba(0,0,0,.14)}
+  .msg.ok{background:#e8f7ee;color:var(--green);display:block}
+  .msg.err{background:#fdecec;color:var(--red);display:block}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:26px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>APP 版本发布</h1>
+  <p class="sub">上传新 APK 后，手机端「我的 → 检查更新」即可一键下载安装，无需再让工人手动扫码侧载。</p>
+
+  <div class="card">
+    <h2>发布新版本</h2>
+    <div class="grid2">
+      <div><label>版本号 code（整数，逐次递增）</label><input id="code" type="number" min="1" step="1" placeholder="如 2"></div>
+      <div><label>版本名称</label><input id="name" placeholder="如 v1.1"></div>
+    </div>
+    <label>安装包 APK（必填；请先在电脑上构建出 apk 文件）</label>
+    <input id="apk" type="file" accept=".apk,application/vnd.android.package-archive">
+    <label>更新说明（会显示在手机更新弹窗里）</label>
+    <textarea id="log" placeholder="例如：&#10;1. 现场拍照可直接调起摄像头&#10;2. 新增检验不良标记"></textarea>
+    <div class="grid2">
+      <div><label>最低兼容 code（可选，低于此值强制升级）</label><input id="minCode" type="number" min="1" step="1" placeholder="留空表示不设"></div>
+      <div></div>
+    </div>
+    <label class="chk"><input id="force" type="checkbox"> 设为强制更新（手机端不允许「稍后再说」）</label>
+    <div style="margin-top:16px"><button class="btn" id="pub">发布</button></div>
+    <div class="hint">发布新版本会自动把上一版取消「当前发布版」。旧 APK 文件不会自动删除，磁盘紧张时请到服务器 <code>data/uploads/apk/</code> 手工清理。</div>
+  </div>
+
+  <div class="card">
+    <h2>版本记录</h2>
+    <div id="list"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<div class="msg" id="msg"></div>
+
+<script>
+'use strict';
+/* 版本发布页（2026-10-10）
+ * 独立 HTML 而非主应用内视图：发布属于低频管理动作，且需要 base64 读取大文件，
+ * 放在独立页可以避免影响主应用启动速度，也便于管理员单独分享链接。
+ * 鉴权复用主应用写入的 mes_token（同一域localStorage 共享）。 */
+const $ = (s) => document.querySelector(s);
+const TOKEN_KEY = 'mes_token';
+function toast(msg, ok) {
+  const m = $('#msg');
+  m.textContent = msg;
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { m.className = 'msg'; }, 3200);
+}
+async function api(method, url, body) {
+  const token = localStorage.getItem(TOKEN_KEY) || '';
+  const res = await fetch('/api' + url, {
+    method,
+    headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data;
+  try { data = await res.json(); } catch (e) { throw new Error('服务返回异常'); }
+  if (res.status === 401) throw new Error('登录已过期，请从主应用重新登录后再打开本页');
+  if (!data.ok) throw new Error(data.msg || '操作失败');
+  return data.data;
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function load() {
+  const box = $('#list');
+  try {
+    const r = await api('GET', '/app/versions');
+    const rows = r.versions || [];
+    if (!rows.length) { box.innerHTML = '<div class="empty">还没有发布过版本</div>'; return; }
+    box.innerHTML = `<table><thead><tr>
+        <th>版本</th><th>code</th><th>大小</th><th>类型</th><th>发布时间</th><th>发布人</th><th>操作</th>
+      </tr></thead><tbody>${rows.map((v) => `<tr>
+        <td><b>${esc(v.version_name)}</b>${v.is_current ? ' <span class="tag on">当前发布</span>' : ' <span class="tag old">历史</span>'}</td>
+        <td>${v.version_code}</td>
+        <td>${v.apk_size ? (v.apk_size / 1048576).toFixed(1) + ' MB' : '—'}</td>
+        <td>${v.force_update ? '<span class="tag force">强制</span>' : '普通'}</td>
+        <td>${esc((v.published_at || '').slice(0, 16))}</td>
+        <td>${esc(v.author)}</td>
+        <td>${v.is_current ? '' : `<button class="btn ghost sm" data-cur="${v.id}">设为发布版</button> `}
+            ${v.apk_file ? `<button class="btn ghost sm" data-force="${v.id}" data-cur-flag="${v.force_update ? 1 : 0}">${v.force_update ? '取消强制' : '设为强制'}</button>` : '无 APK'}</td>
+      </tr>`).join('')}</tbody></table>`;
+    box.querySelectorAll('[data-cur]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('确定把该版本设为当前发布版？手机端下次检查更新会提示升级到此版本。')) return;
+        try { await api('PUT', '/app/version/' + b.dataset.cur, { set_current: true }); toast('已切换发布版', true); load(); }
+        catch (e) { toast(e.message); }
+      };
+    });
+    box.querySelectorAll('[data-force]').forEach((b) => {
+      b.onclick = async () => {
+        const to = b.dataset.curFlag === '1' ? false : true;
+        try { await api('PUT', '/app/version/' + b.dataset.force, { force_update: to }); toast(to ? '已设为强制更新' : '已取消强制', true); load(); }
+        catch (e) { toast(e.message); }
+      };
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+$('#pub').onclick = async () => {
+  const btn = $('#pub');
+  const code = Number($('#code').value);
+  const name = $('#name').value.trim();
+  const file = $('#apk').files[0];
+  if (!(code > 0) || !Number.isInteger(code)) return toast('请填写正确的版本号（正整数）');
+  if (!name) return toast('请填写版本名称');
+  if (!file) return toast('请选择 APK 安装包');
+  btn.disabled = true;
+  btn.textContent = '上传中…';
+  try {
+    // 读为 base64 随JSON 提交：与服务端已有的 base64 落盘范式一致，
+    // 省去引入 multipart 解析。APK 几 MB，这个体积可接受。
+    const data = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(',')[1] || '');
+      fr.onerror = () => rej(new Error('读取文件失败'));
+      fr.readAsDataURL(file);
+    });
+    await api('POST', '/app/version', {
+      version_code: code,
+      version_name: name,
+      changelog: $('#log').value.trim(),
+      force_update: $('#force').checked,
+      min_code: $('#minCode').value ? Number($('#minCode').value) : null,
+      apk: { name: file.name, data },
+    });
+    toast('版本 ' + name + ' 发布成功', true);
+    $('#code').value = ''; $('#name').value = ''; $('#log').value = '';
+    $('#minCode').value = ''; $('#force').checked = false; $('#apk').value = '';
+    load();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '发布';
+  }
+};
+
+load();
+</script>
+</body>
+</html>

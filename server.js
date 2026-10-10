@@ -1713,6 +1713,121 @@ route('POST', '/api/app/inspections', ['admin', 'technician', 'inspector'], (req
   ok(res, r);
 });
 
+/* ================= APP 自更新（2026-10-10）================
+ * 现场 APK 侧载是常态，每次升级都要工人自己去 install.html 扫码下载重装。
+ * 这里提供「检查更新 → 下载 APK → 调起系统安装」的闭环：
+ *   GET  /api/app/version?code=N   客户端查询（免登录，未登录也能查，便于登录页提示）
+ *   GET  /api/app/versions         版本列表（管理员）
+ *   POST /api/app/version          发布新版本（管理员，APK 走 base64 上传落盘）
+ *   PUT  /api/app/version/:id      设为当前发布版 / 取消强制
+ *   GET  /apk/<file>               APK 下载（支持 Range，便于断点与进度显示）
+ * 设计要点：
+ *   - 用 version_code 整数比较，字符串比大小会踩 '1.10' < '1.9' 的坑；
+ *   - 发布时自动计算 sha256，客户端下载后校验，避免装到传输损坏的包；
+ *   - 只保留「一个当前发布版」，is_current 用事务互斥，避免并发发布出两个当前版。 */
+const apkDir = () => path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'uploads', 'apk');
+
+/* 对外版本信息（不含落盘文件名等内部字段） */
+function appVersionPublic(r, clientCode) {
+  if (!r) return null;
+  const code = Number(r.version_code);
+  const cc = Number(clientCode || 0);
+  return {
+    version_code: code,
+    version_name: r.version_name,
+    changelog: r.changelog || '',
+    force_update: Number(r.force_update) === 1,
+    min_code: r.min_code == null ? null : Number(r.min_code),
+    apk_size: r.apk_size == null ? null : Number(r.apk_size),
+    apk_sha256: r.apk_sha256 || '',
+    url: r.apk_file ? '/apk/' + encodeURIComponent(r.apk_file) : '',
+    published_at: r.created_at,
+    // 有新版本 = 本地 code 低于发布版；或被 min_code 卡住（低版本被强制拦下）
+    need_update: !!(r.apk_file && (cc < code || (r.min_code != null && cc < Number(r.min_code)))),
+    // 强制更新独立判定：标记为强制时，只要本地低于 min_code（或未设 min_code 但
+    // 低于发布版）都必须拦。不能把它并进 need_update —— 否则 code 高于发布版的
+    // 客户端会被判定「不需要更新」，强制标记形同虚设。
+    forced: !!(r.apk_file && Number(r.force_update) === 1 &&
+      (r.min_code != null ? cc < Number(r.min_code) : cc < code)),
+  };
+}
+// 客户端自查：?code=当前 versionCode（拿不到就不传，仅回最新信息）
+route('GET', '/api/app/version', ['*'], (req, res, _m, _b, _u, q) => {
+  const cur = get('SELECT * FROM app_versions WHERE is_current=1 ORDER BY version_code DESC LIMIT 1');
+  ok(res, { latest: appVersionPublic(cur, (q && q.code) || 0) });
+});
+// 版本列表（管理员/技术员）：含每个版本是否被更新版本取代
+route('GET', '/api/app/versions', ['admin', 'technician'], (req, res) => {
+  const rows = all(`SELECT v.*, u.name AS author FROM app_versions v
+    LEFT JOIN users u ON u.id=v.created_by ORDER BY v.version_code DESC`);
+  ok(res, { versions: rows.map((r) => Object.assign(appVersionPublic(r, 0), {
+    id: r.id, is_current: Number(r.is_current) === 1, author: r.author || '系统',
+  })) });
+});
+/* 发布新版本（管理员）。body: { version_code, version_name, changelog, force_update, min_code, apk:{name,data(base64)} }
+ * 上传体积远大于照片，因此走 PHOTO_BODY_LIMIT（80MB）放宽上限。 */
+route('POST', '/api/app/version', ['admin'], (req, res, _m, b, u) => {
+  const code = Number(b.version_code);
+  if (!(code > 0) || !Number.isInteger(code)) return fail(res, '请填写正确的版本号（正整数）', 400);
+  const name = String(b.version_name || '').trim();
+  if (!name) return fail(res, '请填写版本名称，如 v1.1', 400);
+  if (get('SELECT id FROM app_versions WHERE version_code=?', [code])) return fail(res, '版本号 ' + code + ' 已存在，请改用更大的版本号', 400);
+
+  let apkFile = null, apkSize = null, apkSha = null;
+  if (b.apk && b.apk.data) {
+    const buf = Buffer.from(String(b.apk.data).replace(/^data:[^;]+;base64,/, ''), 'base64');
+    if (!buf.length) return fail(res, 'APK 内容为空', 400);
+    if (buf.length > 80 * 1024 * 1024) return fail(res, 'APK 不能超过 80MB', 400);
+    // 校验 APK 魔数（ZIP 头），防止上传了 HTML 错误页或损坏包
+    if (!(buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04)) {
+      return fail(res, '这不是有效的 APK 文件（文件头损坏）', 400);
+    }
+    apkFile = 'app_' + code + '_' + Date.now() + '.apk';
+    apkSha = crypto.createHash('sha256').update(buf).digest('hex');
+    fs.mkdirSync(apkDir(), { recursive: true });
+    fs.writeFileSync(path.join(apkDir(), apkFile), buf);
+    apkSize = buf.length;
+  }
+  const force = b.force_update ? 1 : 0;
+  const minCode = b.min_code === '' || b.min_code == null ? null : Number(b.min_code);
+  if (minCode != null && !(minCode > 0)) return fail(res, '最低兼容版本号需为正整数', 400);
+  // 强制更新必须带 APK，否则客户端无从安装
+  if (force && !apkFile) return fail(res, '强制更新必须上传 APK 安装包', 400);
+
+  let id;
+  try {
+    tx(() => {
+      run('UPDATE app_versions SET is_current=0 WHERE is_current=1');
+      id = Number(run('INSERT INTO app_versions(version_code,version_name,apk_file,apk_size,apk_sha256,changelog,force_update,min_code,is_current,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,1,?,?)',
+        [code, name, apkFile, apkSize, apkSha, String(b.changelog || ''), force, minCode, u ? u.id : null, now()]).lastInsertRowid);
+    });
+  } catch (e) { return fail(res, e.message, 400); }
+  writeLog(u, '发布APP版本', name + ' (code=' + code + ')' + (force ? ' 强制' : ''));
+  const r = get('SELECT * FROM app_versions WHERE id=?', [id]);
+  ok(res, { version: appVersionPublic(r, 0) });
+});
+/* 设为当前发布版 / 切换强制更新标记（管理员） */
+route('PUT', '/api/app/version/(\\d+)', ['admin'], (req, res, m, b, u) => {
+  const v = get('SELECT * FROM app_versions WHERE id=?', [m[1]]);
+  if (!v) return fail(res, '版本不存在', 404);
+  if (b.set_current) {
+    if (!v.apk_file) return fail(res, '该版本未上传 APK，无法设为发布版', 400);
+    tx(() => {
+      run('UPDATE app_versions SET is_current=0 WHERE is_current=1');
+      run('UPDATE app_versions SET is_current=1 WHERE id=?', [v.id]);
+    });
+    writeLog(u, '切换APP发布版', v.version_name);
+  } else if (b.force_update != null) {
+    const f = b.force_update ? 1 : 0;
+    if (f && !v.apk_file) return fail(res, '该版本未上传 APK，不能设为强制更新', 400);
+    run('UPDATE app_versions SET force_update=? WHERE id=?', [f, v.id]);
+    writeLog(u, f ? '设为强制更新' : '取消强制更新', v.version_name);
+  } else {
+    return fail(res, '请指定 set_current 或 force_update', 400);
+  }
+  ok(res, { version: appVersionPublic(get('SELECT * FROM app_versions WHERE id=?', [v.id]), 0) });
+});
+
 /* ---- 扫码免登录（微信扫码入口）---- */
 // 生成工单报工二维码（管理员/技术员）
 route('GET', '/api/qr/order/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
@@ -4282,7 +4397,9 @@ const server = http.createServer(async (req, res) => {
     try {
       let body = {};
       if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
-        body = await readBody(req, /photos$|upload|import/.test(pathname) ? PHOTO_BODY_LIMIT : DEFAULT_BODY_LIMIT);
+        // version|release|apk 一并放宽到 80MB：发布 APP 版本时整个 APK 以 base64
+        // 随 JSON 提交，几 MB 的包必然超过默认 2MB（base64 还会膨胀约 1/3）。
+        body = await readBody(req, /photos$|upload|import|version|release|apk/.test(pathname) ? PHOTO_BODY_LIMIT : DEFAULT_BODY_LIMIT);
       }
       const query = Object.fromEntries(url.searchParams.entries());
       const match = routes.find((r) => r[0] === method && r[1].test(pathname));
@@ -4330,6 +4447,51 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
       return fs.createReadStream(appFile).pipe(res);
     }
+  }
+
+  // APP 自更新 APK 下载（data/uploads/apk/）。
+  // 支持 Range：客户端要显示下载进度并能断点续传，且系统安装器会自己发起第二次
+  // 带 Range 的请求拉全量包。这里同时把 Content-Disposition 带上，安装器才会
+  // 认出这是 APK 而不是当普通文件存下来。
+  if (pathname.startsWith('/apk/')) {
+    let name;
+    try { name = decodeURIComponent(pathname.slice('/apk/'.length)); }
+    catch (e) { name = pathname.slice('/apk/'.length); }
+    const f = path.join(apkDir(), path.basename(name));
+    if (!f.startsWith(apkDir()) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('404 Not Found');
+    }
+    const stat = fs.statSync(f);
+    const head = {
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Disposition': 'attachment; filename="' + path.basename(name) + '"',
+      'Accept-Ranges': 'bytes',
+    };
+    const range = req.headers.range;
+    if (range) {
+      const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+      // 非法 Range 一律按 416 处理，不能静默忽略后返回全量（否则客户端进度会算错）
+      if (!m) {
+        res.writeHead(416, { 'Content-Range': 'bytes */' + stat.size });
+        return res.end();
+      }
+      let start = m[1] === '' ? null : Number(m[1]);
+      let end = m[2] === '' ? null : Number(m[2]);
+      if (start === null && end !== null) { start = Math.max(0, stat.size - end); end = stat.size - 1; }
+      else { if (start === null) start = 0; if (end === null || end >= stat.size) end = stat.size - 1; }
+      if (!(start >= 0 && start <= end && start < stat.size)) {
+        res.writeHead(416, { 'Content-Range': 'bytes */' + stat.size });
+        return res.end();
+      }
+      res.writeHead(206, Object.assign({}, head, {
+        'Content-Range': 'bytes ' + start + '-' + end + '/' + stat.size,
+        'Content-Length': end - start + 1,
+      }));
+      return fs.createReadStream(f, { start, end }).pipe(res);
+    }
+    res.writeHead(200, Object.assign({}, head, { 'Content-Length': stat.size }));
+    return fs.createReadStream(f).pipe(res);
   }
 
   // SOP/图纸等上传文件（落盘在 data/uploads/，与数据库同卷保证持久化）

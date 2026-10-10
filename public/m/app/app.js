@@ -231,6 +231,7 @@
         case 'mold': return await renderMold(args[0]);
         case 'profile': return await renderProfile();
         case 'password': return await renderPassword();
+        case 'update': return await renderUpdate();
         default: return void okMask('页面不存在', '即将返回工作台', [{ text: '返回', onClick: () => nav('#/home', true) }]);
       }
     } catch (e) {
@@ -606,8 +607,13 @@
         <div class="field"><span>报工人</span><input class="ipt" value="${esc((S.me && S.me.name) || '')}" disabled></div>
         <div class="field"><span>现场拍照留证（选填，最多 3 张）</span>
           <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-            <input type="file" id="rpCam" accept="image/*" capture="environment" multiple hidden>
-            <button class="btn ghost sm" id="rpPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+            <!-- 拍照与相册拆成两个独立控件（2026-10-10 修复）：
+                 合并成一个 input 时，移动端只能拉起图库，无法直接调起摄像头。
+                 capture 需配合「不带 multiple」，否则部分机型忽略 capture 直接进图库。 -->
+            <input type="file" id="rpShot" accept="image/*" capture="environment" hidden>
+            <input type="file" id="rpCam" accept="image/*" multiple hidden>
+            <button class="btn ghost sm" id="rpPhoto" style="flex:0 0 auto">📷 拍照</button>
+            <button class="btn ghost sm" id="rpPick" style="flex:0 0 auto">🖼 从相册选</button>
             <div id="rpPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
           </div></div>
         <button class="btn" id="submit" ${selCount ? '' : 'disabled'}>提交报工（${selCount} 道）</button>
@@ -658,8 +664,10 @@
         box.innerHTML = S.rpPhotos.map((p, i) => `<div style="position:relative"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button data-i="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px">✕</button></div>`).join('');
         box.querySelectorAll('button[data-i]').forEach((b) => b.onclick = () => { S.rpPhotos.splice(Number(b.dataset.i), 1); paintRp(); });
       };
-      rpBtn.onclick = () => $view.querySelector('#rpCam').click();
-      $view.querySelector('#rpCam').onchange = async (e) => {
+      rpBtn.onclick = () => $view.querySelector('#rpShot').click();
+      $view.querySelector('#rpPick').onclick = () => $view.querySelector('#rpCam').click();
+      // 拍照与相册共用同一个处理逻辑，行为对用户一致
+      const onRpPicked = async (e) => {
         for (const f of Array.from(e.target.files || [])) {
           if (S.rpPhotos.length >= 3) { toast('最多 3 张照片'); break; }
           try { S.rpPhotos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (err) { toast('照片读取失败'); }
@@ -667,6 +675,8 @@
         e.target.value = '';
         paintRp();
       };
+      $view.querySelector('#rpShot').onchange = onRpPicked;
+      $view.querySelector('#rpCam').onchange = onRpPicked;
       paintRp();
     }
   }
@@ -1119,8 +1129,12 @@
           <div class="field"><span>异常描述</span><textarea class="ipt" id="ptFindings" rows="2" placeholder="如：极片边缘出现波浪褶皱，位于操作侧…"></textarea></div>
           <div class="field"><span>现场照片（选填，最多 6 张）</span>
             <div id="ptPhotos" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+            <input type="file" id="ptShot" accept="image/*" capture="environment" hidden>
             <input type="file" id="ptFile" accept="image/jpeg,image/png,image/webp" multiple hidden>
-            <button class="btn ghost sm" id="ptAddPhoto" style="margin-top:6px">📷 拍照 / 相册</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn ghost sm" id="ptAddPhoto" style="margin-top:6px">📷 拍照</button>
+              <button class="btn ghost sm" id="ptPickPhoto" style="margin-top:6px">🖼 从相册选</button>
+            </div>
           </div>
           <div class="mask-hint">提交后将自动生成质量异常单，责任管理人员会收到待办通知。</div>
         </div>
@@ -1192,16 +1206,19 @@
       } catch (e) { toast(e.message); }
     };
     if (S.patrol.orderId) { $('#ptOrder').value = S.patrol.orderId; $('#ptOrder').onchange(); }
-    $('#ptAddPhoto').onclick = () => $('#ptFile').click();
-    $('#ptFile').onchange = async () => {
-      const files = [...$('#ptFile').files];
-      $('#ptFile').value = '';
+    $('#ptAddPhoto').onclick = () => $('#ptShot').click();
+    $('#ptPickPhoto').onclick = () => $('#ptFile').click();
+    const onPatrolPicked = async (el) => {
+      const files = [...$(el).files];
+      $(el).value = '';
       for (const f of files) {
         if (S.patrol.photos.length >= 6) { toast('最多 6 张照片'); break; }
         try { S.patrol.photos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (e) { toast('照片读取失败'); }
       }
       paintPhotos();
     };
+    $('#ptShot').onchange = () => onPatrolPicked('#ptShot');
+    $('#ptFile').onchange = () => onPatrolPicked('#ptFile');
     $view.querySelectorAll('[data-pissue]').forEach((el) => {
       if (el.dataset.pissue) el.onclick = () => nav('#/issue/' + el.dataset.pissue);
     });
@@ -1342,8 +1359,10 @@
           <input class="ipt ri-summary" placeholder="如：外观划伤集中出现，疑似模具磨损"></div>
         <div class="field" style="margin-bottom:4px"><span>现场拍照（选填，最多 3 张）</span>
           <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-            <input type="file" id="riCam" accept="image/*" capture="environment" multiple hidden>
-            <button class="btn ghost sm" id="riPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+            <input type="file" id="riShot" accept="image/*" capture="environment" hidden>
+            <input type="file" id="riCam" accept="image/*" multiple hidden>
+            <button class="btn ghost sm" id="riPhoto" style="flex:0 0 auto">📷 拍照</button>
+            <button class="btn ghost sm" id="riPick" style="flex:0 0 auto">🖼 从相册选</button>
             <div id="riPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
           </div></div>
         <button class="btn ok" id="riSubmit" style="width:100%;margin-top:12px">提交上报</button>
@@ -1370,8 +1389,9 @@
         box.innerHTML = S.riPhotos.map((p, i) => `<div style="position:relative"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button data-i="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px">✕</button></div>`).join('');
         box.querySelectorAll('button[data-i]').forEach((b) => b.onclick = () => { S.riPhotos.splice(Number(b.dataset.i), 1); paintRp(); });
       };
-      $view.querySelector('#riPhoto').onclick = () => $view.querySelector('#riCam').click();
-      $view.querySelector('#riCam').onchange = async (e) => {
+      $view.querySelector('#riPhoto').onclick = () => $view.querySelector('#riShot').click();
+      $view.querySelector('#riPick').onclick = () => $view.querySelector('#riCam').click();
+      const onRiPicked = async (e) => {
         for (const f of Array.from(e.target.files || [])) {
           if (S.riPhotos.length >= 3) { toast('最多 3 张照片'); break; }
           try { S.riPhotos.push({ name: f.name || 'photo.jpg', thumb: await compressImage(f), blob: f }); } catch (err) { toast('照片读取失败'); }
@@ -1379,6 +1399,8 @@
         e.target.value = '';
         paintRp();
       };
+      $view.querySelector('#riShot').onchange = onRiPicked;
+      $view.querySelector('#riCam').onchange = onRiPicked;
       paintRp();
     })();
     $view.querySelector('.ri-order').onchange = async (e) => {
@@ -1929,6 +1951,168 @@
     });
   }
 
+  /* ================= APP 自更新（2026-10-10）================
+   * 现场 APK 是侧载的，每次升级都要工人自己找 install.html 扫码重装。
+   * 这里把「查版本 → 下载 APK → 调起系统安装」做成一键闭环。
+   *
+   * 三层协作：
+   *   服务端 /api/app/version 给最新版本号与下载地址；
+   *   原生 AppUpdater 插件负责读本地 versionCode、下载、调起系统安装器
+   *     （WebView 做不到这三件事）；
+   *   本模块负责流程编排、进度展示与升级前的一致性检查。
+   */
+  const UPD = { checking: false, downloading: false, listener: null, last: null };
+
+  /* 拿原生插件；浏览器里打开（本页也可直接用）时返回 null，此时只查版本不提供安装 */
+  function updater() {
+    try {
+      const C = window.Capacitor;
+      if (C && C.Plugins && C.Plugins.AppUpdater) return C.Plugins.AppUpdater;
+    } catch (e) { /* 忽略 */ }
+    return null;
+  }
+  const isApkShell = () => !!updater();
+
+  /* 本地安装版本号：原生读 PackageManager；浏览器（未打包）给 0 表示「按最新对待」 */
+  async function localVersion() {
+    const u = updater();
+    if (!u) return { versionCode: 0, versionName: '网页版' };
+    try { return await u.getAppVersion(); }
+    catch (e) { return { versionCode: 0, versionName: '未知' }; }
+  }
+
+  /* 查询服务端最新版本 */
+  async function fetchLatest() {
+    const lv = await localVersion();
+    const r = await get('/api/app/version?code=' + (lv.versionCode || 0));
+    return { local: lv, latest: (r && r.latest) || null };
+  }
+
+  /* 静默探测：只在有新版本时写 localStorage 供「我的」页打红点，不弹窗打断操作 */
+  async function checkUpdate(opt) {
+    opt = opt || {};
+    if (UPD.checking) return UPD.last;
+    UPD.checking = true;
+    try {
+      const info = await fetchLatest();
+      UPD.last = info;
+      const has = !!(info.latest && info.latest.url &&
+    (info.latest.need_update || info.latest.forced));
+      localStorage.setItem('mes_app_has_update', has ? '1' : '0');
+      const t = document.getElementById('mVerText');
+      if (t) t.innerHTML = (has ? '<b style="color:#dc2626">有新版本</b> ' : '') +
+        esc((info.local.versionName || 'v?')) + ' <span class="chev">›</span>';
+      if (has && !opt.silent) nav('#/update');
+      return info;
+    } catch (e) {
+      if (!opt.silent) toast('检查更新失败：' + (e.message || '网络异常'));
+      return null;
+    } finally {
+      UPD.checking = false;
+    }
+  }
+
+  /* 下载 + 安装：进度靠原生 progress 事件驱动。
+   * 安装前必须拿到「允许安装未知来源应用」授权，Android 8+ 没有就直接调安装会静默失败。 */
+  async function startUpdate(info, onProgress) {
+    const u = updater();
+    if (!u) {
+      // 浏览器环境：退化成打开下载页，最少让用户能手动装
+      if (info && info.latest && info.latest.url) location.href = info.latest.url;
+      return;
+    }
+    const can = await u.canInstallPackages();
+    if (can && can.needSetting) {
+      okMask('需要安装授权',
+        '首次更新需要允许「安装未知来源应用」，这是手机系统的安全设置。点「去设置」打开对应开关后返回 APP 即可继续更新。',
+        [
+          { text: '知道了', onClick: () => {} },
+          { text: '去设置', onClick: () => { u.openInstallPermissionSetting(); } },
+        ]);
+      return;
+    }
+    // 监听进度：原生每秒左右推一次百分比
+    const listener = await u.addListener('downloadProgress', (p) => {
+      if (onProgress) onProgress(p);
+    });
+    await u.downloadApk({ url: info.latest.url, name: 'mes-update-' + info.latest.version_code + '.apk' });
+    return listener;
+  }
+
+  async function renderUpdate() {
+    $view.innerHTML = `<div class="card"><div class="card-b">
+      <div class="empty"><div class="ico">🔄</div><p>正在检查版本…</p></div></div></div>`;
+    const info = await checkUpdate({ silent: true });
+    if (!info) {
+      $view.innerHTML = `<div class="card"><div class="card-b">
+        <div class="empty"><div class="ico">⚠️</div><p>无法连接服务器，请检查网络后重试</p>
+        <div style="margin-top:16px"><button class="btn ghost" id="uRetry" style="max-width:200px;margin:0 auto">重新检查</button></div>
+      </div></div></div>`;
+      const r = $view.querySelector('#uRetry'); if (r) r.onclick = renderUpdate;
+      return;
+    }
+    const { local, latest } = info;
+    // 强制更新：服务端 forced 为真时拦截，不给「稍后再说」的机会
+    const forced = !!(latest && latest.forced);
+    const up = latest && latest.url && (latest.need_update || forced);
+    const size = latest && latest.apk_size ? (latest.apk_size / 1048576).toFixed(1) + ' MB' : '';
+    $view.innerHTML = `
+      <div class="card"><div class="card-h"><h3>当前版本</h3></div><div class="card-b">
+        <div class="row"><span class="k">已安装</span><span class="v">${esc(local.versionName || '未知')}（code ${local.versionCode || 0}）</span></div>
+        ${isApkShell() ? '' : '<div class="hint" style="margin-top:8px">当前在浏览器中打开，无法自动安装。请用安装页扫描二维码安装 APK。</div>'}
+      </div></div>
+
+      ${up ? `
+      <div class="card" style="border-color:#fecaca"><div class="card-h"><h3>发现新版本 ${esc(latest.version_name)}</h3></div><div class="card-b">
+        <div class="row"><span class="k">版本号</span><span class="v">${esc(local.versionName || '')} → <b style="color:#1d4ed8">${esc(latest.version_name)}</b></span></div>
+        <div class="row"><span class="k">安装包</span><span class="v">${esc(size)}</span></div>
+        ${latest.force_update ? '<div class="row"><span class="k">类型</span><span class="v" style="color:#dc2626">强制更新</span></div>' : ''}
+        ${latest.changelog ? `<div style="margin-top:10px"><div class="tiny muted">更新内容</div>
+          <div class="clog" style="margin-top:4px">${esc(latest.changelog).replace(/\n/g, '<br>')}</div></div>` : ''}
+        ${forced ? '<div class="clog" style="margin-top:10px;border-left-color:#dc2626;color:#b91c1c">当前版本已停止使用，必须升级后才能继续操作。</div>' : ''}
+        <div id="uProg" hidden style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between" class="tiny muted">
+            <span>下载中…</span><span id="uPct">0%</span></div>
+          <div class="pbar"><i id="uBar" style="width:0%"></i></div>
+        </div>
+        <button class="btn" id="uDo" style="margin-top:14px">${isApkShell() ? '下载并安装更新' : '下载安装包'}</button>
+      </div></div>` : `
+      <div class="card"><div class="card-b"><div class="empty"><div class="ico">✅</div>
+        <p>已是最新版本${latest ? '：' + esc(latest.version_name) : ''}</p></div></div></div>`}
+      <div style="height:10px"></div>`;
+
+    const doBtn = $view.querySelector('#uDo');
+    if (doBtn) doBtn.onclick = async () => {
+      doBtn.disabled = true;
+      try {
+        // 进度回调必须是 async：里面要 await installApk 调起系统安装器
+        await startUpdate(info, async (p) => {
+          if (!p) return;
+          if (p.error) { toast('下载失败：' + p.error); doBtn.disabled = false; return; }
+          if (p.finished) {
+            toast('下载完成，正在打开安装界面…');
+            try {
+              await updater().installApk({ path: p.path });
+              okMask('请在系统界面确认安装',
+                '点击「安装」完成升级，安装后 APP 会自动重启并使用新版本。更新期间请勿关闭 APP。', []);
+            } catch (e) { toast('无法调起安装：' + e.message); }
+            doBtn.disabled = false;
+            return;
+          }
+          const box = $view.querySelector('#uProg');
+          if (box) box.hidden = false;
+          const bar = $view.querySelector('#uBar'), pct = $view.querySelector('#uPct');
+          if (bar) bar.style.width = (p.percent || 0) + '%';
+          if (pct) pct.textContent = (p.percent || 0) + '%';
+        });
+        if (!isApkShell()) toast('已开始下载安装包，请按浏览器提示安装');
+      } catch (e) {
+        toast('更新失败：' + (e.message || '网络异常'));
+        doBtn.disabled = false;
+      }
+    };
+  }
+
   /* ---------------- 页面：我的 / 改密码 / 改资料 ---------------- */
   async function renderMine() {
     const me = await ensureMe();
@@ -1963,7 +2147,7 @@
       <div class="card nopad">
         ${isManager ? `<div class="list-row" id="mStocks"><span class="k">库存预警</span><span class="chev">›</span></div>` : ''}
         <div class="list-row" id="mRefresh"><span class="k">刷新数据</span><span class="v">拉取最新 <span class="chev">›</span></span></div>
-        <div class="list-row"><span class="k">当前版本</span><span class="v">智工 v1.0</span></div>
+        <div class="list-row" id="mUpdate"><span class="k">检查更新</span><span class="v" id="mVerText">读取中… <span class="chev">›</span></span></div>
       </div>
 
       <div class="card"><div class="card-b"><button class="btn ghost" id="mLogout">退出登录</button></div></div>
@@ -1977,6 +2161,9 @@
     const ms = $view.querySelector('#mStocks');
     if (ms) ms.onclick = () => nav('#/stocks');
     $view.querySelector('#mRefresh').onclick = async () => { await refreshUnread(); toast('已刷新'); renderMine(); };
+    $view.querySelector('#mUpdate').onclick = () => nav('#/update');
+    // 打开「我的」就顺带探一次版本：有新版本时在入口上打红点，不用工人主动去点
+    checkUpdate({ silent: true }).catch(() => { /* 静默失败不打扰 */ });
     $view.querySelector('#mPush').onchange = (e) => {
       localStorage.setItem(LS_PUSH, e.target.checked ? '1' : '0');
       toast(e.target.checked ? '已开启消息通知' : '已关闭消息提醒（角标仍显示）');
@@ -2120,9 +2307,11 @@
       <div class="field"><span>点检说明 / 异常描述</span>
         <input class="ipt" id="eqNote" placeholder="如：主轴异响、漏油、导轨磨损"></div>
       <div class="field"><span>现场拍照（选填，最多 3 张）</span>
-        <input id="eqCam" type="file" accept="image/*" capture="environment" multiple hidden>
+        <input id="eqShot" type="file" accept="image/*" capture="environment" hidden>
+        <input id="eqCam" type="file" accept="image/*" multiple hidden>
         <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-          <button class="btn ghost sm" id="eqPhoto" style="flex:0 0 auto">📷 拍照 / 相册</button>
+          <button class="btn ghost sm" id="eqPhoto" style="flex:0 0 auto">📷 拍照</button>
+          <button class="btn ghost sm" id="eqPick" style="flex:0 0 auto">🖼 从相册选</button>
           <div id="eqPhotos" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         </div></div>
       <div id="eqAb" style="display:none">
@@ -2144,8 +2333,9 @@
       box.innerHTML = eqPhotos.map((p, i) => `<span style="position:relative;display:inline-block"><img src="${p.thumb}" style="width:52px;height:52px;object-fit:cover;border-radius:8px"><button type="button" data-eqpi="${i}" style="position:absolute;top:-6px;right:-6px;background:#d93b3b;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;line-height:1">✕</button></span>`).join('');
       box.querySelectorAll('[data-eqpi]').forEach((b) => b.onclick = () => { eqPhotos.splice(Number(b.dataset.eqpi), 1); paintEqPhotos(); });
     };
-    $view.querySelector('#eqPhoto').onclick = () => $view.querySelector('#eqCam').click();
-    $view.querySelector('#eqCam').onchange = async (e) => {
+    $view.querySelector('#eqPhoto').onclick = () => $view.querySelector('#eqShot').click();
+    $view.querySelector('#eqPick').onclick = () => $view.querySelector('#eqCam').click();
+    const onEqPicked = async (e) => {
       for (const f of Array.from(e.target.files || [])) {
         if (eqPhotos.length >= 3) { toast('最多 3 张照片'); break; }
         try { eqPhotos.push({ name: (f.name || 'photo.jpg').replace(/\.[^.]+$/, '') + '.jpg', thumb: await compressImage(f) }); }
@@ -2154,6 +2344,8 @@
       e.target.value = '';
       paintEqPhotos();
     };
+    $view.querySelector('#eqShot').onchange = onEqPicked;
+    $view.querySelector('#eqCam').onchange = onEqPicked;
     $view.querySelector('#eqGo').onclick = async () => {
       const result = $view.querySelector('#eqResult').value;
       const note = $view.querySelector('#eqNote').value.trim();
@@ -2284,7 +2476,13 @@
       toast('登录已过期，请重新登录');
       nav('#/login', true);
     });
-    if (token()) { startPoll(); refreshUnread(); oqFlush(true); }   // 启动静默同步离线报工
+    if (token()) {
+      startPoll(); refreshUnread(); oqFlush(true);   // 启动静默同步离线报工
+      // 强制更新在启动时就拦，不能等工人点进「我的」才发现版本停用
+      checkUpdate({ silent: true }).then((info) => {
+        if (info && info.latest && info.latest.forced) nav('#/update', true);
+      }).catch(() => { /* 静默失败不打扰 */ });
+    }
     await route();
   }
   $back.onclick = () => {

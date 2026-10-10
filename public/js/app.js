@@ -13,6 +13,7 @@ window.App = {
     { k: 'stats', v: 'stats', t: '报表', roles: ['admin', 'technician', 'worker'] },
     { k: 'logs', v: 'logs', t: '日志', roles: ['admin', 'technician'] },
     { k: 'app', v: 'app', t: '手机端', href: '/install.html', roles: ['admin', 'technician', 'worker', 'inspector'] },
+    { k: 'apprl', v: 'apprl', t: '版本发布', href: '/app-release.html', ico: 'phone', roles: ['admin'] },
     { k: 'board', v: 'board', t: '车间大屏', href: '/board.html', ico: 'dash', roles: ['admin', 'technician', 'worker', 'inspector'] },
     { k: 'manual', v: 'manual', t: '使用手册', href: '/manual.html', ico: 'basic', roles: ['admin', 'technician', 'worker', 'inspector'] },
   ],
