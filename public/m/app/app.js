@@ -2296,5 +2296,26 @@
   // 底部导航：工作台 / 消息 / 我的（此前未绑定点击，导致消息、我的点不开）
   $tabbar.querySelectorAll('.tab').forEach((t) => t.onclick = () => { if (token()) nav('#/' + t.dataset.tab); });
   window.addEventListener('hashchange', route);
+
+  /* 全局错误兜底（2026-10-10 稳定性加固）
+   * 手机端在产线上单手操作，脚本异常过去只会让页面「点了没反应」，
+   * 现场无法自查。现在捕获后直接 toast 提示，并把最近 30 条错误留在
+   * window.__mesErrors 里，用户反馈时可截图/口述具体错误内容。 */
+  window.__mesErrors = [];
+  window.addEventListener('error', (e) => {
+    const msg = (e && e.message) || '脚本执行出错';
+    window.__mesErrors.unshift({ kind: 'error', msg: String(msg).slice(0, 500), page: location.hash || '#/', at: new Date().toLocaleString() });
+    if (window.__mesErrors.length > 30) window.__mesErrors.pop();
+    if (e && e.target && e.target !== window) return;
+    try { toast('页面出错：' + msg, 3000); } catch (e2) { /* 忽略 */ }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const msg = (r && (r.msg || r.message)) || '异步操作失败';
+    window.__mesErrors.unshift({ kind: 'promise', msg: String(msg).slice(0, 500), page: location.hash || '#/', at: new Date().toLocaleString() });
+    if (window.__mesErrors.length > 30) window.__mesErrors.pop();
+    try { toast('操作失败：' + msg, 3000); } catch (e2) { /* 忽略 */ }
+  });
+
   boot();
 })();

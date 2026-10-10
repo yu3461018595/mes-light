@@ -17,8 +17,9 @@ RUN mkdir -p data
 ENV PORT=3000
 EXPOSE 3000
 
-# 健康检查：首页可访问即视为存活
+# 健康检查：调用 /api/health 做真实探活（含数据库查询），
+# 而不只是「首页能否打开」—— 数据库损坏/写锁死时也能被及时发现并重启容器
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "server.js"]

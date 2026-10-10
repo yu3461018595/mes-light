@@ -11,6 +11,7 @@ const D = require('./lib/db');
 const qrcode = require('./public/lib/qrcode.js');
 
 const { all, get, run, insert, tx, seed, hashPassword, log: writeLog, now, today } = D;
+const db = D.db;   // 仅用于健康检查探活与优雅退出时的 WAL checkpoint
 
 const PORT = Number(process.env.PORT || 5173);
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -63,22 +64,38 @@ function json(res, code, data) {
 const ok = (res, data) => json(res, 200, { ok: true, data });
 const fail = (res, msg, code = 400) => json(res, code, { ok: false, msg });
 
-function readBody(req) {
+/* 稳定性加固（2026-10-10）：
+ * 旧实现超过 2MB 直接 req.destroy()，客户端只会看到「网络错误 / Failed to fetch」，
+ * 无法区分是自己网络问题还是服务端限流；且照片接口允许 8MB/张，必然踩中。
+ * 现改为：按路由传入上限 → 超限抛status=413 的错误 → 上层统一回 JSON 提示，
+ * 同时继续把剩余数据读完丢弃（避免半截请求体污染 keep-alive 连接）。
+ * 上限单位为字节，默认 2MB；带base64 照片的路由用 PHOTO_BODY_LIMIT。 */
+const DEFAULT_BODY_LIMIT = 2 * 1024 * 1024;
+// 最多 6 张照片 × 8MB 的原图上限，再留出 base64 膨胀（约 4/3）与 JSON 转义余量
+const PHOTO_BODY_LIMIT = 80 * 1024 * 1024;
+
+function readBody(req, limit = DEFAULT_BODY_LIMIT) {
   return new Promise((resolve, reject) => {
+    let size = 0;
     let b = '';
+    let over = false;
     req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { over = true; b = ''; return; }   // 停止累积但继续排空
       b += c;
-      if (b.length > 2e6) req.destroy();
     });
     req.on('end', () => {
+      if (over) return reject(Object.assign(new Error('请求体过大（上限 ' + Math.round(limit / 1024 / 1024) + 'MB），请压缩后重试'), { status: 413 }));
       if (!b) return resolve({});
       try {
         resolve(JSON.parse(b));
       } catch (e) {
-        reject(new Error('请求体不是合法 JSON'));
+        reject(Object.assign(new Error('请求体不是合法 JSON'), { status: 400 }));
       }
     });
-    req.on('error', reject);
+    // 客户端提前断开：属于网络层问题，不当作服务端错误抛出未捕获异常
+    req.on('aborted', () => reject(Object.assign(new Error('客户端中断请求'), { status: 400, silent: true })));
+    req.on('error', (e) => reject(Object.assign(new Error('请求读取失败：' + (e && e.message)), { status: 400, silent: true })));
   });
 }
 
@@ -219,6 +236,37 @@ route('POST', '/api/profile', [], (req, res, _m, b, u) => {
   run('UPDATE users SET name=? WHERE id=?', [name, u.id]);
   writeLog(u, '修改资料', '姓名改为 ' + name);
   ok(res, get('SELECT id,username,name,role,team,work_center_id FROM users WHERE id=?', [u.id]));
+});
+
+/* ------------------------------ 健康检查 ------------------------------
+ * 稳定性加固（2026-10-10）：此前只有「首页能打开」这种浅层探活，数据库损坏或
+ * 写入锁死时容器仍被判为healthy。这里做真实探活：实际查一次库、记录启动时间与内存，
+ * 供 Docker HEALTHCHECK / deploy/update.sh / 外部监控统一使用。 */
+const START_AT = Date.now();
+route('GET', '/api/health', ['*'], (req, res) => {
+  const t0 = process.hrtime.bigint();
+  let dbOk = true;
+  let dbMsg = '';
+  try {
+    const r = get('SELECT COUNT(1) AS n FROM users');
+    if (!r) throw new Error('users 表查询无结果');
+  } catch (e) {
+    dbOk = false;
+    dbMsg = (e && e.message) || String(e);
+  }
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  const mem = process.memoryUsage();
+  const body = {
+    status: dbOk ? 'ok' : 'degraded',
+    version: '1.0.0',
+    uptimeSec: Math.round((Date.now() - START_AT) / 1000),
+    db: { ok: dbOk, msg: dbMsg, probeMs: Number(ms.toFixed(2)) },
+    mem: { rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576) },
+    time: now(),
+  };
+  // 探活必须轻量：直接返回裸对象，不走 ok() 包装，避免依赖业务封装
+  res.writeHead(dbOk ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  return res.end(JSON.stringify(body));
 });
 
 /* ------------------------------ 元数据 ------------------------------ */
@@ -625,6 +673,14 @@ route('POST', '/api/orders/batch', ['admin', 'technician'], (req, res, _m, b, u)
 });
 
 route('POST', '/api/orders', ['admin', 'technician'], (req, res, _m, b, u) => {
+  // 必填项前置校验（2026-10-10 稳定性加固）：
+  // 此前 product_id / route_id 缺失会把 undefined 直接交给 SQLite 绑定，
+  // 抛 "Provided value cannot be bound" 并被兜底成 500「服务器内部错误」，用户无从下手。
+  // 现在缺什么就明确回什么（400）。
+  if (!b.product_id || !(num(b.product_id) > 0)) return fail(res, '请选择产品', 400);
+  if (!b.route_id || !(num(b.route_id) > 0)) return fail(res, '请选择工艺路线', 400);
+  if (!get('SELECT id FROM products WHERE id=?', [num(b.product_id)])) return fail(res, '所选产品不存在，请重新选择', 400);
+  if (!get('SELECT id FROM routes WHERE id=?', [num(b.route_id)])) return fail(res, '所选工艺路线不存在，请重新选择', 400);
   const qty = Math.max(1, Math.floor(num(b.qty_plan, 1)));
   const code = b.code && b.code.trim() ? b.code.trim()
     : 'WO' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + String(Math.floor(Math.random() * 9000) + 1000);
@@ -4212,13 +4268,22 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('400 Bad Request');
   }
-  const pathname = decodeURIComponent(url.pathname);
+  // decodeURIComponent 对非法百分号序列（如 /api/%E0%A4%A）会抛 URIError，
+  // 此前它在任何 try 之外 → 变成未处理 Promise 拒绝，请求永远不返回。此处降级为原样路径。
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch (e) {
+    pathname = url.pathname;
+  }
+  const method = req.method;
 
   if (pathname.startsWith('/api/')) {
     try {
-      const method = req.method;
       let body = {};
-      if (method === 'POST' || method === 'PUT' || method === 'PATCH') body = await readBody(req);
+      if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+        body = await readBody(req, /photos$|upload|import/.test(pathname) ? PHOTO_BODY_LIMIT : DEFAULT_BODY_LIMIT);
+      }
       const query = Object.fromEntries(url.searchParams.entries());
       const match = routes.find((r) => r[0] === method && r[1].test(pathname));
       if (!match) return fail(res, '接口不存在：' + method + ' ' + pathname, 404);
@@ -4236,7 +4301,12 @@ const server = http.createServer(async (req, res) => {
       if (!u0) return fail(res, '未登录或登录已过期', 401);
       return fn(req, res, m, body, u0, query);
     } catch (e) {
-      return fail(res, e.message || '服务器内部错误', 500);
+      // 业务错误自带 status；未预期的异常统一 500，并保留堆栈到服务端日志便于排查
+      const code = e && e.status ? e.status : 500;
+      if (code >= 500) console.error('[接口异常]', method, pathname, (e && e.stack) || e);
+      if (!res.headersSent) return fail(res, e.message || '服务器内部错误', code);
+      try { res.end(); } catch (e2) { /* 连接已断开 */ }
+      return;
     }
   }
 
@@ -4284,20 +4354,83 @@ const server = http.createServer(async (req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 
-// 兜底：任何未预料到的异常都只记录日志，不让服务进程退出
-process.on('uncaughtException', (e) => console.error('[未捕获异常]', e.message));
-process.on('unhandledRejection', (e) => console.error('[未处理 Promise 拒绝]', e && e.message));
+/* 进程级兜底：任何未预料到的异常都记录完整堆栈，但不让服务进程退出。
+ * 记录堆栈而非仅 message —— 否则线上出问题时日志里只有一句中文提示，无法定位。 */
+process.on('uncaughtException', (e) => {
+  console.error('[未捕获异常]', (e && e.stack) || e);
+  try { writeLog(null, '系统异常', 'uncaughtException: ' + ((e && e.stack) || e)); } catch (e2) { /* 兜底再失败则忽略 */ }
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[未处理 Promise 拒绝]', (e && e.stack) || e);
+  try { writeLog(null, '系统异常', 'unhandledRejection: ' + ((e && e.stack) || e)); } catch (e2) { /* 忽略 */ }
+});
+
+/* 优雅退出（2026-10-10）：docker compose down / update.sh 更新时会发 SIGTERM。
+ * 旧实现直接被杀死——进行中的请求被截断、WAL 未 checkpoint 就退出会留下需要恢复的日志。
+ * 现按「停止收新连接 → 等待在途请求 → WAL checkpoint → 关库 → 退出」顺序收尾，
+ * 超时强制退出兜底，避免因长连接（如扫码长轮询）导致容器永远停不下来。 */
+let shuttingDown = false;
+let finished = false;
+function gracefulExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('[优雅退出] 收到 ' + signal + '，开始停止服务...');
+  try { server.close(() => finishExit()); } catch (e) { finishExit(); }
+  // 主动断开空闲 keep-alive 连接，否则 server.close() 会一直等它们自然超时
+  try { if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections(); } catch (e) { /* 旧版Node 忽略 */ }
+  // 这两个定时器刻意不加 unref()：必须把事件循环「钉住」直到收尾完成。
+  // 此前误加 unref()，连接排空后进程会在 checkpoint 之前自然退出，导致退出码异常、事务未落盘。
+  setTimeout(finishExit, 3000);   // 3s 内收不到在途请求则强制收尾
+  setTimeout(() => {
+    console.error('[优雅退出] 超时 8s，强制退出（可能有长连接未结束）');
+    process.exit(1);
+  }, 8000);
+}
+function finishExit() {
+  if (finished) return;
+  finished = true;
+  try {
+    // WAL 落盘：确保已提交事务全部进入主库文件，重启后无需再跑恢复
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    db.close();
+    console.log('[优雅退出] 数据库已 checkpoint 并关闭，进程退出');
+  } catch (e) {
+    console.error('[优雅退出] 关闭数据库时出错（不影响退出）', e && e.message);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulExit('SIGTERM'));
+process.on('SIGINT', () => gracefulExit('SIGINT'));
+
+/* 定时任务包装器（2026-10-10）：
+ * 1) 防重入 —— 数据量增长后一次扫描可能超过间隔时间，不加锁会叠加执行、
+ *    同一批异常被重复提醒/升级，且 SQLite 同步写事务互相争锁；
+ * 2)异常隔离 —— 任一扫描抛错只记日志，不会因未捕获异常影响服务或后续扫描。 */
+const tickBusy = new Set();
+function safeTick(fn, name) {
+  return function () {
+    if (tickBusy.has(name)) return;
+    tickBusy.add(name);
+    try {
+      fn();
+    } catch (e) {
+      console.error('[定时任务异常]', name, (e && e.stack) || e);
+    } finally {
+      tickBusy.delete(name);
+    }
+  };
+}
 
 // 质量异常超时扫描（未认领抄送 / 超时升级），每分钟一次
 // unref()：不作为进程存活的理由——被测试/脚本 require 时可正常退出
-setInterval(scanOverdueIssues, 60 * 1000).unref();
-setTimeout(scanOverdueIssues, 5 * 1000).unref();
+setInterval(safeTick(scanOverdueIssues, 'scanOverdueIssues'), 60 * 1000).unref();
+setTimeout(safeTick(scanOverdueIssues, 'scanOverdueIssues'), 5 * 1000).unref();
 // 待检超时提醒：每 5 分钟扫一次，启动 10 秒后首扫
-setInterval(scanInspectOverdue, 5 * 60 * 1000).unref();
-setTimeout(scanInspectOverdue, 10 * 1000).unref();
+setInterval(safeTick(scanInspectOverdue, 'scanInspectOverdue'), 5 * 60 * 1000).unref();
+setTimeout(safeTick(scanInspectOverdue, 'scanInspectOverdue'), 10 * 1000).unref();
 // 库存预警：启动 15 秒后首扫，之后每 10 分钟一次
-setInterval(scanStockAlertsTick, 10 * 60 * 1000).unref();
-setTimeout(scanStockAlertsTick, 15 * 1000).unref();
+setInterval(safeTick(scanStockAlertsTick, 'scanStockAlertsTick'), 10 * 60 * 1000).unref();
+setTimeout(safeTick(scanStockAlertsTick, 'scanStockAlertsTick'), 15 * 1000).unref();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('');

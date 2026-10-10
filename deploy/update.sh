@@ -69,8 +69,25 @@ else
 fi
 
 say "== 4/4 健康检查 =="
-CODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || echo 000)
-say "   首页 HTTP 状态： $CODE"
+# 用真实探活接口（含数据库查询），而不是只看首页能否打开
+HEALTH=$(curl -s -m 8 http://127.0.0.1:8080/api/health || echo '')
+CODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health || echo 000)
+say "   /api/health HTTP 状态： $CODE"
+if [ "$CODE" = "200" ]; then
+  say "   探活结果： $HEALTH"
+else
+  warn "健康检查未通过！请立即查看日志： docker logs --tail 100 mes-light"
+  warn "如数据库异常，可回滚： cp $BKF ${APP_DIR}/data/mes.db && cd $APP_DIR && docker compose -f docker-compose.yml -f deploy/docker-compose.ip.yml up -d"
+  exit 1
+fi
+
+# 等容器健康状态转为 healthy（最多 60s），确认后再提示更新完成
+for i in $(seq 1 12); do
+  ST=$(docker inspect --format '{{.State.Health.Status}}' mes-light 2>/dev/null || echo none)
+  [ "$ST" = "healthy" ] && { say "   容器状态： healthy"; break; }
+  [ "$ST" = "unhealthy" ] && { warn "   容器状态： unhealthy，请检查日志"; break; }
+  sleep 5
+done
 
 say ""
 say "更新完成。若页面异常，可回滚数据库："

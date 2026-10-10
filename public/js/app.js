@@ -125,4 +125,33 @@ window.App = {
   },
 };
 
+/*全局错误兜底（2026-10-10稳定性加固）
+ * 此前任何渲染期异常都会直接抛到控制台，用户看到的是「白屏 + 按钮无反应」，
+ * 既不知发生了什么，也不知道该做什么，客服只能靠猜。
+ * 现在：脚本错误与 Promise 拒绝都会弹出可读提示，并把最近若干条错误留在内存中，
+ * 便于用户截图反馈时定位（Store.lastErrors 可在控制台查看）。 */
+(function installGlobalErrorGuard() {
+  const buf = [];
+  try { if (window.Store) window.Store.lastErrors = buf; } catch (e) { /* 忽略 */ }
+  const push = (kind, msg) => {
+    try {
+      buf.unshift({ kind, msg: String(msg).slice(0, 500), page: location.hash || '#/', at: new Date().toLocaleString() });
+      if (buf.length > 30) buf.pop();
+    } catch (e) { /* 忽略 */ }
+  };
+  window.addEventListener('error', (e) => {
+    const msg = (e && e.message) || '脚本执行出错';
+    push('error', msg);
+    // 资源加载失败（<img>/<script>）不弹提示，避免干扰正常操作
+    if (e && e.target && e.target !== window) return;
+    try { if (window.UI && UI.toast) UI.toast('页面出错：' + msg + '（可刷新重试）', 'err'); } catch (e2) { /* 忽略 */ }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const msg = (r && (r.msg || r.message)) || '异步操作失败';
+    push('promise', msg);
+    try { if (window.UI && UI.toast) UI.toast('操作失败：' + msg, 'err'); } catch (e2) { /* 忽略 */ }
+  });
+})();
+
 document.addEventListener('DOMContentLoaded', App.boot);
