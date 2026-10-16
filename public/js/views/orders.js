@@ -602,12 +602,13 @@ Views.orders = {
   },
 
   async detail(el, id) {
-    const [o, meta, issues, matIssues, shipments] = await Promise.all([
+    const [o, meta, issues, matIssues, shipments, atts] = await Promise.all([
       API.get('/orders/' + id),
       API.get('/meta'),
       API.get('/quality_issues').catch(() => []),
       API.get('/material_issues?order_id=' + id).catch(() => []),
       API.get('/stock_shipments?order_id=' + id).catch(() => []),
+      API.get('/orders/' + id + '/attachments').catch(() => []),
     ]);
     const myIssues = (issues || []).filter((x) => Number(x.order_id) === Number(id));
     const openIssues = myIssues.filter((x) => ['open', 'processing', 'verifying'].includes(x.status));
@@ -670,6 +671,18 @@ Views.orders = {
           ${o.close_reason ? `<div class="small"><span class="muted">关闭原因：</span><span class="chip chip-gray">${UI.esc(o.close_reason)}</span></div>` : ''}
         </div>
       </div></div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h"><h3>作业指导书与图纸</h3>
+          <span class="small muted">操作工与检验员打开报工页时可见，不用来回找技术员要文件</span>
+          <div class="spacer"></div>
+          ${canEdit ? `
+            <button class="btn btn-sm" id="attSop" title="上传本工单的作业指导书">📖 传作业指导书</button>
+            <button class="btn btn-sm" id="attDraw" title="上传本工单的图纸（PDF/图片/CAD）">📐 传图纸</button>
+            <button class="btn btn-sm btn-ghost" id="attOther" title="上传其他技术资料">📎 其他</button>` : ''}
+        </div>
+        <div class="card-b tight" id="attBox"></div>
+      </div>
 
       <div class="card" style="margin-bottom:14px">
         <div class="card-h"><h3>工序进度</h3><span class="small muted">共 ${o.steps.length} 道工序 · ${o.steps.filter((s) => String(s.inspect_type || '').trim()).length} 个检验点</span>
@@ -784,6 +797,69 @@ Views.orders = {
     const printBtn = el.querySelector('#printBtn');
     if (printBtn) printBtn.onclick = () => this.printCard(o);
     el.querySelectorAll('[data-qi]').forEach((b) => b.onclick = () => location.hash = '#/quality/issue/' + b.dataset.qi);
+    /* ---- 工单附件（作业指导书 / 图纸）----
+     * 单独渲染而非拼进 innerHTML：附件可增删，改完只要重画这块，不必整页重刷，
+     * 现场大屏或工单有几百条报工流水时重刷代价太高。 */
+    const ATT_ICON = { sop: '📖', drawing: '📐', other: '📎' };
+    const fmtSize = (n) => !n ? '' : (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+    function paintAttach() {
+      const box = el.querySelector('#attBox');
+      if (!box) return;
+      const list = atts || [];
+      if (!list.length) {
+        box.innerHTML = `<div class="small muted" style="padding:14px 2px">暂无附件。${
+          canEdit ? '点右上角按钮上传本工单的作业指导书或图纸 —— 上传后操作工与检验员在手机上打开报工页即可看到。' : ''}</div>`;
+        return;
+      }
+      box.innerHTML = UI.table([
+        { t: '', w: '34px', f: (r) => ATT_ICON[r.kind] || '📎' },
+        { t: '类型', w: '110px', f: (r) => `<span class="chip ${r.kind === 'drawing' ? 'chip-info' : r.kind === 'sop' ? 'chip-warn' : 'chip-gray'}">${UI.esc(r.kind_label)}</span>` },
+        { t: '文件', f: (r) => `<a class="link" href="${r.url}" target="_blank" rel="noopener" title="${r.previewable ? '点击预览' : '点击下载'}">${UI.esc(r.title)}</a>
+            ${r.previewable ? '<span class="small muted">（点击预览）</span>' : `<span class="small muted">（${UI.esc((r.ext || '').replace('.', '').toUpperCase())} 需下载后查看）</span>`}` },
+        { t: '大小', align: 'right', w: '80px', f: (r) => `<span class="small mono">${fmtSize(r.size)}</span>` },
+        { t: '上传', w: '150px', f: (r) => `<span class="small muted">${UI.esc(r.author)} · ${UI.esc((r.created_at || '').slice(5, 16))}</span>` },
+        { t: '', align: 'right', w: canEdit ? '90px' : '60px', f: (r) =>
+            `<a class="btn btn-sm btn-ghost" href="${r.url}" download="${UI.esc(r.title)}">下载</a>`
+            + (canEdit ? ` <button class="btn btn-sm btn-danger" data-attdel="${r.id}" title="删除附件">删</button>` : '') },
+      ], list);
+      box.querySelectorAll('[data-attdel]').forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm('确定删除该附件？删除后手机端报工页将不再显示。')) return;
+          try { await API.del('/orders/' + id + '/attachments/' + b.dataset.attdel); UI.toast('已删除', 'ok'); this.render(el, id); }
+          catch (e) { UI.toast(e.message); }
+        };
+      });
+    }
+    paintAttach();
+    /* 附件上传：先让技术员选文件类型（作业指导书/图纸/其他），再读文件。
+     * 与工序 SOP 一致走 base64，服务端落 data/uploads/。 */
+    const attUpload = (kind, label) => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      // 图片/文档都放开；CAD 图纸 (.dwg/.dxf) 有些手机文件选择器不认，accept 留空最稳
+      inp.onchange = async () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return;
+        if (f.size > 20 * 1024 * 1024) return UI.toast('文件不能超过 20MB');
+        UI.toast('上传中…');
+        try {
+          const data = await new Promise((res, rej) => {
+            const fr = new FileReader();
+            fr.onload = () => res(String(fr.result).split(',')[1] || '');
+            fr.onerror = () => rej(new Error('读取文件失败'));
+            fr.readAsDataURL(f);
+          });
+          await API.post('/orders/' + id + '/attachments', { kind, name: f.name, title: f.name, data });
+          UI.toast(label + '已上传', 'ok');
+          this.render(el, id);
+        } catch (e) { UI.toast('上传失败：' + e.message); }
+      };
+      inp.click();
+    };
+    const aS = el.querySelector('#attSop'); if (aS) aS.onclick = () => attUpload('sop', '作业指导书');
+    const aD = el.querySelector('#attDraw'); if (aD) aD.onclick = () => attUpload('drawing', '图纸');
+    const aO = el.querySelector('#attOther'); if (aO) aO.onclick = () => attUpload('other', '资料');
+
     const nqi = el.querySelector('#newQI');
     if (nqi) nqi.onclick = () => Views.quality.newIssueForm();
     const cfgBad = el.querySelector('#cfgBad');

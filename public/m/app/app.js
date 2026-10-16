@@ -499,6 +499,35 @@
   }
 
   /* ---------------- 页面：报工 ---------------- */
+  /* 工单附件预览（报工页与质检台共用）。
+   * 图片内嵌大图，PDF 内嵌 iframe；CAD/Office 等浏览器打不开的类型不硬试预览，
+   * 直接引导下载 —— 现场点一下白屏会以为 APP 坏了，这类体验必须避免。 */
+  function openAttach(a) {
+    if (!a) return;
+    if (!a.previewable) {
+      okMask('需要下载后查看',
+        `「${esc(a.title)}」是 ${esc((a.ext || '').replace('.', '').toUpperCase())} 格式，手机不能直接预览。点下方按钮下载后，用 CAD / Office / WPS 等对应软件打开。`,
+        [
+          { text: '取消', onClick: () => {} },
+          { text: '下载文件', onClick: () => { location.href = a.url; } },
+        ]);
+      return;
+    }
+    const isImg = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].indexOf(a.ext) >= 0;
+    const m = sheet(`<div style="display:flex;align-items:center;gap:10px;padding:2px 0 10px">
+        <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.title)}</b>
+        <a class="btn sm ghost" href="${a.url}" target="_blank" rel="noopener" style="flex:0 0 auto">新窗口</a>
+        <button class="btn sm" id="attDl" style="flex:0 0 auto">下载</button>
+      </div>
+      <div style="max-height:66vh;overflow:auto;text-align:center;background:#f2f4f8;border-radius:10px;padding:8px">
+        ${isImg ? `<img src="${a.url}" alt="${esc(a.title)}" style="max-width:100%;height:auto;display:block;margin:0 auto">`
+          : `<iframe src="${a.url}" style="width:100%;height:64vh;border:0;background:#fff"></iframe>`}
+      </div>
+      <div class="tiny muted" style="padding:10px 2px 0">加载不出来？点「下载」保存到手机后查看。</div>`);
+    const dl = m.querySelector('#attDl');
+    if (dl) dl.onclick = () => { location.href = a.url; };
+  }
+
   async function renderOrder(orderId) {
     if (!orderId) {
       const r = await get('/api/app/my_orders');
@@ -509,6 +538,8 @@
     const data = await get('/api/app/order/' + orderId);
     S.order = data.order; S.steps = data.steps || []; S.workers = data.workers || [];
     S.badReasons = data.badReasons || [];
+    // 工单附件（作业指导书/图纸）：操作工与检验员在报工页直接查看本单资料
+    S.attachments = data.attachments || [];
     S.sel = new Set(); S.vals = {}; S.rpPhotos = []; S.rpInit = false;
     paintOrder();
   }
@@ -595,6 +626,24 @@
         <div class="bar" style="margin-top:10px"><i style="width:${pct}%"></i></div>
         <div class="prog-txt"><span>已完工 ${o.qty_done}/${o.qty_plan}</span><span>${pct}%</span></div>
       </div></div>
+      ${(() => {
+        /* 工单附件（作业指导书 / 图纸）：放在工序列表之前 —— 现场习惯是先看图纸再干活，
+         * 埋在页面底部等于没有。图片与 PDF 点开直接预览，其余格式引导下载。 */
+        const list = S.attachments || [];
+        if (!list.length) return '';
+        const ic = { sop: '📖', drawing: '📐', other: '📎' };
+        const fsize = (n) => !n ? '' : (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.max(1, Math.round(n / 1024)) + 'KB');
+        return `<div class="card"><div class="card-h"><h3>作业指导书与图纸</h3>
+            <span class="tiny muted">${list.length} 份</span></div>
+          <div class="card-b tight">
+            ${list.map((a, i) => `<div class="list-row" data-att="${i}" style="cursor:pointer">
+              <span class="k">${ic[a.kind] || '📎'} ${esc(a.title)}</span>
+              <span class="v"><span class="tiny muted">${esc(a.kind_label)} ${fsize(a.size)}</span> <span class="chev">›</span></span>
+            </div>`).join('')}
+          </div>
+          <div class="tiny muted" style="padding:0 15px 12px">点任意一行查看${list.some((a) => !a.previewable) ? '；非图片/PDF 格式会下载后用对应软件打开' : ''}。</div>
+        </div>`;
+      })()}
       ${closed ? `<div class="card"><div class="card-b center muted">该工单已${o.status === 'closed' ? '关闭' : '完成'}，不可再报工。</div></div>`
       : `<div class="card"><div class="card-h"><h3>选择工序（可多选）</h3>
           <div style="display:flex;gap:12px">
@@ -630,6 +679,11 @@
       if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id);
       paintOrder();
     });
+    /* 附件点击：预览逻辑在 openAttach（与质检台共用） */
+    $view.querySelectorAll('[data-att]').forEach((row) => {
+      row.onclick = () => openAttach((S.attachments || [])[Number(row.dataset.att)]);
+    });
+
     $view.querySelector('#selAll').onclick = () => { readVals(); S.steps.forEach((s) => { if (canReport(s)) S.sel.add(s.id); }); paintOrder(); };
     $view.querySelector('#selNone').onclick = () => { readVals(); S.sel.clear(); paintOrder(); };
     S.steps.forEach((s) => {
@@ -971,7 +1025,17 @@
             <span class="badge ${isFinal ? 'b-paused' : 'b-released'}">${esc(INSPECT_LABEL[s.inspect_type] || '检验')}</span></div>
           <div class="pname">${esc(s.product_name || '')} · 计划 ${s.qty_plan} · 已报合格 ${s.qty_good}${s.qty_bad ? ' · 自报不良 ' + s.qty_bad : ''}</div>
           <div class="pname">指派班组 ${esc(s.assignee_team || '暂无')} · 最近报工人 ${esc(s.last_worker || '—')}</div>
-          ${s.sop_file ? `<div class="t3" style="margin-top:4px"><a class="qc-sop" href="/uploads/${encodeURIComponent(s.sop_file)}" target="_blank" rel="noopener">📄 图纸/SOP：${esc(s.sop_name || '点击查看')}</a></div>` : ''}
+          ${s.sop_file ? `<div class="t3" style="margin-top:4px"><a class="qc-sop" href="/uploads/${encodeURIComponent(s.sop_file)}" target="_blank" rel="noopener">📄 工序图纸/SOP：${esc(s.sop_name || '点击查看')}</a></div>` : ''}
+          ${(() => {
+            /* 工单级附件（作业指导书/图纸）：与上面的工序 SOP 互补 ——
+             * SOP 是这道工序的通用做法，工单附件是这一单的特殊要求（客户图纸等）。 */
+            const atts = Array.isArray(s.attachments) ? s.attachments : [];
+            if (!atts.length) return '';
+            const ic = { sop: '📖', drawing: '📐', other: '📎' };
+            return `<div class="t3" style="margin-top:6px">本单资料：
+              ${atts.map((a, i) => `<a class="qc-att" data-qatt="${s.order_step_id}:${i}" href="javascript:void(0)"
+                style="color:#1d4ed8;margin-right:8px">${ic[a.kind] || '📎'}${esc(a.title)}</a>`).join('')}</div>`;
+          })()}
           <div style="margin-top:12px">
             <div class="field" style="margin-bottom:10px"><span>检验方式</span>
               <select class="ipt qi-mode"><option value="full">全检</option><option value="sample">抽检</option></select></div>
@@ -1047,6 +1111,15 @@
       });
     });
     $view.querySelectorAll('[data-judge]').forEach((b) => b.onclick = () => submitInspect(b.dataset.judge, b.dataset.cc));
+    /* 本单资料点击：质检员在待检队列里就要能调出图纸核对，不用退回工单去找 */
+    $view.querySelectorAll('[data-qatt]').forEach((a) => {
+      a.onclick = () => {
+        const parts = a.dataset.qatt.split(':');
+        const step = (list || []).find((x) => String(x.order_step_id) === parts[0]);
+        const att = step && Array.isArray(step.attachments) ? step.attachments[Number(parts[1])] : null;
+        if (att) openAttach(att);
+      };
+    });
   }
 
   async function submitInspect(stepId, conclusion) {

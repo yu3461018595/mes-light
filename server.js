@@ -1698,7 +1698,8 @@ route('GET', '/api/app/order/(\\d+)', [], (req, res, m, _b, u) => {
   const allR = all('SELECT id,name FROM bad_reasons ORDER BY id');
   const sel = all('SELECT bad_reason_id FROM order_bad_reasons WHERE order_id=?', [m[1]]).map((r) => r.bad_reason_id);
   const badReasons = (sel.length ? allR.filter((r) => sel.includes(r.id)) : allR).map((r) => ({ id: r.id, name: r.name }));
-  ok(res, { order: o, steps, workers: [{ id: u.id, name: u.name, team: u.team }], badReasons });
+  // 一并带出工单附件：操作工打开报工页就能看到本单的作业指导书与图纸
+  ok(res, { order: o, steps, workers: [{ id: u.id, name: u.name, team: u.team }], badReasons, attachments: listOrderAttach(o.id) });
 });
 // APP 提交报工（登录态代填 worker_id=本人；doReport 内部自带事务）
 route('POST', '/api/app/reports', [], (req, res, _m, b, u) => {
@@ -2087,8 +2088,82 @@ route('POST', '/api/molds/(\\d+)/scrap', ['admin', 'technician'], (req, res, m, 
 });
 
 
-// ------------------------------ 工序 SOP / 图纸附件（P1） ------------------------------
+// ------------------------------ 工单附件（作业指导书 / 图纸） ------------------------------
+/* 与工序 SOP 的区别：工序 SOP 是「这道工序怎么做」，工单附件是「这一单的特殊要求」。
+ * 同一个零件给不同客户生产时图纸可能不同，所以挂在工单上而不是产品上。
+ * 现场价值：操作工打开报工页就能看到本单图纸与作业指导书，不用来回找技术员要文件。 */
+const ATT_KINDS = { sop: '作业指导书', drawing: '图纸', other: '其他资料' };
+// 附件白名单：SOP_EXT（工序那块定义的文档/图片类型）+ CAD 图纸与压缩包。
+// SOP_EXT 定义在本区块之后，这里先就地声明扩展名数组，SOP_EXT 保持原处不动。
 const SOP_EXT = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.txt'];
+const ATT_EXT = SOP_EXT.concat(['.dwg', '.dxf', '.step', '.stp', '.igs', '.iges', '.zip', '.rar', '.7z', '.mp4', '.mov']);
+
+/* 对外结构：带可预览标记，前端据此决定「点开看」还是「下载」 */
+function attachPublic(r) {
+  const ext = (r.ext || '').toLowerCase();
+  return {
+    id: r.id,
+    kind: r.kind,
+    kind_label: ATT_KINDS[r.kind] || '其他资料',
+    title: r.title || r.name || '附件',
+    file: r.file,
+    ext,
+    size: r.size,
+    // 图片与 PDF 浏览器可直接渲染，其余一律走下载
+    previewable: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf'].includes(ext),
+    url: '/uploads/' + encodeURIComponent(r.file),
+    created_at: r.created_at,
+    author: r.author || '系统',
+  };
+}
+function listOrderAttach(orderId) {
+  return all(`SELECT a.*, u.name AS author FROM order_attachments a
+    LEFT JOIN users u ON u.id = a.created_by WHERE a.order_id=? ORDER BY a.kind, a.id`, [orderId])
+    .map((r) => attachPublic(Object.assign({ name: path.basename(r.file) }, r)));
+}
+// 工单附件列表（登录即可读：操作工与检验员都要能看到）
+route('GET', '/api/orders/(\\d+)/attachments', [], (req, res, m, _b, u) => {
+  if (!u) return fail(res, '未登录', 401);
+  const o = get('SELECT id,code FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  ok(res, { attachments: listOrderAttach(o.id) });
+});
+/* 上传工单附件（管理员/技术员）：JSON base64，单文件 ≤20MB
+ * 一个工单可有多份（如 3 张图纸 + 1 份作业指导书），所以是新增而非替换。 */
+route('POST', '/api/orders/(\\d+)/attachments', ['admin', 'technician'], (req, res, m, b, u) => {
+  const o = get('SELECT id,code FROM orders WHERE id=?', [m[1]]);
+  if (!o) return fail(res, '工单不存在', 404);
+  const kind = ATT_KINDS[b.kind] ? b.kind : 'other';
+  if (!b.name) return fail(res, '请选择要上传的文件');
+  const buf = Buffer.from(String(b.data || '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+  if (!buf.length) return fail(res, '文件内容为空');
+  if (buf.length > 20 * 1024 * 1024) return fail(res, '单个文件不能超过 20MB');
+  const safe = String(b.name).replace(/[\\/:*?"<>|]/g, '_').slice(-120);
+  const ext = path.extname(safe).toLowerCase();
+  if (!ATT_EXT.includes(ext)) return fail(res, '不支持的文件格式' + ext + '，可上传：' + SOP_EXT.join(' '));
+  const dir = uploadDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const fname = 'ordatt_' + o.id + '_' + Date.now() + '_' + safe;
+  fs.writeFileSync(path.join(dir, fname), buf);
+  const title = String(b.title || '').trim().slice(0, 80);
+  const id = insert('INSERT INTO order_attachments(order_id,kind,title,file,ext,size,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)',
+    [o.id, kind, title || safe, fname, ext, buf.length, u ? u.id : null, now()]);
+  writeLog(u, '上传工单附件', o.code + ' [' + ATT_KINDS[kind] + '] ' + safe);
+  const r = get(`SELECT a.*, u.name AS author FROM order_attachments a LEFT JOIN users u ON u.id=a.created_by WHERE a.id=?`, [id]);
+  ok(res, { attachment: attachPublic(r) });
+});
+/* 删除工单附件（管理员/技术员） */
+route('DELETE', '/api/orders/\\d+/attachments/(\\d+)', ['admin', 'technician'], (req, res, m, _b, u) => {
+  const a = get(`SELECT a.*, o.code FROM order_attachments a JOIN orders o ON o.id=a.order_id WHERE a.id=?`, [m[1]]);
+  if (!a) return fail(res, '附件不存在', 404);
+  try { fs.unlinkSync(path.join(uploadDir(), a.file)); } catch (e) { /* 文件可能已被手动清理 */ }
+  run('DELETE FROM order_attachments WHERE id=?', [a.id]);
+  writeLog(u, '删除工单附件', a.code + ' ' + a.file);
+  ok(res, { ok: true });
+});
+
+// ------------------------------ 工序 SOP / 图纸附件（P1） ------------------------------
+// SOP_EXT 已在上方「工单附件」区块声明（两处共用同一份白名单，改一处即可）
 function uploadDir() {
   return path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'uploads');
 }
@@ -2743,6 +2818,13 @@ route('GET', '/api/inspections/queue', ['admin', 'technician', 'inspector'], (re
     WHERE s.inspect_status='waiting' AND o.status<>'closed'
     ORDER BY s.id DESC LIMIT 200`);
   attachChecklist(rows);
+  /* 质检员在待检队列里就要能调出本单图纸核对，不该再去翻工单。
+     队列里同一工单可能出现多道待检工序，按 order_id 去重后只查一次附件，避免 N+1。 */
+  const attByOrder = {};
+  for (const oid of [...new Set(rows.map((r) => r.order_id))]) {
+    attByOrder[oid] = listOrderAttach(oid);
+  }
+  for (const r of rows) r.attachments = attByOrder[r.order_id] || [];
   ok(res, { worker: { id: u.id, name: u.name, team: u.team, role: u.role }, steps: rows, badReasons: all('SELECT id,name FROM bad_reasons ORDER BY id') });
 });
 
@@ -4397,9 +4479,11 @@ const server = http.createServer(async (req, res) => {
     try {
       let body = {};
       if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
-        // version|release|apk 一并放宽到 80MB：发布 APP 版本时整个 APK 以 base64
-        // 随 JSON 提交，几 MB 的包必然超过默认 2MB（base64 还会膨胀约 1/3）。
-        body = await readBody(req, /photos$|upload|import|version|release|apk/.test(pathname) ? PHOTO_BODY_LIMIT : DEFAULT_BODY_LIMIT);
+        // photos|upload|import|version|release|apk|attachments 一并放宽到 80MB：
+        // 附件与版本发布都是整文件 base64 提交，几 MB 的包必然超过默认 2MB
+        // （base64 还会膨胀约 1/3）。附件路由名是 /orders/:id/attachments，
+        // 不含 upload 字样，漏了会在到达业务校验前就被 413 拦掉。
+        body = await readBody(req, /photos$|upload|import|version|release|apk|attachments/.test(pathname) ? PHOTO_BODY_LIMIT : DEFAULT_BODY_LIMIT);
       }
       const query = Object.fromEntries(url.searchParams.entries());
       const match = routes.find((r) => r[0] === method && r[1].test(pathname));
